@@ -35,6 +35,9 @@ if [[ -n "${DEPLOY_EXPECTED_SHA}" && "${DEPLOY_EXPECTED_SHA}" != "${remote_sha}"
   echo "Push ${DEPLOY_EXPECTED_SHA} was superseded by ${remote_sha}; deploying the latest origin/${DEPLOY_BRANCH}."
 fi
 
+# This directory is a dedicated deployment checkout. Keep ignored runtime files
+# such as .env and backups, but remove untracked source files from bootstrapping.
+git clean -fd
 git checkout -B "${DEPLOY_BRANCH}" "origin/${DEPLOY_BRANCH}"
 git reset --hard "origin/${DEPLOY_BRANCH}"
 
