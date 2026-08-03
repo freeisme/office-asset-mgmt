@@ -1,0 +1,98 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="theme-color" content="#ffffff" />
+    <title>办公资产中台</title>
+    <link rel="stylesheet" href="styles.css?v=20260803-02" />
+    <script src="app.js?v=20260803-02" defer></script>
+  </head>
+  <body>
+    <div id="authRoot"></div>
+    <div class="app-shell" id="appShell" hidden>
+      <aside class="sidebar">
+        <div class="brand">
+          <span class="brand-mark">OA</span>
+          <span>
+            <strong id="brandName">办公资产</strong>
+            <small id="brandSubtitle">管理中台</small>
+          </span>
+        </div>
+
+        <div class="sidebar-section-title">资产台账</div>
+        <nav class="sidebar-nav" id="sidebarNav" aria-label="主导航">
+          <button class="nav-item is-active" data-action="navigate" data-page="dashboard">
+            <span class="nav-icon">⌂</span>
+            <span>资产总览</span>
+          </button>
+          <button class="nav-item" data-action="navigate" data-page="computers">
+            <span class="nav-icon">▣</span>
+            <span>办公电脑</span>
+          </button>
+          <button class="nav-item" data-action="navigate" data-page="employees">
+            <span class="nav-icon">♙</span>
+            <span>使用人员</span>
+          </button>
+          <button class="nav-item" data-action="navigate" data-page="leftEmployees">
+            <span class="nav-icon">⌁</span>
+            <span>离职人员</span>
+          </button>
+          <div class="sidebar-section-title sidebar-section-title-spaced">资源与审计</div>
+          <button class="nav-item" data-action="navigate" data-page="inventory">
+            <span class="nav-icon">▤</span>
+            <span>IT物资</span>
+          </button>
+          <button class="nav-item" data-action="navigate" data-page="dictionary">
+            <span class="nav-icon">≡</span>
+            <span>基础字典</span>
+          </button>
+          <button class="nav-item" data-action="navigate" data-page="audit">
+            <span class="nav-icon">◷</span>
+            <span>操作日志</span>
+          </button>
+          <div class="sidebar-section-title sidebar-section-title-spaced">系统</div>
+          <button class="nav-item" data-action="navigate" data-page="settings">
+            <span class="nav-icon">⚙</span>
+            <span>设置</span>
+          </button>
+        </nav>
+
+        <div class="sidebar-footer">
+          <div class="connection-dot"></div>
+          <div>
+            <span>数据状态</span>
+            <strong>MySQL 联机模式</strong>
+          </div>
+        </div>
+      </aside>
+
+      <main class="main-content">
+        <header class="topbar">
+          <div>
+            <div class="eyebrow">OFFICE ASSET OPERATIONS</div>
+            <h1 id="pageTitle">资产总览</h1>
+          </div>
+          <div class="topbar-actions">
+            <button class="ghost-button" data-action="reset-data" title="从数据库重新加载">
+              ↺ 重新加载数据
+            </button>
+            <div class="user-badge">
+              <span class="avatar" id="userAvatar">IT</span>
+              <span id="userBadgeText">
+                <strong>正在加载</strong>
+                <small>身份验证中</small>
+              </span>
+            </div>
+            <button class="ghost-button" data-action="logout" title="退出登录">退出</button>
+          </div>
+        </header>
+
+        <section class="page-content" id="appContent"></section>
+      </main>
+    </div>
+
+    <div id="modalRoot"></div>
+    <div id="toastRoot" class="toast-root" aria-live="polite"></div>
+  </body>
+</html>
