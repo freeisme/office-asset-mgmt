@@ -10,6 +10,7 @@ User=officeasset-deploy
 SupplementaryGroups=docker
 WorkingDirectory=/opt/office-asset-mgmt
 EnvironmentFile=/etc/office-asset-mgmt/gitea-webhook.env
+Environment=DOCKER_CONFIG=/tmp/officeasset-deploy-docker
 ExecStart=/usr/bin/python3 /opt/office-asset-mgmt/deploy/gitea/deploy_webhook.py
 Restart=always
 RestartSec=3
