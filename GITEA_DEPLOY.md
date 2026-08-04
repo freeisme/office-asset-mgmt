@@ -167,6 +167,7 @@ Create `/etc/office-asset-mgmt/gitea-webhook.env` with mode `600`:
 
 ```dotenv
 GITEA_WEBHOOK_SECRET=replace-with-the-generated-secret
+DEPLOY_CONTROL_TOKEN=replace-with-a-different-generated-secret
 WEBHOOK_BIND=0.0.0.0
 WEBHOOK_PORT=9000
 WEBHOOK_PATH=/gitea
@@ -174,6 +175,11 @@ DEPLOY_REPO=OWNER/office-asset-management
 DEPLOY_BRANCH=main
 APP_DIR=/opt/office-asset-mgmt
 ```
+
+Set the same `DEPLOY_CONTROL_TOKEN` in `/opt/office-asset-mgmt/.env` as
+`UPDATE_CONTROL_TOKEN`. The application uses this separate token to ask the host
+deployment service to check `origin/main` and queue a deployment. It is not the
+Gitea webhook signature and must not be exposed to browsers.
 
 Install and start the receiver:
 
@@ -210,6 +216,11 @@ Now a push to `main` runs:
 git fetch -> reset to origin/main -> docker compose build --pull app
 -> docker compose up -d -> /api/health
 ```
+
+Administrators can also use **Settings > Version update > Check for updates**.
+The application asks the host deployment service to compare the deployment checkout
+with Gitea and queues the same deployment script only when a newer `main` commit
+exists.
 
 Watch deployment logs:
 

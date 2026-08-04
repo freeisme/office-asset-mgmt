@@ -42,6 +42,10 @@ services:
       SERVER_PORT: "8000"
       AUTH_SESSION_HOURS: ${AUTH_SESSION_HOURS:-8}
       AUTH_COOKIE_SECURE: ${AUTH_COOKIE_SECURE:-false}
+      UPDATE_SERVICE_URL: ${UPDATE_SERVICE_URL:-http://host.docker.internal:9000}
+      UPDATE_CONTROL_TOKEN: ${UPDATE_CONTROL_TOKEN:-}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     volumes:
       - backup-data:/app/backups
     ports:

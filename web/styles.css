@@ -2194,6 +2194,43 @@ tbody tr:hover {
   margin-top: 18px;
 }
 
+.update-panel {
+  grid-column: 1 / -1;
+}
+
+.update-version-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+  margin-bottom: 14px;
+}
+
+.update-version-item {
+  display: grid;
+  gap: 5px;
+  min-width: 0;
+  padding: 12px;
+  border: 1px solid var(--line-soft);
+  background: var(--canvas);
+}
+
+.update-version-item span {
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.update-version-item strong {
+  overflow: hidden;
+  color: var(--navy-950);
+  font-family: Consolas, "Courier New", monospace;
+  font-size: 13px;
+  text-overflow: ellipsis;
+}
+
+.update-status-note {
+  min-height: 58px;
+}
+
 .backup-toggle-field {
   display: flex;
   flex-direction: column;
@@ -2314,6 +2351,10 @@ tbody tr:hover {
 @media (max-width: 920px) {
   .settings-grid {
     grid-template-columns: 1fr;
+  }
+
+  .update-panel {
+    grid-column: auto;
   }
 }
 

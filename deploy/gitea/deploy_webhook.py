@@ -24,6 +24,9 @@ HEALTH_PATH = os.environ.get("HEALTH_PATH", "/healthz").rstrip("/") or "/"
 WEBHOOK_BIND = os.environ.get("WEBHOOK_BIND", "0.0.0.0")
 WEBHOOK_PORT = int(os.environ.get("WEBHOOK_PORT", "9000"))
 MAX_BODY_BYTES = int(os.environ.get("WEBHOOK_MAX_BODY_BYTES", "1048576"))
+CONTROL_TOKEN = os.environ.get("DEPLOY_CONTROL_TOKEN", "").strip()
+CONTROL_PATH = os.environ.get("DEPLOY_CONTROL_PATH", "/control/update").rstrip("/") or "/"
+CONTROL_STATUS_PATH = os.environ.get("DEPLOY_CONTROL_STATUS_PATH", "/control/status").rstrip("/") or "/"
 DEPLOY_REPO = os.environ.get("DEPLOY_REPO", "").strip()
 DEPLOY_BRANCH = os.environ.get("DEPLOY_BRANCH", "main").strip()
 APP_DIR = Path(os.environ.get("APP_DIR", "/opt/office-asset-mgmt")).resolve()
@@ -92,6 +95,62 @@ def _deployment_worker() -> None:
             LOG.info("Deployment completed for commit %s", commit_sha)
 
 
+def _git_sha(*args: str) -> str:
+    result = subprocess.run(
+        ["git", "-C", str(APP_DIR), *args],
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=20,
+    )
+    return result.stdout.strip().splitlines()[0].strip()
+
+
+def _current_sha() -> str:
+    sha = _git_sha("rev-parse", "HEAD")
+    if not HEX_SHA_RE.fullmatch(sha):
+        raise RuntimeError("deployment checkout returned an invalid HEAD")
+    return sha
+
+
+def _latest_sha() -> str:
+    output = _git_sha("ls-remote", "origin", f"refs/heads/{DEPLOY_BRANCH}")
+    sha = output.split()[0] if output else ""
+    if not HEX_SHA_RE.fullmatch(sha):
+        raise RuntimeError("Gitea returned an invalid branch reference")
+    return sha
+
+
+def _update_snapshot() -> dict:
+    current_sha = _current_sha()
+    latest_sha_remote = _latest_sha()
+    with state_lock:
+        running = deployment_running
+        pending = deployment_pending
+    return {
+        "ok": True,
+        "repository": DEPLOY_REPO,
+        "branch": DEPLOY_BRANCH,
+        "currentSha": current_sha,
+        "latestSha": latest_sha_remote,
+        "currentShortSha": current_sha[:7],
+        "latestShortSha": latest_sha_remote[:7],
+        "deploymentRunning": running,
+        "deploymentPending": pending,
+    }
+
+
+def _check_and_queue_update() -> dict:
+    snapshot = _update_snapshot()
+    if snapshot["currentSha"] == snapshot["latestSha"]:
+        snapshot["status"] = "running" if snapshot["deploymentRunning"] else "up_to_date"
+        return snapshot
+    _enqueue_deployment(snapshot["latestSha"])
+    snapshot["deploymentPending"] = True
+    snapshot["status"] = "queued"
+    return snapshot
+
+
 class WebhookHandler(BaseHTTPRequestHandler):
     server_version = "GiteaDeployWebhook/1.0"
 
@@ -103,15 +162,65 @@ class WebhookHandler(BaseHTTPRequestHandler):
         if body:
             self.wfile.write(body)
 
+    def _reply_json(self, status: int, payload: dict) -> None:
+        body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _control_authorized(self) -> bool:
+        supplied = self.headers.get("X-Deploy-Control-Token", "")
+        return bool(CONTROL_TOKEN) and hmac.compare_digest(supplied, CONTROL_TOKEN)
+
     def do_GET(self) -> None:  # noqa: N802
         path = urlsplit(self.path).path.rstrip("/") or "/"
         if path == HEALTH_PATH:
             self._reply(200, b"ok\n")
+        elif path == CONTROL_STATUS_PATH:
+            if not self._control_authorized():
+                self._reply(401, b"unauthorized\n")
+                return
+            try:
+                snapshot = _update_snapshot()
+            except Exception as exc:
+                LOG.exception("Unable to inspect update status")
+                self._reply_json(502, {"ok": False, "error": str(exc)})
+                return
+            snapshot["status"] = "running" if snapshot["deploymentRunning"] else (
+                "queued" if snapshot["deploymentPending"] else "up_to_date"
+            )
+            self._reply_json(200, snapshot)
         else:
             self._reply(404, b"not found\n")
 
     def do_POST(self) -> None:  # noqa: N802
         path = urlsplit(self.path).path.rstrip("/") or "/"
+        if path == CONTROL_PATH:
+            if not self._control_authorized():
+                self._reply(401, b"unauthorized\n")
+                return
+            try:
+                content_length = int(self.headers.get("Content-Length", "0"))
+            except ValueError:
+                self._reply(400, b"invalid content length\n")
+                return
+            if content_length > MAX_BODY_BYTES:
+                self._reply(413, b"request body too large\n")
+                return
+            if content_length:
+                self.rfile.read(content_length)
+            try:
+                snapshot = _check_and_queue_update()
+            except Exception as exc:
+                LOG.exception("Unable to check or queue an update")
+                self._reply_json(502, {"ok": False, "error": str(exc)})
+                return
+            self._reply_json(202 if snapshot["status"] == "queued" else 200, snapshot)
+            return
+
         if path != WEBHOOK_PATH:
             self._reply(404, b"not found\n")
             return
@@ -168,13 +277,21 @@ def main() -> None:
         raise SystemExit("GITEA_WEBHOOK_SECRET must be set")
     if not DEPLOY_SCRIPT.is_file():
         raise SystemExit(f"Deployment script not found: {DEPLOY_SCRIPT}")
+    if not CONTROL_TOKEN:
+        LOG.warning("DEPLOY_CONTROL_TOKEN is not set; one-click update control is disabled")
 
     logging.basicConfig(
         level=os.environ.get("LOG_LEVEL", "INFO").upper(),
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
     server = ThreadingHTTPServer((WEBHOOK_BIND, WEBHOOK_PORT), WebhookHandler)
-    LOG.info("Listening on %s:%s%s", WEBHOOK_BIND, WEBHOOK_PORT, WEBHOOK_PATH)
+    LOG.info(
+        "Listening on %s:%s%s (control: %s)",
+        WEBHOOK_BIND,
+        WEBHOOK_PORT,
+        WEBHOOK_PATH,
+        CONTROL_PATH,
+    )
     server.serve_forever()
 
 

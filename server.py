@@ -17,7 +17,9 @@ from datetime import datetime, timedelta
 from http import HTTPStatus
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from urllib.error import HTTPError, URLError
 from urllib.parse import parse_qs, urlparse
+from urllib.request import Request, urlopen
 
 
 ROOT_DIR = Path(__file__).resolve().parent
@@ -36,6 +38,9 @@ DB_PASSWORD = os.environ.get("DB_PASSWORD", "")
 SERVER_HOST = os.environ.get("SERVER_HOST", "127.0.0.1")
 SERVER_PORT = int(os.environ.get("SERVER_PORT", "8000"))
 BACKUP_DIR = Path(os.environ.get("BACKUP_DIR", str(ROOT_DIR / "backups"))).expanduser().resolve()
+UPDATE_SERVICE_URL = os.environ.get("UPDATE_SERVICE_URL", "http://host.docker.internal:9000").rstrip("/")
+UPDATE_CONTROL_TOKEN = os.environ.get("UPDATE_CONTROL_TOKEN", "").strip()
+UPDATE_REQUEST_TIMEOUT = max(3, int(os.environ.get("UPDATE_REQUEST_TIMEOUT", "12")))
 AUTH_COOKIE_NAME = "oa_session"
 CSRF_COOKIE_NAME = "oa_csrf"
 AUTH_SESSION_HOURS = max(1, int(os.environ.get("AUTH_SESSION_HOURS", "8")))
@@ -417,6 +422,43 @@ def settings_payload() -> dict:
         {},
     )
     return value if isinstance(value, dict) else {}
+
+
+def request_update_service() -> dict:
+    if not UPDATE_SERVICE_URL or not UPDATE_CONTROL_TOKEN:
+        raise ApiError("服务器更新服务尚未配置，请联系系统管理员。")
+
+    request = Request(
+        f"{UPDATE_SERVICE_URL}/control/update",
+        data=b"{}",
+        headers={
+            "Content-Type": "application/json",
+            "X-Deploy-Control-Token": UPDATE_CONTROL_TOKEN,
+        },
+        method="POST",
+    )
+    try:
+        with urlopen(request, timeout=UPDATE_REQUEST_TIMEOUT) as response:
+            raw = response.read().decode("utf-8", errors="replace")
+    except HTTPError as exc:
+        raw = exc.read().decode("utf-8", errors="replace")
+        try:
+            payload = json.loads(raw)
+        except json.JSONDecodeError:
+            payload = {}
+        raise ApiError(payload.get("error") or f"服务器更新服务返回 HTTP {exc.code}。") from exc
+    except (URLError, TimeoutError) as exc:
+        raise ApiError(f"无法连接服务器更新服务：{exc}") from exc
+
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise ApiError("服务器更新服务返回了无效响应。") from exc
+    if not isinstance(payload, dict):
+        raise ApiError("服务器更新服务返回了无效数据。")
+    return payload
+
+
 def validate_payload(payload: dict) -> None:
     if not isinstance(payload, dict):
         raise ApiError("请求数据格式必须是 JSON 对象。")
@@ -4503,6 +4545,24 @@ class AppHandler(SimpleHTTPRequestHandler):
                         "修改系统设置",
                     )
             self.send_json({"settings": settings_payload()})
+            return
+
+        if parsed.path == "/api/updates/check" and self.command == "POST":
+            context = require_auth(self)
+            require_role(context, "admin")
+            require_csrf(self, context)
+            update_payload = request_update_service()
+            status = text_value(update_payload.get("status"))
+            action_type = "system_update_queued" if status in {"queued", "running"} else "system_update_checked"
+            write_auth_audit(
+                text_value(context.get("username")),
+                action_type,
+                "",
+                "system_update",
+                "检查并处理 Gitea 系统更新",
+            )
+            response_status = HTTPStatus.ACCEPTED if status in {"queued", "running"} else HTTPStatus.OK
+            self.send_json(update_payload, status=response_status)
             return
 
         if parsed.path == "/api/backups" and self.command == "GET":

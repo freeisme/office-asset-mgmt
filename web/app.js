@@ -10,6 +10,7 @@ const API_AUTH_CHANGE_PASSWORD_URL = "/api/auth/change-password";
 const API_USERS_URL = "/api/users";
 const API_SETTINGS_URL = "/api/settings";
 const API_BACKUPS_URL = "/api/backups";
+const API_UPDATE_CHECK_URL = "/api/updates/check";
 
 const pageMeta = {
   dashboard: {
@@ -78,7 +79,14 @@ let pendingLeaveRecovery = null;
 let pendingDeviceRecovery = null;
 let employeeSearchDrafts = {};
 let authState = { authenticated: false, user: null, bootstrapRequired: false };
-let settingsState = { settings: {}, users: [], backups: [], loaded: false };
+let settingsState = {
+  settings: {},
+  users: [],
+  backups: [],
+  loaded: false,
+  updateStatus: null,
+  updateChecking: false,
+};
 let authBootPromise = null;
 
 function authRoleLabel(role) {
@@ -610,7 +618,14 @@ function requestJson(url, options = {}) {
         !url.includes("/api/auth/logout")
       ) {
         authState = { authenticated: false, user: null, bootstrapRequired: false };
-        settingsState = { settings: {}, users: [], backups: [], loaded: false };
+        settingsState = {
+          settings: {},
+          users: [],
+          backups: [],
+          loaded: false,
+          updateStatus: null,
+          updateChecking: false,
+        };
         authBootPromise = null;
         startAuth();
       }
@@ -846,7 +861,14 @@ async function logout() {
     console.error("Unable to log out", error);
   }
   authState = { authenticated: false, user: null, bootstrapRequired: false };
-  settingsState = { settings: {}, users: [], backups: [], loaded: false };
+  settingsState = {
+    settings: {},
+    users: [],
+    backups: [],
+    loaded: false,
+    updateStatus: null,
+    updateChecking: false,
+  };
   document.querySelector("#modalRoot").innerHTML = "";
   authBootPromise = null;
   startAuth();
@@ -2436,6 +2458,51 @@ function renderDatabaseBackupTable() {
   </table></div>`;
 }
 
+function updateStatusLabel(status) {
+  if (status === "queued") return "发现新版本，更新已排队";
+  if (status === "running") return "更新正在执行";
+  if (status === "up_to_date") return "当前已是最新版本";
+  return "尚未检查";
+}
+
+function updateStatusDetail(status) {
+  if (status === "queued") return "服务器将从 Gitea 拉取最新 main 分支并重新构建应用。";
+  if (status === "running") return "应用服务可能会短暂重启，请稍后刷新页面。";
+  if (status === "up_to_date") return "当前部署版本与服务器 Gitea 仓库一致。";
+  return "点击按钮检查服务器 Gitea 是否有新的应用版本。";
+}
+
+function renderUpdatePanel(admin) {
+  if (!admin) {
+    return `<section class="data-panel settings-panel settings-readonly-note">
+      <strong>版本更新</strong><span>只有管理员可以检查并执行 Gitea 版本更新。</span>
+    </section>`;
+  }
+  const status = settingsState.updateStatus || {};
+  const checking = settingsState.updateChecking;
+  const currentSha = status.currentShortSha || (status.currentSha ? String(status.currentSha).slice(0, 7) : "-");
+  const latestSha = status.latestShortSha || (status.latestSha ? String(status.latestSha).slice(0, 7) : "-");
+  const statusValue = status.status || "";
+  return `<section class="data-panel settings-panel update-panel">
+    <div class="section-heading settings-panel-heading">
+      <div><h2>版本更新</h2><span>从服务器 Gitea 检查 main 分支，有新版本时直接更新应用。</span></div>
+    </div>
+    <div class="update-version-grid">
+      <div class="update-version-item"><span>当前版本</span><strong>${escapeHtml(currentSha)}</strong></div>
+      <div class="update-version-item"><span>Gitea 最新版本</span><strong>${escapeHtml(latestSha)}</strong></div>
+    </div>
+    <div class="settings-readonly-note update-status-note">
+      <strong>${escapeHtml(updateStatusLabel(statusValue))}</strong>
+      <span>${escapeHtml(updateStatusDetail(statusValue))}</span>
+    </div>
+    <div class="modal-footer settings-form-footer">
+      <button type="button" class="primary-button" data-action="check-for-update" ${checking ? "disabled" : ""}>
+        ${checking ? "正在检查..." : "检查更新"}
+      </button>
+    </div>
+  </section>`;
+}
+
 function renderSettingsPage() {
   if (!settingsState.loaded) {
     return `<div class="page-intro"><div><h2>系统设置</h2><p>正在加载设置数据。</p></div></div>
@@ -2475,6 +2542,7 @@ function renderSettingsPage() {
           <div class="modal-footer settings-form-footer"><button class="primary-button" type="submit">保存新密码</button></div>
         </form>
       </section>
+      ${renderUpdatePanel(admin)}
     </div>
 
     ${
@@ -5107,6 +5175,34 @@ async function handleBackupScheduleSubmit(form) {
   }
 }
 
+async function handleUpdateCheck(button) {
+  if (!isAdminUser()) return showToast("只有管理员可以检查并执行版本更新", true);
+  settingsState.updateChecking = true;
+  if (button) button.disabled = true;
+  render();
+  try {
+    const payload = await requestJson(API_UPDATE_CHECK_URL, {
+      method: "POST",
+      body: "{}",
+    });
+    settingsState.updateStatus = payload;
+    const status = payload.status || "";
+    if (status === "up_to_date") {
+      showToast(`当前已是最新版本 ${payload.currentShortSha || ""}`);
+    } else if (status === "queued" || status === "running") {
+      showToast(`发现新版本 ${payload.latestShortSha || ""}，更新已开始`);
+      window.setTimeout(() => window.location.reload(), 7000);
+    } else {
+      showToast("版本检查已完成");
+    }
+  } catch (error) {
+    showToast(`检查版本更新失败：${error.message}`, true);
+  } finally {
+    settingsState.updateChecking = false;
+    render();
+  }
+}
+
 async function handleDatabaseBackupCreate(button) {
   if (!isAdminUser()) return showToast("只有管理员可以创建数据库备份", true);
   if (button) button.disabled = true;
@@ -6280,6 +6376,11 @@ document.addEventListener("click", (event) => {
 
   if (action === "logout") {
     logout();
+    return;
+  }
+
+  if (action === "check-for-update") {
+    handleUpdateCheck(actionElement);
     return;
   }
 
