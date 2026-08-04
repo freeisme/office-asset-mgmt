@@ -5,8 +5,8 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta name="theme-color" content="#ffffff" />
     <title>办公资产中台</title>
-    <link rel="stylesheet" href="styles.css?v=20260804-01" />
-    <script src="app.js?v=20260804-01" defer></script>
+    <link rel="stylesheet" href="styles.css?v=20260804-02" />
+    <script src="app.js?v=20260804-02" defer></script>
   </head>
   <body>
     <div id="authRoot"></div>
@@ -74,6 +74,16 @@
             <h1 id="pageTitle">资产总览</h1>
           </div>
           <div class="topbar-actions">
+            <button
+              class="ghost-button theme-toggle"
+              type="button"
+              data-action="toggle-theme"
+              title="切换夜间模式"
+              aria-label="切换夜间模式"
+              aria-pressed="false"
+            >
+              ☾
+            </button>
             <button class="ghost-button" data-action="reset-data" title="从数据库重新加载">
               ↺ 重新加载数据
             </button>

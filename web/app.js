@@ -11,6 +11,32 @@ const API_USERS_URL = "/api/users";
 const API_SETTINGS_URL = "/api/settings";
 const API_BACKUPS_URL = "/api/backups";
 const API_UPDATE_CHECK_URL = "/api/updates/check";
+const THEME_STORAGE_KEY = "office-asset-center-theme-v1";
+
+function applyTheme(theme) {
+  const isDark = theme === "dark";
+  document.documentElement.dataset.theme = isDark ? "dark" : "light";
+  const metaThemeColor = document.querySelector('meta[name="theme-color"]');
+  if (metaThemeColor) metaThemeColor.setAttribute("content", isDark ? "#0b1117" : "#ffffff");
+  const toggle = document.querySelector('[data-action="toggle-theme"]');
+  if (toggle) {
+    toggle.textContent = isDark ? "☀" : "☾";
+    toggle.title = isDark ? "切换日间模式" : "切换夜间模式";
+    toggle.setAttribute("aria-label", toggle.title);
+    toggle.setAttribute("aria-pressed", String(isDark));
+  }
+}
+
+function initializeTheme() {
+  const savedTheme = window.localStorage.getItem(THEME_STORAGE_KEY);
+  applyTheme(savedTheme === "dark" ? "dark" : "light");
+}
+
+function toggleTheme() {
+  const nextTheme = document.documentElement.dataset.theme === "dark" ? "light" : "dark";
+  window.localStorage.setItem(THEME_STORAGE_KEY, nextTheme);
+  applyTheme(nextTheme);
+}
 
 const pageMeta = {
   dashboard: {
@@ -6379,6 +6405,11 @@ document.addEventListener("click", (event) => {
     return;
   }
 
+  if (action === "toggle-theme") {
+    toggleTheme();
+    return;
+  }
+
   if (action === "check-for-update") {
     handleUpdateCheck(actionElement);
     return;
@@ -7122,4 +7153,5 @@ document.addEventListener("keydown", (event) => {
   if (event.key === "Escape" && document.querySelector("#modalRoot").innerHTML) closeModal();
 });
 
+initializeTheme();
 startAuth();
