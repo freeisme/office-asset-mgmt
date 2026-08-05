@@ -55,6 +55,23 @@ BACKUP_SCHEDULER_POLL_SECONDS = max(
     15,
     int(os.environ.get("BACKUP_SCHEDULER_POLL_SECONDS", "30")),
 )
+MAX_REQUEST_BODY_BYTES = min(
+    64 * 1024 * 1024,
+    max(64 * 1024, int(os.environ.get("MAX_REQUEST_BODY_BYTES", str(8 * 1024 * 1024)))),
+)
+
+SECURITY_CSP = (
+    "default-src 'self'; "
+    "base-uri 'self'; "
+    "frame-ancestors 'none'; "
+    "form-action 'self'; "
+    "object-src 'none'; "
+    "img-src 'self' data:; "
+    "style-src 'self' 'unsafe-inline'; "
+    "script-src 'self'; "
+    "connect-src 'self'; "
+    "font-src 'self' data:"
+)
 
 AUDIT_STATUS_LABELS = {
     "in_use": "在用",
@@ -122,7 +139,15 @@ class ApiError(RuntimeError):
     pass
 
 
+class InternalServerError(ApiError):
+    pass
+
+
 class ConflictError(ApiError):
+    pass
+
+
+class PayloadTooLargeError(ApiError):
     pass
 
 
@@ -146,7 +171,7 @@ def json_query_one(sql: str, default: object | None = None) -> object | None:
     try:
         return json.loads(line)
     except json.JSONDecodeError as exc:
-        raise ApiError(f"数据库返回的 JSON 无效：{exc}") from exc
+        raise InternalServerError("数据库返回的 JSON 无效。") from exc
 
 
 def encode_token(value: str) -> str:
@@ -317,6 +342,24 @@ def create_auth_session(user_id: str) -> tuple[str, str]:
     return session_token, csrf_token
 
 
+def revoke_user_sessions(user_id: str, except_session_token: str = "") -> None:
+    except_clause = ""
+    if except_session_token:
+        except_clause = f"""
+          AND session_token_hash <> {sql_quote(encode_token(except_session_token))}
+        """
+    run_mysql(
+        f"""
+        UPDATE auth_session
+        SET revoked_at = NOW()
+        WHERE user_id = {sql_quote(user_id)}
+          AND revoked_at IS NULL
+          {except_clause};
+        """,
+        database=DB_NAME,
+    )
+
+
 def cookie_value(handler: SimpleHTTPRequestHandler, name: str) -> str:
     raw = handler.headers.get("Cookie", "")
     for item in raw.split(";"):
@@ -446,9 +489,11 @@ def request_update_service() -> dict:
             payload = json.loads(raw)
         except json.JSONDecodeError:
             payload = {}
-        raise ApiError(payload.get("error") or f"服务器更新服务返回 HTTP {exc.code}。") from exc
+        print(f"Update service returned HTTP {exc.code}: {payload.get('error') or raw[:256]}")
+        raise ApiError(f"服务器更新服务返回 HTTP {exc.code}。") from exc
     except (URLError, TimeoutError) as exc:
-        raise ApiError(f"无法连接服务器更新服务：{exc}") from exc
+        print(f"Unable to connect to update service: {exc}")
+        raise ApiError("无法连接服务器更新服务。") from exc
 
     try:
         payload = json.loads(raw)
@@ -680,7 +725,7 @@ def allocate_ids(records: list[dict], key: str = "id", start_id: int = 0) -> dic
 
 def run_mysql(sql: str, *, database: str | None = None) -> str:
     if not DB_PASSWORD:
-        raise ApiError("Missing DB_PASSWORD environment variable.")
+        raise InternalServerError("数据库连接未配置。")
     args = [
         MYSQL_BIN,
         "--protocol=tcp",
@@ -710,7 +755,8 @@ def run_mysql(sql: str, *, database: str | None = None) -> str:
     )
     if completed.returncode != 0:
         message = completed.stderr.strip() or completed.stdout.strip() or "Unknown MySQL error"
-        raise ApiError(message)
+        print(f"MySQL command failed: {message[:512]}")
+        raise InternalServerError("数据库操作失败。")
     return completed.stdout.strip()
 
 
@@ -747,7 +793,7 @@ def resolve_mysqldump_binary() -> str:
     discovered = shutil.which(configured)
     if discovered:
         return discovered
-    raise ApiError(f"找不到 mysqldump：{configured}。请设置 MYSQLDUMP_BIN。")
+    raise InternalServerError("数据库备份工具未配置。")
 
 
 def resolve_backup_file_path(value: object | None) -> Path:
@@ -915,7 +961,7 @@ def create_database_backup(backup_type: str, context: dict | None = None) -> dic
     if backup_type not in {"manual", "scheduled"}:
         raise ApiError("备份类型无效。")
     if not DB_PASSWORD:
-        raise ApiError("缺少数据库连接密码，无法创建备份。")
+        raise InternalServerError("数据库连接未配置。")
 
     mysqldump_bin = resolve_mysqldump_binary()
     actor_id = text_value(context.get("id")) if context else ""
@@ -958,13 +1004,14 @@ def create_database_backup(backup_type: str, context: dict | None = None) -> dic
                     cwd=str(ROOT_DIR),
                 )
                 if process.stdout is None:
-                    raise ApiError("无法读取 mysqldump 输出。")
+                    raise InternalServerError("无法读取数据库备份输出。")
                 with gzip.open(temporary_path, "wb", compresslevel=6) as compressed_output:
                     shutil.copyfileobj(process.stdout, compressed_output, length=1024 * 1024)
                 process.stdout.close()
                 return_code = process.wait()
         except OSError as exc:
-            raise ApiError(f"启动 mysqldump 失败：{exc}") from exc
+            print(f"Unable to start mysqldump: {exc}")
+            raise InternalServerError("无法启动数据库备份。") from exc
         finally:
             if process and process.poll() is None:
                 process.kill()
@@ -976,10 +1023,11 @@ def create_database_backup(backup_type: str, context: dict | None = None) -> dic
             error_path.unlink(missing_ok=True)
         if return_code != 0:
             temporary_path.unlink(missing_ok=True)
-            raise ApiError(error_message or f"mysqldump 备份失败，退出代码 {return_code}。")
+            print(f"mysqldump failed with exit code {return_code}: {error_message[:512]}")
+            raise InternalServerError("数据库备份失败。")
         if not temporary_path.exists() or temporary_path.stat().st_size < 256:
             temporary_path.unlink(missing_ok=True)
-            raise ApiError("数据库备份文件异常为空。")
+            raise InternalServerError("数据库备份文件异常为空。")
 
         checksum = file_sha256(temporary_path)
         temporary_path.replace(final_path)
@@ -1019,7 +1067,7 @@ def create_database_backup(backup_type: str, context: dict | None = None) -> dic
         ).strip()
         record = database_backup_record(backup_id)
         if not record:
-            raise ApiError("备份已生成，但无法读取备份记录。")
+            raise InternalServerError("备份已生成，但无法读取备份记录。")
 
         try:
             cleanup_expired_database_backups(
@@ -1097,8 +1145,11 @@ def run_mysql_json_queries(*queries: str) -> list[object]:
     output = run_mysql(sql, database=DB_NAME)
     lines = [line for line in output.splitlines() if line.strip()]
     if len(lines) != len(queries):
-        raise ApiError(f"Expected {len(queries)} JSON result rows, got {len(lines)}")
-    return [json.loads(line) for line in lines]
+        raise InternalServerError("数据库返回结果数量异常。")
+    try:
+        return [json.loads(line) for line in lines]
+    except json.JSONDecodeError as exc:
+        raise InternalServerError("数据库返回结果格式异常。") from exc
 
 
 def load_current_max_ids() -> dict[str, int]:
@@ -4214,7 +4265,6 @@ class AppHandler(SimpleHTTPRequestHandler):
         self.send_header("Content-Disposition", f'attachment; filename="{safe_name}"')
         self.send_header("Content-Length", str(file_size))
         self.send_header("Cache-Control", "no-store")
-        self.send_header("X-Content-Type-Options", "nosniff")
         self.end_headers()
         try:
             with file_path.open("rb") as source:
@@ -4223,12 +4273,25 @@ class AppHandler(SimpleHTTPRequestHandler):
             pass
 
     def read_json(self) -> dict:
-        content_length = int(self.headers.get("Content-Length", "0"))
+        try:
+            content_length = int(self.headers.get("Content-Length", "0"))
+        except (TypeError, ValueError) as exc:
+            raise ApiError("请求体长度无效。") from exc
+        if content_length < 0:
+            raise ApiError("请求体长度无效。")
+        if content_length > MAX_REQUEST_BODY_BYTES:
+            raise PayloadTooLargeError(
+                f"请求体过大，最大允许 {MAX_REQUEST_BODY_BYTES // (1024 * 1024)} MB。"
+            )
         raw = self.rfile.read(content_length) if content_length else b"{}"
         try:
-            return json.loads(raw.decode("utf-8"))
-        except json.JSONDecodeError as exc:
-            raise ApiError(f"Invalid JSON body: {exc}") from exc
+            payload = json.loads(raw.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            print(f"Invalid JSON body: {exc}")
+            raise ApiError("请求体格式无效。") from exc
+        if not isinstance(payload, dict):
+            raise ApiError("请求体必须是 JSON 对象。")
+        return payload
 
     def handle_api(self) -> None:
         parsed = urlparse(self.path)
@@ -4257,9 +4320,6 @@ class AppHandler(SimpleHTTPRequestHandler):
                 self.send_json(
                     {
                         "ok": healthy,
-                        "database": DB_NAME,
-                        "host": DB_HOST,
-                        "port": DB_PORT,
                         "databaseProbe": probe,
                         "requiredTables": table_count,
                         "requiredTableCount": required_table_count,
@@ -4267,8 +4327,9 @@ class AppHandler(SimpleHTTPRequestHandler):
                     status=HTTPStatus.OK if healthy else HTTPStatus.SERVICE_UNAVAILABLE,
                 )
             except ApiError as exc:
+                print(f"Health check failed: {exc}")
                 self.send_json(
-                    {"ok": False, "database": DB_NAME, "error": str(exc)},
+                    {"ok": False, "error": "database_unavailable"},
                     status=HTTPStatus.SERVICE_UNAVAILABLE,
                 )
             return
@@ -4398,6 +4459,10 @@ class AppHandler(SimpleHTTPRequestHandler):
                 """,
                 database=DB_NAME,
             )
+            revoke_user_sessions(
+                text_value(context.get("id")),
+                except_session_token=cookie_value(self, AUTH_COOKIE_NAME),
+            )
             write_auth_audit(text_value(context.get("username")), "user_password_changed", text_value(context.get("id")), text_value(context.get("username")), "账号修改了登录密码")
             self.send_json({"ok": True})
             return
@@ -4451,8 +4516,9 @@ class AppHandler(SimpleHTTPRequestHandler):
             if user_id == text_value(context.get("id")) and (not active or role != "admin"):
                 raise ApiError("不能停用或降级当前登录的管理员账号。")
             password_clause = ""
-            if text_value(payload.get("password")):
-                password_clause = f", password_hash = {sql_quote(password_hash(text_value(payload.get('password'))))}, failed_attempts = 0, locked_until = NULL"
+            password = text_value(payload.get("password"))
+            if password:
+                password_clause = f", password_hash = {sql_quote(password_hash(password))}, failed_attempts = 0, locked_until = NULL"
             run_mysql(
                 f"""
                 UPDATE user_account
@@ -4463,6 +4529,9 @@ class AppHandler(SimpleHTTPRequestHandler):
                 """,
                 database=DB_NAME,
             )
+            if password:
+                current_token = cookie_value(self, AUTH_COOKIE_NAME) if user_id == text_value(context.get("id")) else ""
+                revoke_user_sessions(user_id, except_session_token=current_token)
             updated = find_user_by_id(user_id)
             write_auth_audit(text_value(context.get("username")), "user_account_changed", user_id, text_value(updated.get("username")), f"修改账号 {updated.get('username')}")
             self.send_json({"user": auth_user_public(updated)})
@@ -4661,13 +4730,28 @@ class AppHandler(SimpleHTTPRequestHandler):
             self.send_json({"error": str(exc), "code": "CSRF_INVALID"}, status=HTTPStatus.FORBIDDEN)
         except ForbiddenError as exc:
             self.send_json({"error": str(exc), "code": "FORBIDDEN"}, status=HTTPStatus.FORBIDDEN)
+        except PayloadTooLargeError as exc:
+            self.send_json(
+                {"error": str(exc), "code": "PAYLOAD_TOO_LARGE"},
+                status=HTTPStatus.REQUEST_ENTITY_TOO_LARGE,
+            )
+        except InternalServerError as exc:
+            print(f"Internal server error: {exc}")
+            traceback.print_exc()
+            self.send_json(
+                {"error": "服务器内部错误。", "code": "INTERNAL_ERROR"},
+                status=HTTPStatus.INTERNAL_SERVER_ERROR,
+            )
         except ConflictError as exc:
             self.send_json({"error": str(exc), "code": "STATE_CONFLICT"}, status=HTTPStatus.CONFLICT)
         except ApiError as exc:
             self.send_json({"error": str(exc)}, status=HTTPStatus.BAD_REQUEST)
         except Exception as exc:  # pragma: no cover
             traceback.print_exc()
-            self.send_json({"error": str(exc)}, status=HTTPStatus.INTERNAL_SERVER_ERROR)
+            self.send_json(
+                {"error": "服务器内部错误。", "code": "INTERNAL_ERROR"},
+                status=HTTPStatus.INTERNAL_SERVER_ERROR,
+            )
 
     def do_PUT(self) -> None:
         try:
@@ -4681,13 +4765,28 @@ class AppHandler(SimpleHTTPRequestHandler):
             self.send_json({"error": str(exc), "code": "CSRF_INVALID"}, status=HTTPStatus.FORBIDDEN)
         except ForbiddenError as exc:
             self.send_json({"error": str(exc), "code": "FORBIDDEN"}, status=HTTPStatus.FORBIDDEN)
+        except PayloadTooLargeError as exc:
+            self.send_json(
+                {"error": str(exc), "code": "PAYLOAD_TOO_LARGE"},
+                status=HTTPStatus.REQUEST_ENTITY_TOO_LARGE,
+            )
+        except InternalServerError as exc:
+            print(f"Internal server error: {exc}")
+            traceback.print_exc()
+            self.send_json(
+                {"error": "服务器内部错误。", "code": "INTERNAL_ERROR"},
+                status=HTTPStatus.INTERNAL_SERVER_ERROR,
+            )
         except ConflictError as exc:
             self.send_json({"error": str(exc), "code": "STATE_CONFLICT"}, status=HTTPStatus.CONFLICT)
         except ApiError as exc:
             self.send_json({"error": str(exc)}, status=HTTPStatus.BAD_REQUEST)
         except Exception as exc:  # pragma: no cover
             traceback.print_exc()
-            self.send_json({"error": str(exc)}, status=HTTPStatus.INTERNAL_SERVER_ERROR)
+            self.send_json(
+                {"error": "服务器内部错误。", "code": "INTERNAL_ERROR"},
+                status=HTTPStatus.INTERNAL_SERVER_ERROR,
+            )
 
     def do_POST(self) -> None:
         try:
@@ -4701,13 +4800,28 @@ class AppHandler(SimpleHTTPRequestHandler):
             self.send_json({"error": str(exc), "code": "CSRF_INVALID"}, status=HTTPStatus.FORBIDDEN)
         except ForbiddenError as exc:
             self.send_json({"error": str(exc), "code": "FORBIDDEN"}, status=HTTPStatus.FORBIDDEN)
+        except PayloadTooLargeError as exc:
+            self.send_json(
+                {"error": str(exc), "code": "PAYLOAD_TOO_LARGE"},
+                status=HTTPStatus.REQUEST_ENTITY_TOO_LARGE,
+            )
+        except InternalServerError as exc:
+            print(f"Internal server error: {exc}")
+            traceback.print_exc()
+            self.send_json(
+                {"error": "服务器内部错误。", "code": "INTERNAL_ERROR"},
+                status=HTTPStatus.INTERNAL_SERVER_ERROR,
+            )
         except ConflictError as exc:
             self.send_json({"error": str(exc), "code": "STATE_CONFLICT"}, status=HTTPStatus.CONFLICT)
         except ApiError as exc:
             self.send_json({"error": str(exc)}, status=HTTPStatus.BAD_REQUEST)
         except Exception as exc:  # pragma: no cover
             traceback.print_exc()
-            self.send_json({"error": str(exc)}, status=HTTPStatus.INTERNAL_SERVER_ERROR)
+            self.send_json(
+                {"error": "服务器内部错误。", "code": "INTERNAL_ERROR"},
+                status=HTTPStatus.INTERNAL_SERVER_ERROR,
+            )
 
     def end_headers(self) -> None:
         origin = self.headers.get("Origin", "")
@@ -4715,6 +4829,13 @@ class AppHandler(SimpleHTTPRequestHandler):
         if origin in {"http://127.0.0.1:8000", "http://localhost:8000"}:
             self.send_header("Access-Control-Allow-Origin", origin)
             self.send_header("Vary", "Origin")
+        self.send_header("Content-Security-Policy", SECURITY_CSP)
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("X-Frame-Options", "DENY")
+        self.send_header("Referrer-Policy", "same-origin")
+        self.send_header("Permissions-Policy", "camera=(), geolocation=(), microphone=(), payment=(), usb=()")
+        self.send_header("Cross-Origin-Opener-Policy", "same-origin")
+        self.send_header("Cross-Origin-Resource-Policy", "same-origin")
         if self.command == "GET" and (
             parsed_path == "/"
             or parsed_path.endswith(".html")

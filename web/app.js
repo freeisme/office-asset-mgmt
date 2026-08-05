@@ -2557,7 +2557,7 @@ function renderSettingsPage() {
 
       <section class="data-panel settings-panel">
         <div class="section-heading settings-panel-heading">
-          <div><h2>修改我的密码</h2><span>密码至少 8 位，修改后当前会话仍保持有效。</span></div>
+          <div><h2>修改我的密码</h2><span>密码至少 8 位，修改后当前会话仍保持有效，其他会话会退出登录。</span></div>
         </div>
         <form data-form="change-password" class="settings-form">
           ${inputField("当前密码", "currentPassword", "", true, "请输入当前密码", "password", "8", 'autocomplete="current-password"')}

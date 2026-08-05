@@ -187,7 +187,7 @@ class WebhookHandler(BaseHTTPRequestHandler):
                 snapshot = _update_snapshot()
             except Exception as exc:
                 LOG.exception("Unable to inspect update status")
-                self._reply_json(502, {"ok": False, "error": str(exc)})
+                self._reply_json(502, {"ok": False, "error": "update_status_unavailable"})
                 return
             snapshot["status"] = "running" if snapshot["deploymentRunning"] else (
                 "queued" if snapshot["deploymentPending"] else "up_to_date"
@@ -216,7 +216,7 @@ class WebhookHandler(BaseHTTPRequestHandler):
                 snapshot = _check_and_queue_update()
             except Exception as exc:
                 LOG.exception("Unable to check or queue an update")
-                self._reply_json(502, {"ok": False, "error": str(exc)})
+                self._reply_json(502, {"ok": False, "error": "update_queue_unavailable"})
                 return
             self._reply_json(202 if snapshot["status"] == "queued" else 200, snapshot)
             return

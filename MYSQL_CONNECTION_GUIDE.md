@@ -101,9 +101,6 @@ curl --fail http://127.0.0.1:8000/api/health
 ```json
 {
   "ok": true,
-  "database": "office_asset_mgmt",
-  "host": "db",
-  "port": 3306,
   "databaseProbe": 1,
   "requiredTables": 19,
   "requiredTableCount": 19

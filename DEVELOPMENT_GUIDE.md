@@ -241,6 +241,7 @@
 | `SERVER_PORT` | Python 监听端口 | `8000` |
 | `AUTH_SESSION_HOURS` | 登录会话有效小时数 | 默认 `8`，有效范围 `1-168` |
 | `AUTH_COOKIE_SECURE` | 是否给 Cookie 加 Secure | HTTPS 反代后设为 `true` |
+| `MAX_REQUEST_BODY_BYTES` | JSON 请求体最大字节数 | 默认 `8388608`，最大支持 `64 MB` |
 | `BACKUP_SCHEDULER_POLL_SECONDS` | 自动备份轮询间隔 | 默认 `30` 秒 |
 | `UPDATE_SERVICE_URL` | 容器访问宿主机更新服务 | 默认 `http://host.docker.internal:9000` |
 | `UPDATE_CONTROL_TOKEN` | 容器到宿主机的更新控制令牌 | 与宿主机配置一致，只放运行时环境 |
@@ -1096,3 +1097,4 @@ sudo curl --fail http://127.0.0.1:9000/healthz
 - [database/01_schema.sql](database/01_schema.sql)：核心表结构。
 - [deploy/scripts/update_from_gitea.sh](deploy/scripts/update_from_gitea.sh)：自动发布脚本。
 - [deploy/gitea/deploy_webhook.py](deploy/gitea/deploy_webhook.py)：Webhook 和一键更新控制服务。
+- [SECURITY_REVIEW.md](SECURITY_REVIEW.md)：网络安全检查、已修复问题和生产运维注意事项。
