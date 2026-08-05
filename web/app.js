@@ -45,7 +45,7 @@ const pageMeta = {
     description: "掌握办公设备分布、使用状态和人员领用情况。",
   },
   computers: {
-    title: "办公电脑",
+    title: "办公终端",
     description: "维护电脑资产台账、归属人员和 IT 资产状态。",
   },
   employees: {
@@ -2747,8 +2747,8 @@ const auditActionLabels = {
   employee_status_changed: "人员状态变更",
   computer_status_changed: "电脑状态变更",
   computer_assignment_changed: "电脑分配变更",
-  computer_added: "新增办公电脑",
-  computer_removed: "删除办公电脑",
+  computer_added: "新增办公终端",
+  computer_removed: "删除办公终端",
   monitor_added: "增加显示屏",
   monitor_removed: "减少显示屏",
   non_asset_added: "增加非资产设备",
@@ -2831,7 +2831,7 @@ const auditEntityTypeLabels = {
   inventory_brand: "IT物资品牌",
   inventory_model: "IT物资型号",
   employee: "使用人员",
-  computer: "办公电脑",
+  computer: "办公终端",
   monitor: "显示屏",
   non_asset: "非资产物资",
   org_unit: "组织架构",
@@ -3240,7 +3240,7 @@ function renderComputersPage() {
 
   return `
     <div class="page-intro">
-      <div><h2>办公电脑台账</h2><p>共 ${state.computers.length} 台 · 支持按设备名、固资编码、SN/ST、组织和使用用户检索</p></div>
+      <div><h2>办公终端台账</h2><p>共 ${state.computers.length} 台 · 支持按设备名、固资编码、SN/ST、组织和使用用户检索</p></div>
       <div class="toolbar-actions">
         <button class="secondary-button" data-action="select-all-computers">全选当前结果</button>
         <button class="secondary-button" data-action="clear-computer-selection">清空选择</button>
@@ -4603,7 +4603,7 @@ function openComputerModal(id = "") {
   };
   const isEditing = Boolean(id);
   openModal(
-    `${modalHeader(isEditing ? "编辑办公电脑" : "新增办公电脑", "登记设备基础信息、资产信息和当前使用人")}
+    `${modalHeader(isEditing ? "编辑办公终端" : "新增办公终端", "登记设备基础信息、资产信息和当前使用人")}
       <form data-form="computer" data-id="${escapeHtml(computer.id)}">
         <section class="modal-section">
           <div class="form-grid three">
@@ -5029,7 +5029,7 @@ function openDeviceManager(employeeId) {
   openModal(
     `${modalHeader(`${employee.name} · 设备清单`, `${employee.employeeNo} · ${orgPathName(employee.orgId)} · ${employee.department || "未填写部门"}`)}
       <section class="modal-section">
-        <div class="modal-section-title"><h3>办公电脑</h3><span>${assignedComputers.length} 台</span></div>
+        <div class="modal-section-title"><h3>办公终端</h3><span>${assignedComputers.length} 台</span></div>
         ${
           assignedComputers.length
             ? assignedComputers
@@ -5477,9 +5477,9 @@ function handleComputerSubmit(form) {
         brandName: brand?.name || "",
         modelName: model?.name || "",
         quantity: Math.abs(delta),
-        sourceLabel: delta < 0 ? "IT物资库存" : `${previous?.deviceName || computer.deviceName}（办公电脑）`,
-        targetLabel: delta < 0 ? `${computer.deviceName}（办公电脑）` : "IT物资库存",
-        note: delta < 0 ? "新增或更换办公电脑时自动扣减库存" : "更换办公电脑库存型号时归还原库存",
+        sourceLabel: delta < 0 ? "IT物资库存" : `${previous?.deviceName || computer.deviceName}（办公终端）`,
+        targetLabel: delta < 0 ? `${computer.deviceName}（办公终端）` : "IT物资库存",
+        note: delta < 0 ? "新增或更换办公终端时自动扣减库存" : "更换办公终端库存型号时归还原库存",
         triggerAction: "computer_inventory_adjustment",
       });
     });
@@ -6188,7 +6188,7 @@ function employeeDeviceExportRows(employees) {
       employee.employeeNo,
       employee.name,
       orgPathName(employee.orgId),
-      device.category === "computer" ? "办公电脑" : device.category === "monitor" ? "显示屏" : "非资产设备",
+      device.category === "computer" ? "办公终端" : device.category === "monitor" ? "显示屏" : "非资产设备",
       device.label,
       device.detail,
       device.quantity || 1,
@@ -6382,7 +6382,7 @@ function exportSelectedEmployees() {
         "部门",
         "岗位",
         "人员状态",
-        "办公电脑",
+        "办公终端",
         "显示屏",
         "其它配件",
         "邮箱",
@@ -6401,11 +6401,11 @@ function exportSelectedEmployees() {
 
 function exportSelectedComputers() {
   const computers = state.computers.filter((computer) => state.selectedComputerIds.includes(computer.id));
-  if (!computers.length) return showToast("请先选择至少一台办公电脑", true);
+  if (!computers.length) return showToast("请先选择至少一台办公终端", true);
 
-  downloadExcel(`办公资产-办公电脑-${exportDateStamp()}.xls`, [
+  downloadExcel(`办公资产-办公终端-${exportDateStamp()}.xls`, [
     {
-      name: "办公电脑",
+      name: "办公终端",
       headers: [
         "设备名",
         "所属组织",
@@ -6431,7 +6431,7 @@ function exportSelectedComputers() {
       rows: computerExportRows(computers),
     },
   ]);
-  showToast(`已导出 ${computers.length} 台办公电脑`);
+  showToast(`已导出 ${computers.length} 台办公终端`);
 }
 
 function auditExportRows(logs) {

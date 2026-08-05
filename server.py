@@ -116,8 +116,8 @@ AUDIT_CHANGE_LABELS = {
     "non_asset_removed": "人员减少非资产物资",
     "non_asset_changed": "人员非资产物资信息变更",
     "non_asset_quantity_changed": "人员物资数量变更",
-    "computer_added": "新增办公电脑",
-    "computer_removed": "删除办公电脑",
+    "computer_added": "新增办公终端",
+    "computer_removed": "删除办公终端",
     "computer_status_changed": "电脑状态变更",
     "computer_assignment_changed": "电脑使用人变更",
     "computer_info_changed": "电脑信息变更",
@@ -2686,7 +2686,7 @@ def build_audit_entries(old_snapshot: dict, new_payload: dict) -> list[dict]:
                         "status": text_value(computer.get("status")) or "idle",
                         "assignment": current_assignment,
                     },
-                    f"新增办公电脑 {device_name}",
+                    f"新增办公终端 {device_name}",
                 )
             )
             continue
@@ -2707,7 +2707,7 @@ def build_audit_entries(old_snapshot: dict, new_payload: dict) -> list[dict]:
                         "assignment": previous_assignment,
                     },
                     None,
-                    f"删除办公电脑 {device_name}",
+                    f"删除办公终端 {device_name}",
                 )
             )
             continue
@@ -2726,7 +2726,7 @@ def build_audit_entries(old_snapshot: dict, new_payload: dict) -> list[dict]:
                     device_name,
                     {"status": previous_status},
                     {"status": current_status},
-                    f"办公电脑 {device_name} 状态由 {AUDIT_STATUS_LABELS.get(previous_status, previous_status)} "
+                    f"办公终端 {device_name} 状态由 {AUDIT_STATUS_LABELS.get(previous_status, previous_status)} "
                     f"变更为 {AUDIT_STATUS_LABELS.get(current_status, current_status)}",
                 )
             )
@@ -2743,7 +2743,7 @@ def build_audit_entries(old_snapshot: dict, new_payload: dict) -> list[dict]:
                     device_name,
                     previous_assignment,
                     current_assignment,
-                    f"办公电脑 {device_name} 使用人由 {assignment_label(previous_assignment)} "
+                    f"办公终端 {device_name} 使用人由 {assignment_label(previous_assignment)} "
                     f"变更为 {assignment_label(current_assignment)}",
                 )
             )
@@ -2782,7 +2782,7 @@ def build_audit_entries(old_snapshot: dict, new_payload: dict) -> list[dict]:
                     device_name,
                     old_info,
                     new_info,
-                    f"办公电脑 {device_name} 信息变更："
+                    f"办公终端 {device_name} 信息变更："
                     f"{changed_field_summary(old_info, new_info, computer_info_labels)}",
                 )
             )
