@@ -30,6 +30,11 @@
   box-sizing: border-box;
 }
 
+/* Author styles must not override the semantic HTML hidden state. */
+[hidden] {
+  display: none !important;
+}
+
 body {
   margin: 0;
   min-width: 320px;
