@@ -18,6 +18,11 @@ from urllib.parse import urlsplit
 
 LOG = logging.getLogger("gitea-deploy")
 HEX_SHA_RE = re.compile(r"^[0-9a-f]{40}$")
+SEMVER_TAG_RE = re.compile(
+    r"^v(?P<major>0|[1-9]\d*)\.(?P<minor>0|[1-9]\d*)\.(?P<patch>0|[1-9]\d*)"
+    r"(?P<prerelease>-(?:0|[1-9]\d*|[0-9A-Za-z-]+)(?:\.(?:0|[1-9]\d*|[0-9A-Za-z-]+))*)?"
+    r"(?P<build>\+(?:[0-9A-Za-z-]+)(?:\.(?:[0-9A-Za-z-]+))*)?$"
+)
 WEBHOOK_SECRET = os.environ.get("GITEA_WEBHOOK_SECRET", "").encode("utf-8")
 WEBHOOK_PATH = os.environ.get("WEBHOOK_PATH", "/gitea").rstrip("/") or "/"
 HEALTH_PATH = os.environ.get("HEALTH_PATH", "/healthz").rstrip("/") or "/"
@@ -120,7 +125,7 @@ def _git_sha(*args: str) -> str:
 
 def _fetch_remote_branch() -> None:
     subprocess.run(
-        ["git", "-C", str(APP_DIR), "fetch", "--prune", "origin", DEPLOY_BRANCH],
+        ["git", "-C", str(APP_DIR), "fetch", "--prune", "--tags", "origin", DEPLOY_BRANCH],
         check=True,
         capture_output=True,
         text=True,
@@ -142,34 +147,115 @@ def _latest_sha() -> str:
     return sha
 
 
-def _available_versions(current_sha: str, latest_sha_remote: str) -> list[dict]:
+def _parse_semver_tag(tag_name: str) -> dict | None:
+    match = SEMVER_TAG_RE.fullmatch(tag_name)
+    if not match:
+        return None
+
+    prerelease = tuple((match.group("prerelease") or "").lstrip("-").split("."))
+    if prerelease == ("",):
+        prerelease = ()
+    if any(
+        identifier.isdigit() and len(identifier) > 1 and identifier.startswith("0")
+        for identifier in prerelease
+    ):
+        return None
+    prerelease_key = tuple(
+        (0, int(identifier)) if identifier.isdigit() else (1, identifier)
+        for identifier in prerelease
+    )
+    return {
+        "version": tag_name,
+        "_sortKey": (
+            int(match.group("major")),
+            int(match.group("minor")),
+            int(match.group("patch")),
+            1 if not prerelease else 0,
+            prerelease_key,
+        ),
+    }
+
+
+def _tag_commit_sha(tag_name: str) -> str:
+    sha = _git_sha("rev-list", "-n", "1", f"{tag_name}^{{commit}}")
+    return sha if HEX_SHA_RE.fullmatch(sha) else ""
+
+
+def _commit_details(commit_sha: str) -> tuple[str, str]:
+    output = _git_output("show", "-s", "--format=%aI%x1f%s", commit_sha)
+    parts = output.split("\x1f", 1)
+    if len(parts) != 2:
+        return "", ""
+    return parts[0], parts[1]
+
+
+def _public_version(version: dict | None) -> dict | None:
+    if not version:
+        return None
+    return {key: value for key, value in version.items() if not key.startswith("_")}
+
+
+def _available_versions(current_sha: str) -> tuple[list[dict], dict | None, dict | None]:
     output = _git_output(
-        "log",
+        "tag",
+        "--merged",
         f"origin/{DEPLOY_BRANCH}",
-        "--first-parent",
-        f"-n{VERSION_LIST_LIMIT}",
-        "--format=%H%x1f%h%x1f%aI%x1f%s",
+        "--list",
+        "v*",
     )
     versions = []
-    for line in output.splitlines():
-        parts = line.split("\x1f", 3)
-        if len(parts) != 4:
+    for tag_name in output.splitlines():
+        parsed = _parse_semver_tag(tag_name.strip())
+        if not parsed:
             continue
-        sha, short_sha, authored_at, subject = parts
-        if not HEX_SHA_RE.fullmatch(sha):
+        commit_sha = _tag_commit_sha(tag_name)
+        if not commit_sha:
             continue
+        authored_at, subject = _commit_details(commit_sha)
         versions.append(
             {
-                "sha": sha,
-                "shortSha": short_sha,
+                **parsed,
+                "tag": tag_name,
+                "sha": commit_sha,
+                "shortSha": commit_sha[:7],
                 "subject": subject,
                 "authoredAt": authored_at,
-                "isCurrent": sha == current_sha,
-                "isLatest": sha == latest_sha_remote,
-                "isSelectable": sha != current_sha and _is_ancestor(current_sha, sha),
             }
         )
-    return versions
+
+    versions.sort(key=lambda item: (item["_sortKey"], item["version"]), reverse=True)
+    latest_version = versions[0] if versions else None
+    current_candidates = [item for item in versions if item["sha"] == current_sha]
+    if not current_candidates:
+        current_candidates = [
+            item for item in versions if _is_ancestor(item["sha"], current_sha)
+        ]
+    current_version = (
+        max(current_candidates, key=lambda item: (item["_sortKey"], item["version"]))
+        if current_candidates
+        else None
+    )
+    current_sort_key = current_version["_sortKey"] if current_version else None
+
+    for version in versions:
+        version["isCurrent"] = version["sha"] == current_sha
+        version["isLatest"] = version is latest_version
+        version["isSelectable"] = (
+            not version["isCurrent"]
+            and _is_ancestor(current_sha, version["sha"])
+            and (current_sort_key is None or version["_sortKey"] > current_sort_key)
+        )
+
+    display_versions = versions[:VERSION_LIST_LIMIT]
+    if current_version and current_version not in display_versions:
+        display_versions.append(current_version)
+        display_versions.sort(key=lambda item: (item["_sortKey"], item["version"]), reverse=True)
+    public_versions = [_public_version(version) for version in display_versions]
+    return (
+        [version for version in public_versions if version is not None],
+        _public_version(current_version),
+        _public_version(latest_version),
+    )
 
 
 def _is_ancestor(ancestor_sha: str, descendant_sha: str) -> bool:
@@ -198,12 +284,28 @@ def _is_branch_commit(commit_sha: str) -> bool:
         return _is_ancestor(commit_sha, f"origin/{DEPLOY_BRANCH}")
 
 
+def _snapshot_status(snapshot: dict) -> str:
+    if snapshot["deploymentRunning"]:
+        return "running"
+    if snapshot["deploymentPending"]:
+        return "queued"
+    if any(version.get("isSelectable") for version in snapshot["availableVersions"]):
+        return "update_available"
+    if not snapshot["availableVersions"]:
+        return "no_releases"
+    if not snapshot.get("currentVersion"):
+        return "no_release_available"
+    if snapshot["currentSha"] == snapshot["latestSha"]:
+        return "up_to_date"
+    return "no_release_available"
+
+
 def _update_snapshot() -> dict:
     with git_lock:
         _fetch_remote_branch()
         current_sha = _current_sha()
         latest_sha_remote = _latest_sha()
-        versions = _available_versions(current_sha, latest_sha_remote)
+        versions, current_version, latest_version = _available_versions(current_sha)
     with state_lock:
         running = deployment_running
         pending = deployment_pending
@@ -215,6 +317,10 @@ def _update_snapshot() -> dict:
         "latestSha": latest_sha_remote,
         "currentShortSha": current_sha[:7],
         "latestShortSha": latest_sha_remote[:7],
+        "currentVersion": current_version["version"] if current_version else "",
+        "latestVersion": latest_version["version"] if latest_version else "",
+        "currentVersionSha": current_version["sha"] if current_version else "",
+        "latestVersionSha": latest_version["sha"] if latest_version else "",
         "deploymentRunning": running,
         "deploymentPending": pending,
         "availableVersions": versions,
@@ -226,27 +332,25 @@ def _check_and_queue_update(target_sha: str = "") -> dict:
     snapshot = _update_snapshot()
     target_sha = target_sha.strip().lower()
     if target_sha:
-        if not _is_branch_commit(target_sha):
-            raise InvalidTargetVersionError("selected target is not a commit on the deployment branch")
+        target_version = next(
+            (
+                version
+                for version in snapshot["availableVersions"]
+                if version["sha"] == target_sha and version["isSelectable"]
+            ),
+            None,
+        )
+        if not target_version:
+            raise InvalidTargetVersionError(
+                "selected target is not a higher published semantic version"
+            )
         snapshot["targetSha"] = target_sha
-        if target_sha == snapshot["currentSha"]:
-            snapshot["status"] = "up_to_date"
-            return snapshot
-        with git_lock:
-            if not _is_ancestor(snapshot["currentSha"], target_sha):
-                raise InvalidTargetVersionError("selected target is older than the current deployment")
+        snapshot["targetVersion"] = target_version["version"]
         _enqueue_deployment(target_sha)
         snapshot["deploymentPending"] = True
         snapshot["status"] = "queued"
         return snapshot
-    if snapshot["currentSha"] == snapshot["latestSha"]:
-        snapshot["status"] = (
-            "running"
-            if snapshot["deploymentRunning"]
-            else "up_to_date"
-        )
-    else:
-        snapshot["status"] = "update_available"
+    snapshot["status"] = _snapshot_status(snapshot)
     return snapshot
 
 
@@ -288,14 +392,7 @@ class WebhookHandler(BaseHTTPRequestHandler):
                 LOG.exception("Unable to inspect update status")
                 self._reply_json(502, {"ok": False, "error": "update_status_unavailable"})
                 return
-            if snapshot["deploymentRunning"]:
-                snapshot["status"] = "running"
-            elif snapshot["deploymentPending"]:
-                snapshot["status"] = "queued"
-            elif snapshot["currentSha"] == snapshot["latestSha"]:
-                snapshot["status"] = "up_to_date"
-            else:
-                snapshot["status"] = "update_available"
+            snapshot["status"] = _snapshot_status(snapshot)
             self._reply_json(200, snapshot)
         else:
             self._reply(404, b"not found\n")

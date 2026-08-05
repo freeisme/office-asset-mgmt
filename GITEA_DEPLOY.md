@@ -177,8 +177,8 @@ APP_DIR=/opt/office-asset-mgmt
 
 Set the same `DEPLOY_CONTROL_TOKEN` in `/opt/office-asset-mgmt/.env` as
 `UPDATE_CONTROL_TOKEN`. The application uses this separate token to read available
-versions and queue a manually selected commit. It is not the Gitea webhook signature
-and must not be exposed to browsers.
+release tags and queue a manually selected published version. It is not the Gitea
+webhook signature and must not be exposed to browsers.
 
 Install and start the receiver:
 
@@ -215,13 +215,23 @@ Now a push to `main` only runs:
 HMAC validation -> repository/branch validation -> 204 acknowledgement
 ```
 
-Administrators use **Settings > 版本更新** to check recent `main` commits, select a
-newer target version, and confirm the update. The deployment service verifies that the
-selected commit belongs to `origin/main` history and is not older than the current
-deployment before building and restarting Docker.
+Administrators use **Settings > 版本更新** to check published SemVer tags, select a
+higher version, and confirm the update. The deployment service verifies that the
+selected tag belongs to `origin/main` history and is newer than the current release
+before building and restarting Docker.
 
 Each release must add a corresponding entry to `VERSION_NOTES.md`, including database
 migrations, backup requirements, configuration changes, and rollback notes.
+
+Create and push an annotated release tag from the development machine:
+
+```bash
+git tag -a v1.0.0 -m "Release v1.0.0"
+git push origin v1.0.0
+```
+
+Use the next unused SemVer tag for later releases, then open the tag in Gitea
+**Releases** and add the matching release notes and attachments.
 
 Watch deployment logs:
 

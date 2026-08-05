@@ -744,13 +744,13 @@ ssh://git@192.168.253.25:2222/admin1/office-asset-management.git
   -> POST /api/updates/check
   -> 后端校验 admin + CSRF
   -> app 容器请求 host.docker.internal:9000/control/status
-  -> 宿主机服务 fetch origin/main 并返回最近提交列表
+  -> 宿主机服务 fetch origin/main 和版本标签，并返回已发布 SemVer 列表
 
-管理员选择目标提交并点击“更新到所选版本”
+管理员选择版本号更高的已发布版本并点击“更新到所选版本”
   -> POST /api/updates/apply
-  -> 后端校验提交 SHA、admin + CSRF
+  -> 后端校验发布版本 SHA、admin + CSRF
   -> app 容器请求 host.docker.internal:9000/control/update
-  -> 宿主机服务校验目标提交属于 origin/main 历史且不早于当前版本
+  -> 宿主机服务校验目标标签属于 origin/main 历史且版本号高于当前版本
   -> 排队执行 update_from_gitea.sh
 ```
 
@@ -760,8 +760,10 @@ ssh://git@192.168.253.25:2222/admin1/office-asset-management.git
 
 更新状态：
 
-- `up_to_date`：当前部署已经是 Gitea 最新提交。
-- `update_available`：存在可选版本，但尚未执行更新。
+- `up_to_date`：当前部署已经是最新发布版本。
+- `update_available`：存在版本号更高的已发布版本，但尚未执行更新。
+- `no_releases`：Gitea 中没有符合 SemVer 的发布标签。
+- `no_release_available`：没有高于当前部署版本的已发布版本。
 - `queued`：管理员选择的版本已排队。
 - `running`：部署正在执行。
 
@@ -769,19 +771,25 @@ ssh://git@192.168.253.25:2222/admin1/office-asset-management.git
 
 - `GET /healthz`：服务存活检查。
 - `GET /control/status`：带控制令牌的版本状态查询。
-- `POST /control/update`：带控制令牌并提交 `targetSha` 后排队指定版本更新。
+- `POST /control/update`：带控制令牌并提交已发布版本对应的 `targetSha` 后排队更新。
+
+检查响应中的 `availableVersions` 只包含 Gitea 中已合并到 `origin/main` 的
+`vMAJOR.MINOR.PATCH` 标签。每项包含 `version`、`tag`、`sha`、提交说明、发布时间、
+`isCurrent`、`isLatest` 和 `isSelectable`。前端只允许选择 `isSelectable` 为真的版本。
 
 ### 8.4 版本更新说明要求
 
 每次准备推送到 Gitea 的可部署变更，必须同步修改
 `VERSION_NOTES.md`，至少包含：
 
-1. 日期和版本对应的提交范围或目标提交。
+1. 日期、SemVer 版本标签和对应的提交范围或目标提交。
 2. 功能、修复和安全变更摘要。
 3. 是否包含数据库迁移。
 4. 更新前备份要求、配置变更和回滚注意事项。
 
-管理员选择版本前，应先阅读 `VERSION_NOTES.md` 中对应条目。数据库迁移不由
+发布版本必须使用未占用的注释标签，格式为 `vMAJOR.MINOR.PATCH`，必要时可以使用
+符合 SemVer 的预发布后缀，例如 `v1.2.3-rc.1`。管理员选择版本前，应先阅读
+`VERSION_NOTES.md` 中对应条目。数据库迁移不由
 更新脚本自动执行，涉及结构变更时必须先完成评审和备份。
 
 ### 8.5 发布后验证
@@ -881,7 +889,7 @@ curl -i http://127.0.0.1:8000/api/auth/bootstrap-status
 - Gitea 中推送一个测试提交。
 - 确认 Webhook 日志显示已接收但未自动部署。
 - 设置页点击“检查版本”。
-- 确认返回 `update_available` 和可选提交列表。
+- 确认返回 `update_available` 和可选发布版本列表。
 - 选择目标版本并点击“更新到所选版本”。
 - 确认返回 `queued`，观察更新服务日志。
 - 等待 app、db 变为 healthy。
@@ -1062,6 +1070,8 @@ sudo curl --fail http://127.0.0.1:9000/healthz
 
 - [ ] `.env` 和运行时令牌没有进入 commit。
 - [ ] 已推送 Gitea `main`。
+- [ ] 已创建未占用的 SemVer 注释标签并推送到 Gitea。
+- [ ] Gitea Releases 已补充对应版本说明和附件。
 - [ ] 已确认 Webhook 不会自动部署，并完成手动版本更新验证。
 - [ ] app、db 均 healthy。
 - [ ] 页面已加载新资源版本。

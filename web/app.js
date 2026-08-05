@@ -2496,15 +2496,19 @@ function updateStatusLabel(status) {
   if (status === "queued") return "手动更新已排队";
   if (status === "running") return "更新正在执行";
   if (status === "up_to_date") return "当前已是最新版本";
+  if (status === "no_releases") return "暂无已发布版本";
+  if (status === "no_release_available") return "暂无更高发布版本";
   return "尚未检查";
 }
 
 function updateStatusDetail(status) {
-  if (status === "update_available") return "请选择目标提交版本，再手动执行更新。推送不会自动部署。";
-  if (status === "queued") return "服务器将按所选提交版本构建应用，完成后请刷新页面。";
+  if (status === "update_available") return "请选择版本号更高的已发布版本，再手动执行更新。推送不会自动部署。";
+  if (status === "queued") return "服务器将按所选发布版本构建应用，完成后请刷新页面。";
   if (status === "running") return "应用服务可能会短暂重启，请稍后刷新页面。";
   if (status === "up_to_date") return "当前部署版本与服务器 Gitea 仓库一致。";
-  return "点击按钮读取服务器 Gitea 的可用提交版本。";
+  if (status === "no_releases") return "Gitea 仓库中还没有 vMAJOR.MINOR.PATCH 格式的已发布版本标签。";
+  if (status === "no_release_available") return "当前部署版本没有更高的已发布版本，不能直接选择普通提交更新。";
+  return "点击按钮读取 Gitea 中已发布的语义化版本标签。";
 }
 
 function renderUpdatePanel(admin) {
@@ -2520,6 +2524,12 @@ function renderUpdatePanel(admin) {
   const busy = checking || applying || deploymentBusy;
   const currentSha = status.currentShortSha || (status.currentSha ? String(status.currentSha).slice(0, 7) : "-");
   const latestSha = status.latestShortSha || (status.latestSha ? String(status.latestSha).slice(0, 7) : "-");
+  const currentVersion = status.currentVersion
+    ? `${status.currentVersion} · ${currentSha}`
+    : `未发布版本 · ${currentSha}`;
+  const latestVersion = status.latestVersion
+    ? `${status.latestVersion} · ${(status.latestVersionSha || status.latestSha || latestSha).slice(0, 7)}`
+    : "暂无已发布版本";
   const statusValue = status.status || "";
   const versions = Array.isArray(status.availableVersions) ? status.availableVersions : [];
   const selectedSha = versions.some(
@@ -2529,7 +2539,7 @@ function renderUpdatePanel(admin) {
     ? settingsState.updateSelectedSha
     : "";
   const versionOptions = versions.length
-    ? versions
+    ? `<option value="">请选择一个版本</option>${versions
         .map((version) => {
           const shortSha = version.shortSha || String(version.sha || "").slice(0, 7);
           const markers = [
@@ -2538,27 +2548,32 @@ function renderUpdatePanel(admin) {
             version.isSelectable === false && !version.isCurrent ? "历史" : "",
           ].filter(Boolean);
           const markerText = markers.length ? `（${markers.join("、")}）` : "";
-          const label = `${shortSha} · ${version.subject || "无提交说明"}${markerText} · ${formatDateTime(
+          const label = `${version.version || version.tag || "未知版本"} · ${version.subject || "无提交说明"}${markerText} · ${shortSha} · ${formatDateTime(
             version.authoredAt || "",
           )}`;
           return `<option value="${escapeHtml(version.sha || "")}" ${
-            version.isCurrent || version.isSelectable === false ? "disabled" : ""
+            version.isSelectable === false ? "disabled" : ""
           } ${version.sha === selectedSha ? "selected" : ""}>${escapeHtml(label)}</option>`;
         })
-        .join("")
-    : '<option value="">请先检查版本</option>';
+        .join("")}`
+    : `<option value="">${
+        statusValue === "no_releases"
+          ? "检查完成：暂无已发布版本"
+          : statusValue
+            ? "检查完成：暂无更高发布版本"
+            : "请先检查版本"
+      }</option>`;
   return `<section class="data-panel settings-panel update-panel">
     <div class="section-heading settings-panel-heading">
-      <div><h2>版本更新</h2><span>从 Gitea 读取 main 分支版本，选择提交后手动更新应用。</span></div>
+      <div><h2>版本更新</h2><span>从 Gitea 读取已发布的语义化版本标签，只能选择版本号更高的版本更新应用。</span></div>
     </div>
     <div class="update-version-grid">
-      <div class="update-version-item"><span>当前版本</span><strong>${escapeHtml(currentSha)}</strong></div>
-      <div class="update-version-item"><span>Gitea 最新版本</span><strong>${escapeHtml(latestSha)}</strong></div>
+      <div class="update-version-item"><span>当前版本</span><strong>${escapeHtml(currentVersion)}</strong></div>
+      <div class="update-version-item"><span>Gitea 最新发布版本</span><strong>${escapeHtml(latestVersion)}</strong></div>
     </div>
     <div class="update-target-field">
       <label for="updateTargetVersion">目标版本</label>
       <select id="updateTargetVersion" data-update-target ${busy ? "disabled" : ""}>
-        <option value="">请选择一个版本</option>
         ${versionOptions}
       </select>
     </div>
@@ -5265,17 +5280,17 @@ async function handleUpdateCheck(button) {
     const versions = Array.isArray(payload.availableVersions) ? payload.availableVersions : [];
     settingsState.updateSelectedSha =
       payload.status === "update_available"
-        ? versions.find(
-            (version) => version.isSelectable !== false && !version.isCurrent && version.isLatest,
-          )?.sha ||
-          versions.find((version) => version.isSelectable !== false && !version.isCurrent)?.sha ||
-          ""
+        ? versions.find((version) => version.isSelectable && !version.isCurrent)?.sha || ""
         : "";
     const status = payload.status || "";
     if (status === "up_to_date") {
-      showToast(`当前已是最新版本 ${payload.currentShortSha || ""}`);
+      showToast(`当前已是最新发布版本 ${payload.currentVersion || payload.currentShortSha || ""}`);
     } else if (status === "update_available") {
-      showToast(`发现可用版本 ${payload.latestShortSha || ""}，请选择后手动更新`);
+      showToast(`发现可用发布版本 ${payload.latestVersion || ""}，请选择后手动更新`);
+    } else if (status === "no_releases") {
+      showToast("检查完成：Gitea 中暂无已发布版本", true);
+    } else if (status === "no_release_available") {
+      showToast("检查完成：当前没有版本号更高的已发布版本");
     } else {
       showToast("版本列表已更新");
     }
@@ -5295,7 +5310,8 @@ async function handleApplySelectedUpdate() {
   if (!targetSha || !version || version.isCurrent || version.isSelectable === false) {
     return showToast("请先检查并选择一个目标版本", true);
   }
-  if (!window.confirm(`确定更新到 ${version.shortSha || targetSha.slice(0, 7)}：${version.subject || ""} 吗？`)) {
+  const targetLabel = version.version || version.tag || version.shortSha || targetSha.slice(0, 7);
+  if (!window.confirm(`确定更新到 ${targetLabel}：${version.subject || ""} 吗？`)) {
     return;
   }
   settingsState.updateSelectedSha = targetSha;
@@ -5309,7 +5325,7 @@ async function handleApplySelectedUpdate() {
     settingsState.updateStatus = payload;
     settingsState.updateSelectedSha = payload.targetSha || targetSha;
     if (payload.status === "queued" || payload.status === "running") {
-      showToast(`版本 ${payload.targetSha?.slice(0, 7) || targetSha.slice(0, 7)} 已进入手动更新队列`);
+      showToast(`版本 ${payload.targetVersion || targetLabel} 已进入手动更新队列`);
       window.setTimeout(() => window.location.reload(), 7000);
     } else if (payload.status === "up_to_date") {
       showToast("当前已经是所选版本");

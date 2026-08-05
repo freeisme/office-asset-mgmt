@@ -4644,12 +4644,13 @@ class AppHandler(SimpleHTTPRequestHandler):
                 raise ApiError("请选择有效的版本。")
             update_payload = request_update_service(target_sha)
             status = text_value(update_payload.get("status"))
+            target_version = text_value(update_payload.get("targetVersion")) or target_sha[:7]
             write_auth_audit(
                 text_value(context.get("username")),
                 "system_update_queued" if status == "queued" else "system_update_checked",
                 "",
                 "system_update",
-                f"手动选择 Gitea 版本 {target_sha[:7]}",
+                f"手动选择 Gitea 发布版本 {target_version}（{target_sha[:7]}）",
             )
             response_status = HTTPStatus.ACCEPTED if status == "queued" else HTTPStatus.OK
             self.send_json(update_payload, status=response_status)
