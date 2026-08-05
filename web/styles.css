@@ -2208,6 +2208,35 @@ tbody tr:hover {
   margin-bottom: 14px;
 }
 
+.update-target-field {
+  display: grid;
+  gap: 6px;
+  margin-bottom: 14px;
+}
+
+.update-target-field label {
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.update-target-field select {
+  width: 100%;
+  min-height: 38px;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: 0;
+  outline: 0;
+  color: var(--ink);
+  background: var(--white);
+  font-size: 12px;
+}
+
+.update-target-field select:focus {
+  border-color: var(--teal);
+  box-shadow: 0 0 0 2px rgba(11, 119, 133, 0.12);
+}
+
 .update-version-item {
   display: grid;
   gap: 5px;
@@ -4135,7 +4164,8 @@ html[data-theme="dark"] .form-field input,
 html[data-theme="dark"] .form-field select,
 html[data-theme="dark"] .form-field textarea,
 html[data-theme="dark"] .select-box input,
-html[data-theme="dark"] .select-box select {
+html[data-theme="dark"] .select-box select,
+html[data-theme="dark"] .update-target-field select {
   color: var(--ink);
   background: #0f161e !important;
   border-color: var(--line) !important;

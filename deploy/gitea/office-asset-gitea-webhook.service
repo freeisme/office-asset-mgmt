@@ -1,5 +1,5 @@
 [Unit]
-Description=Office Asset Management Gitea deployment webhook
+Description=Office Asset Management Gitea webhook and manual deployment service
 After=network-online.target docker.service
 Wants=network-online.target
 Requires=docker.service

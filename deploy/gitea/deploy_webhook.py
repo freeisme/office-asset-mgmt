@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Receive a signed Gitea push webhook and queue one deployment."""
+"""Receive a signed Gitea webhook and expose manual deployment controls."""
 
 from __future__ import annotations
 
@@ -24,6 +24,7 @@ HEALTH_PATH = os.environ.get("HEALTH_PATH", "/healthz").rstrip("/") or "/"
 WEBHOOK_BIND = os.environ.get("WEBHOOK_BIND", "0.0.0.0")
 WEBHOOK_PORT = int(os.environ.get("WEBHOOK_PORT", "9000"))
 MAX_BODY_BYTES = int(os.environ.get("WEBHOOK_MAX_BODY_BYTES", "1048576"))
+VERSION_LIST_LIMIT = max(5, min(50, int(os.environ.get("DEPLOY_VERSION_LIST_LIMIT", "30"))))
 CONTROL_TOKEN = os.environ.get("DEPLOY_CONTROL_TOKEN", "").strip()
 CONTROL_PATH = os.environ.get("DEPLOY_CONTROL_PATH", "/control/update").rstrip("/") or "/"
 CONTROL_STATUS_PATH = os.environ.get("DEPLOY_CONTROL_STATUS_PATH", "/control/status").rstrip("/") or "/"
@@ -38,9 +39,14 @@ DEPLOY_SCRIPT = Path(
 ).resolve()
 
 state_lock = threading.Lock()
+git_lock = threading.Lock()
 deployment_running = False
 deployment_pending = False
-latest_sha = ""
+pending_sha = ""
+
+
+class InvalidTargetVersionError(ValueError):
+    pass
 
 
 def _verify_signature(body: bytes, supplied_signature: str) -> bool:
@@ -55,10 +61,10 @@ def _verify_signature(body: bytes, supplied_signature: str) -> bool:
 
 
 def _enqueue_deployment(commit_sha: str) -> None:
-    global deployment_pending, deployment_running, latest_sha
+    global deployment_pending, deployment_running, pending_sha
 
     with state_lock:
-        latest_sha = commit_sha
+        pending_sha = commit_sha
         deployment_pending = True
         if deployment_running:
             return
@@ -68,7 +74,7 @@ def _enqueue_deployment(commit_sha: str) -> None:
 
 
 def _deployment_worker() -> None:
-    global deployment_pending, deployment_running, latest_sha
+    global deployment_pending, deployment_running, pending_sha
 
     while True:
         with state_lock:
@@ -76,26 +82,27 @@ def _deployment_worker() -> None:
                 deployment_running = False
                 return
             deployment_pending = False
-            commit_sha = latest_sha
+            commit_sha = pending_sha
 
         env = os.environ.copy()
         env["DEPLOY_BRANCH"] = DEPLOY_BRANCH
-        env["DEPLOY_EXPECTED_SHA"] = commit_sha
+        env["DEPLOY_TARGET_SHA"] = commit_sha
         LOG.info("Starting deployment for commit %s", commit_sha)
         try:
-            subprocess.run(
-                ["/bin/bash", str(DEPLOY_SCRIPT)],
-                cwd=str(APP_DIR),
-                env=env,
-                check=True,
-            )
+            with git_lock:
+                subprocess.run(
+                    ["/bin/bash", str(DEPLOY_SCRIPT)],
+                    cwd=str(APP_DIR),
+                    env=env,
+                    check=True,
+                )
         except Exception:
             LOG.exception("Deployment failed for commit %s", commit_sha)
         else:
             LOG.info("Deployment completed for commit %s", commit_sha)
 
 
-def _git_sha(*args: str) -> str:
+def _git_output(*args: str) -> str:
     result = subprocess.run(
         ["git", "-C", str(APP_DIR), *args],
         check=True,
@@ -103,7 +110,22 @@ def _git_sha(*args: str) -> str:
         text=True,
         timeout=20,
     )
-    return result.stdout.strip().splitlines()[0].strip()
+    return result.stdout.strip()
+
+
+def _git_sha(*args: str) -> str:
+    output = _git_output(*args)
+    return output.splitlines()[0].strip() if output else ""
+
+
+def _fetch_remote_branch() -> None:
+    subprocess.run(
+        ["git", "-C", str(APP_DIR), "fetch", "--prune", "origin", DEPLOY_BRANCH],
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
 
 
 def _current_sha() -> str:
@@ -114,16 +136,74 @@ def _current_sha() -> str:
 
 
 def _latest_sha() -> str:
-    output = _git_sha("ls-remote", "origin", f"refs/heads/{DEPLOY_BRANCH}")
-    sha = output.split()[0] if output else ""
+    sha = _git_sha("rev-parse", f"origin/{DEPLOY_BRANCH}")
     if not HEX_SHA_RE.fullmatch(sha):
-        raise RuntimeError("Gitea returned an invalid branch reference")
+        raise RuntimeError("deployment checkout returned an invalid remote branch")
     return sha
 
 
+def _available_versions(current_sha: str, latest_sha_remote: str) -> list[dict]:
+    output = _git_output(
+        "log",
+        f"origin/{DEPLOY_BRANCH}",
+        "--first-parent",
+        f"-n{VERSION_LIST_LIMIT}",
+        "--format=%H%x1f%h%x1f%aI%x1f%s",
+    )
+    versions = []
+    for line in output.splitlines():
+        parts = line.split("\x1f", 3)
+        if len(parts) != 4:
+            continue
+        sha, short_sha, authored_at, subject = parts
+        if not HEX_SHA_RE.fullmatch(sha):
+            continue
+        versions.append(
+            {
+                "sha": sha,
+                "shortSha": short_sha,
+                "subject": subject,
+                "authoredAt": authored_at,
+                "isCurrent": sha == current_sha,
+                "isLatest": sha == latest_sha_remote,
+                "isSelectable": sha != current_sha and _is_ancestor(current_sha, sha),
+            }
+        )
+    return versions
+
+
+def _is_ancestor(ancestor_sha: str, descendant_sha: str) -> bool:
+    result = subprocess.run(
+        [
+            "git",
+            "-C",
+            str(APP_DIR),
+            "merge-base",
+            "--is-ancestor",
+            ancestor_sha,
+            descendant_sha,
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=20,
+    )
+    return result.returncode == 0
+
+
+def _is_branch_commit(commit_sha: str) -> bool:
+    if not HEX_SHA_RE.fullmatch(commit_sha):
+        return False
+    with git_lock:
+        return _is_ancestor(commit_sha, f"origin/{DEPLOY_BRANCH}")
+
+
 def _update_snapshot() -> dict:
-    current_sha = _current_sha()
-    latest_sha_remote = _latest_sha()
+    with git_lock:
+        _fetch_remote_branch()
+        current_sha = _current_sha()
+        latest_sha_remote = _latest_sha()
+        versions = _available_versions(current_sha, latest_sha_remote)
     with state_lock:
         running = deployment_running
         pending = deployment_pending
@@ -137,17 +217,36 @@ def _update_snapshot() -> dict:
         "latestShortSha": latest_sha_remote[:7],
         "deploymentRunning": running,
         "deploymentPending": pending,
+        "availableVersions": versions,
+        "automaticDeployment": False,
     }
 
 
-def _check_and_queue_update() -> dict:
+def _check_and_queue_update(target_sha: str = "") -> dict:
     snapshot = _update_snapshot()
-    if snapshot["currentSha"] == snapshot["latestSha"]:
-        snapshot["status"] = "running" if snapshot["deploymentRunning"] else "up_to_date"
+    target_sha = target_sha.strip().lower()
+    if target_sha:
+        if not _is_branch_commit(target_sha):
+            raise InvalidTargetVersionError("selected target is not a commit on the deployment branch")
+        snapshot["targetSha"] = target_sha
+        if target_sha == snapshot["currentSha"]:
+            snapshot["status"] = "up_to_date"
+            return snapshot
+        with git_lock:
+            if not _is_ancestor(snapshot["currentSha"], target_sha):
+                raise InvalidTargetVersionError("selected target is older than the current deployment")
+        _enqueue_deployment(target_sha)
+        snapshot["deploymentPending"] = True
+        snapshot["status"] = "queued"
         return snapshot
-    _enqueue_deployment(snapshot["latestSha"])
-    snapshot["deploymentPending"] = True
-    snapshot["status"] = "queued"
+    if snapshot["currentSha"] == snapshot["latestSha"]:
+        snapshot["status"] = (
+            "running"
+            if snapshot["deploymentRunning"]
+            else "up_to_date"
+        )
+    else:
+        snapshot["status"] = "update_available"
     return snapshot
 
 
@@ -189,9 +288,14 @@ class WebhookHandler(BaseHTTPRequestHandler):
                 LOG.exception("Unable to inspect update status")
                 self._reply_json(502, {"ok": False, "error": "update_status_unavailable"})
                 return
-            snapshot["status"] = "running" if snapshot["deploymentRunning"] else (
-                "queued" if snapshot["deploymentPending"] else "up_to_date"
-            )
+            if snapshot["deploymentRunning"]:
+                snapshot["status"] = "running"
+            elif snapshot["deploymentPending"]:
+                snapshot["status"] = "queued"
+            elif snapshot["currentSha"] == snapshot["latestSha"]:
+                snapshot["status"] = "up_to_date"
+            else:
+                snapshot["status"] = "update_available"
             self._reply_json(200, snapshot)
         else:
             self._reply(404, b"not found\n")
@@ -207,13 +311,27 @@ class WebhookHandler(BaseHTTPRequestHandler):
             except ValueError:
                 self._reply(400, b"invalid content length\n")
                 return
-            if content_length > MAX_BODY_BYTES:
+            if content_length < 0 or content_length > MAX_BODY_BYTES:
                 self._reply(413, b"request body too large\n")
                 return
-            if content_length:
-                self.rfile.read(content_length)
+            body = self.rfile.read(content_length) if content_length else b"{}"
             try:
-                snapshot = _check_and_queue_update()
+                payload = json.loads(body.decode("utf-8"))
+            except (UnicodeDecodeError, json.JSONDecodeError):
+                self._reply(400, b"invalid JSON\n")
+                return
+            if not isinstance(payload, dict):
+                self._reply(400, b"invalid JSON object\n")
+                return
+            target_sha = str(payload.get("targetSha", "")).strip().lower()
+            if not target_sha:
+                self._reply_json(400, {"ok": False, "error": "target_version_required"})
+                return
+            try:
+                snapshot = _check_and_queue_update(target_sha)
+            except InvalidTargetVersionError:
+                self._reply_json(400, {"ok": False, "error": "invalid_target_version"})
+                return
             except Exception as exc:
                 LOG.exception("Unable to check or queue an update")
                 self._reply_json(502, {"ok": False, "error": "update_queue_unavailable"})
@@ -264,9 +382,12 @@ class WebhookHandler(BaseHTTPRequestHandler):
             self._reply(204)
             return
 
-        LOG.info("Accepted push from %s at %s", repository, commit_sha)
-        _enqueue_deployment(commit_sha)
-        self._reply(202, b"deployment queued\n")
+        LOG.info(
+            "Accepted push from %s at %s; automatic deployment is disabled, manual update is required",
+            repository,
+            commit_sha,
+        )
+        self._reply(204)
 
     def log_message(self, format: str, *args: object) -> None:
         LOG.info("%s - %s", self.address_string(), format % args)
@@ -278,7 +399,7 @@ def main() -> None:
     if not DEPLOY_SCRIPT.is_file():
         raise SystemExit(f"Deployment script not found: {DEPLOY_SCRIPT}")
     if not CONTROL_TOKEN:
-        LOG.warning("DEPLOY_CONTROL_TOKEN is not set; one-click update control is disabled")
+        LOG.warning("DEPLOY_CONTROL_TOKEN is not set; manual update control is disabled")
 
     logging.basicConfig(
         level=os.environ.get("LOG_LEVEL", "INFO").upper(),

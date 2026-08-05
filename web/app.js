@@ -11,6 +11,7 @@ const API_USERS_URL = "/api/users";
 const API_SETTINGS_URL = "/api/settings";
 const API_BACKUPS_URL = "/api/backups";
 const API_UPDATE_CHECK_URL = "/api/updates/check";
+const API_UPDATE_APPLY_URL = "/api/updates/apply";
 const THEME_STORAGE_KEY = "office-asset-center-theme-v1";
 
 function applyTheme(theme) {
@@ -112,6 +113,8 @@ let settingsState = {
   loaded: false,
   updateStatus: null,
   updateChecking: false,
+  updateApplying: false,
+  updateSelectedSha: "",
 };
 let authBootPromise = null;
 
@@ -651,6 +654,8 @@ function requestJson(url, options = {}) {
           loaded: false,
           updateStatus: null,
           updateChecking: false,
+          updateApplying: false,
+          updateSelectedSha: "",
         };
         authBootPromise = null;
         startAuth();
@@ -894,6 +899,8 @@ async function logout() {
     loaded: false,
     updateStatus: null,
     updateChecking: false,
+    updateApplying: false,
+    updateSelectedSha: "",
   };
   document.querySelector("#modalRoot").innerHTML = "";
   authBootPromise = null;
@@ -2485,17 +2492,19 @@ function renderDatabaseBackupTable() {
 }
 
 function updateStatusLabel(status) {
-  if (status === "queued") return "发现新版本，更新已排队";
+  if (status === "update_available") return "发现可用版本";
+  if (status === "queued") return "手动更新已排队";
   if (status === "running") return "更新正在执行";
   if (status === "up_to_date") return "当前已是最新版本";
   return "尚未检查";
 }
 
 function updateStatusDetail(status) {
-  if (status === "queued") return "服务器将从 Gitea 拉取最新 main 分支并重新构建应用。";
+  if (status === "update_available") return "请选择目标提交版本，再手动执行更新。推送不会自动部署。";
+  if (status === "queued") return "服务器将按所选提交版本构建应用，完成后请刷新页面。";
   if (status === "running") return "应用服务可能会短暂重启，请稍后刷新页面。";
   if (status === "up_to_date") return "当前部署版本与服务器 Gitea 仓库一致。";
-  return "点击按钮检查服务器 Gitea 是否有新的应用版本。";
+  return "点击按钮读取服务器 Gitea 的可用提交版本。";
 }
 
 function renderUpdatePanel(admin) {
@@ -2506,24 +2515,65 @@ function renderUpdatePanel(admin) {
   }
   const status = settingsState.updateStatus || {};
   const checking = settingsState.updateChecking;
+  const applying = settingsState.updateApplying;
+  const deploymentBusy = ["queued", "running"].includes(status.status);
+  const busy = checking || applying || deploymentBusy;
   const currentSha = status.currentShortSha || (status.currentSha ? String(status.currentSha).slice(0, 7) : "-");
   const latestSha = status.latestShortSha || (status.latestSha ? String(status.latestSha).slice(0, 7) : "-");
   const statusValue = status.status || "";
+  const versions = Array.isArray(status.availableVersions) ? status.availableVersions : [];
+  const selectedSha = versions.some(
+    (version) =>
+      version.sha === settingsState.updateSelectedSha && version.isSelectable !== false && !version.isCurrent,
+  )
+    ? settingsState.updateSelectedSha
+    : "";
+  const versionOptions = versions.length
+    ? versions
+        .map((version) => {
+          const shortSha = version.shortSha || String(version.sha || "").slice(0, 7);
+          const markers = [
+            version.isCurrent ? "当前" : "",
+            version.isLatest ? "最新" : "",
+            version.isSelectable === false && !version.isCurrent ? "历史" : "",
+          ].filter(Boolean);
+          const markerText = markers.length ? `（${markers.join("、")}）` : "";
+          const label = `${shortSha} · ${version.subject || "无提交说明"}${markerText} · ${formatDateTime(
+            version.authoredAt || "",
+          )}`;
+          return `<option value="${escapeHtml(version.sha || "")}" ${
+            version.isCurrent || version.isSelectable === false ? "disabled" : ""
+          } ${version.sha === selectedSha ? "selected" : ""}>${escapeHtml(label)}</option>`;
+        })
+        .join("")
+    : '<option value="">请先检查版本</option>';
   return `<section class="data-panel settings-panel update-panel">
     <div class="section-heading settings-panel-heading">
-      <div><h2>版本更新</h2><span>从服务器 Gitea 检查 main 分支，有新版本时直接更新应用。</span></div>
+      <div><h2>版本更新</h2><span>从 Gitea 读取 main 分支版本，选择提交后手动更新应用。</span></div>
     </div>
     <div class="update-version-grid">
       <div class="update-version-item"><span>当前版本</span><strong>${escapeHtml(currentSha)}</strong></div>
       <div class="update-version-item"><span>Gitea 最新版本</span><strong>${escapeHtml(latestSha)}</strong></div>
+    </div>
+    <div class="update-target-field">
+      <label for="updateTargetVersion">目标版本</label>
+      <select id="updateTargetVersion" data-update-target ${busy ? "disabled" : ""}>
+        <option value="">请选择一个版本</option>
+        ${versionOptions}
+      </select>
     </div>
     <div class="settings-readonly-note update-status-note">
       <strong>${escapeHtml(updateStatusLabel(statusValue))}</strong>
       <span>${escapeHtml(updateStatusDetail(statusValue))}</span>
     </div>
     <div class="modal-footer settings-form-footer">
-      <button type="button" class="primary-button" data-action="check-for-update" ${checking ? "disabled" : ""}>
-        ${checking ? "正在检查..." : "检查更新"}
+      <button type="button" class="secondary-button" data-action="check-for-update" ${busy ? "disabled" : ""}>
+        ${checking ? "检查中..." : "检查版本"}
+      </button>
+      <button type="button" class="primary-button" data-action="apply-selected-update" ${
+        !selectedSha || busy ? "disabled" : ""
+      }>
+        ${applying ? "提交中..." : "更新到所选版本"}
       </button>
     </div>
   </section>`;
@@ -5202,7 +5252,7 @@ async function handleBackupScheduleSubmit(form) {
 }
 
 async function handleUpdateCheck(button) {
-  if (!isAdminUser()) return showToast("只有管理员可以检查并执行版本更新", true);
+  if (!isAdminUser()) return showToast("只有管理员可以检查版本更新", true);
   settingsState.updateChecking = true;
   if (button) button.disabled = true;
   render();
@@ -5212,19 +5262,64 @@ async function handleUpdateCheck(button) {
       body: "{}",
     });
     settingsState.updateStatus = payload;
+    const versions = Array.isArray(payload.availableVersions) ? payload.availableVersions : [];
+    settingsState.updateSelectedSha =
+      payload.status === "update_available"
+        ? versions.find(
+            (version) => version.isSelectable !== false && !version.isCurrent && version.isLatest,
+          )?.sha ||
+          versions.find((version) => version.isSelectable !== false && !version.isCurrent)?.sha ||
+          ""
+        : "";
     const status = payload.status || "";
     if (status === "up_to_date") {
       showToast(`当前已是最新版本 ${payload.currentShortSha || ""}`);
-    } else if (status === "queued" || status === "running") {
-      showToast(`发现新版本 ${payload.latestShortSha || ""}，更新已开始`);
-      window.setTimeout(() => window.location.reload(), 7000);
+    } else if (status === "update_available") {
+      showToast(`发现可用版本 ${payload.latestShortSha || ""}，请选择后手动更新`);
     } else {
-      showToast("版本检查已完成");
+      showToast("版本列表已更新");
     }
   } catch (error) {
     showToast(`检查版本更新失败：${error.message}`, true);
   } finally {
     settingsState.updateChecking = false;
+    render();
+  }
+}
+
+async function handleApplySelectedUpdate() {
+  if (!isAdminUser()) return showToast("只有管理员可以执行版本更新", true);
+  const targetSha =
+    settingsState.updateSelectedSha || document.querySelector("[data-update-target]")?.value || "";
+  const version = settingsState.updateStatus?.availableVersions?.find((item) => item.sha === targetSha);
+  if (!targetSha || !version || version.isCurrent || version.isSelectable === false) {
+    return showToast("请先检查并选择一个目标版本", true);
+  }
+  if (!window.confirm(`确定更新到 ${version.shortSha || targetSha.slice(0, 7)}：${version.subject || ""} 吗？`)) {
+    return;
+  }
+  settingsState.updateSelectedSha = targetSha;
+  settingsState.updateApplying = true;
+  render();
+  try {
+    const payload = await requestJson(API_UPDATE_APPLY_URL, {
+      method: "POST",
+      body: JSON.stringify({ targetSha }),
+    });
+    settingsState.updateStatus = payload;
+    settingsState.updateSelectedSha = payload.targetSha || targetSha;
+    if (payload.status === "queued" || payload.status === "running") {
+      showToast(`版本 ${payload.targetSha?.slice(0, 7) || targetSha.slice(0, 7)} 已进入手动更新队列`);
+      window.setTimeout(() => window.location.reload(), 7000);
+    } else if (payload.status === "up_to_date") {
+      showToast("当前已经是所选版本");
+    } else {
+      showToast("版本更新请求已完成");
+    }
+  } catch (error) {
+    showToast(`执行版本更新失败：${error.message}`, true);
+  } finally {
+    settingsState.updateApplying = false;
     render();
   }
 }
@@ -6415,6 +6510,11 @@ document.addEventListener("click", (event) => {
     return;
   }
 
+  if (action === "apply-selected-update") {
+    handleApplySelectedUpdate();
+    return;
+  }
+
   if (action === "close-modal") {
     if (actionElement.classList.contains("modal-backdrop") && event.target !== actionElement) return;
     closeModal();
@@ -7016,6 +7116,13 @@ document.addEventListener("submit", (event) => {
 });
 
 document.addEventListener("change", (event) => {
+  const updateTarget = event.target.closest("[data-update-target]");
+  if (updateTarget) {
+    settingsState.updateSelectedSha = updateTarget.value || "";
+    render();
+    return;
+  }
+
   const inventoryImportForm = event.target.closest('form[data-form="inventory-import"]');
   if (inventoryImportForm && event.target.name === "type") {
     toggleInventoryImportComputerFields(inventoryImportForm);

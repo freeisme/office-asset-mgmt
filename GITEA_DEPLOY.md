@@ -9,10 +9,8 @@ Gitea + PostgreSQL
         |
         +-- signed push webhook for main
                     |
-                    +-- git fetch/reset
-                    +-- docker compose build
-                    +-- docker compose up -d
-                    +-- /api/health check
+                    +-- validate and acknowledge only
+                    +-- no automatic deployment
 ```
 
 The webhook receiver runs as a dedicated host service. It does not mount the Docker
@@ -155,7 +153,7 @@ sudo -u officeasset-deploy git -C /opt/office-asset-mgmt fetch origin main
 
 Verify the repository's `origin` URL uses the same Gitea host and port.
 
-## 5. Enable automatic Docker deployment
+## 5. Enable manual Docker deployment controls
 
 Create a strong webhook secret:
 
@@ -173,13 +171,14 @@ WEBHOOK_PORT=9000
 WEBHOOK_PATH=/gitea
 DEPLOY_REPO=OWNER/office-asset-management
 DEPLOY_BRANCH=main
+DEPLOY_VERSION_LIST_LIMIT=30
 APP_DIR=/opt/office-asset-mgmt
 ```
 
 Set the same `DEPLOY_CONTROL_TOKEN` in `/opt/office-asset-mgmt/.env` as
-`UPDATE_CONTROL_TOKEN`. The application uses this separate token to ask the host
-deployment service to check `origin/main` and queue a deployment. It is not the
-Gitea webhook signature and must not be exposed to browsers.
+`UPDATE_CONTROL_TOKEN`. The application uses this separate token to read available
+versions and queue a manually selected commit. It is not the Gitea webhook signature
+and must not be exposed to browsers.
 
 Install and start the receiver:
 
@@ -210,17 +209,19 @@ Webhook delivery to private addresses. Do not publish TCP port 9000 to the publi
 Internet; allow it only from the Docker bridge or use a firewall rule that blocks
 external access.
 
-Now a push to `main` runs:
+Now a push to `main` only runs:
 
 ```text
-git fetch -> reset to origin/main -> docker compose build --pull app
--> docker compose up -d -> /api/health
+HMAC validation -> repository/branch validation -> 204 acknowledgement
 ```
 
-Administrators can also use **Settings > Version update > Check for updates**.
-The application asks the host deployment service to compare the deployment checkout
-with Gitea and queues the same deployment script only when a newer `main` commit
-exists.
+Administrators use **Settings > 版本更新** to check recent `main` commits, select a
+newer target version, and confirm the update. The deployment service verifies that the
+selected commit belongs to `origin/main` history and is not older than the current
+deployment before building and restarting Docker.
+
+Each release must add a corresponding entry to `VERSION_NOTES.md`, including database
+migrations, backup requirements, configuration changes, and rollback notes.
 
 Watch deployment logs:
 

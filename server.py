@@ -467,18 +467,21 @@ def settings_payload() -> dict:
     return value if isinstance(value, dict) else {}
 
 
-def request_update_service() -> dict:
+def request_update_service(target_sha: str = "") -> dict:
     if not UPDATE_SERVICE_URL or not UPDATE_CONTROL_TOKEN:
         raise ApiError("服务器更新服务尚未配置，请联系系统管理员。")
 
+    endpoint = "/control/update" if target_sha else "/control/status"
+    method = "POST" if target_sha else "GET"
+    data = json.dumps({"targetSha": target_sha}).encode("utf-8") if target_sha else None
     request = Request(
-        f"{UPDATE_SERVICE_URL}/control/update",
-        data=b"{}",
+        f"{UPDATE_SERVICE_URL}{endpoint}",
+        data=data,
         headers={
             "Content-Type": "application/json",
             "X-Deploy-Control-Token": UPDATE_CONTROL_TOKEN,
         },
-        method="POST",
+        method=method,
     )
     try:
         with urlopen(request, timeout=UPDATE_REQUEST_TIMEOUT) as response:
@@ -4621,16 +4624,34 @@ class AppHandler(SimpleHTTPRequestHandler):
             require_role(context, "admin")
             require_csrf(self, context)
             update_payload = request_update_service()
-            status = text_value(update_payload.get("status"))
-            action_type = "system_update_queued" if status in {"queued", "running"} else "system_update_checked"
             write_auth_audit(
                 text_value(context.get("username")),
-                action_type,
+                "system_update_checked",
                 "",
                 "system_update",
-                "检查并处理 Gitea 系统更新",
+                "检查 Gitea 可用版本",
             )
-            response_status = HTTPStatus.ACCEPTED if status in {"queued", "running"} else HTTPStatus.OK
+            self.send_json(update_payload)
+            return
+
+        if parsed.path == "/api/updates/apply" and self.command == "POST":
+            context = require_auth(self)
+            require_role(context, "admin")
+            require_csrf(self, context)
+            payload = self.read_json()
+            target_sha = text_value(payload.get("targetSha")).lower()
+            if not re.fullmatch(r"[0-9a-f]{40}", target_sha):
+                raise ApiError("请选择有效的版本。")
+            update_payload = request_update_service(target_sha)
+            status = text_value(update_payload.get("status"))
+            write_auth_audit(
+                text_value(context.get("username")),
+                "system_update_queued" if status == "queued" else "system_update_checked",
+                "",
+                "system_update",
+                f"手动选择 Gitea 版本 {target_sha[:7]}",
+            )
+            response_status = HTTPStatus.ACCEPTED if status == "queued" else HTTPStatus.OK
             self.send_json(update_payload, status=response_status)
             return
 

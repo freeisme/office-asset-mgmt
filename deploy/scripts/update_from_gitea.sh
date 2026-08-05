@@ -3,7 +3,7 @@ set -euo pipefail
 
 APP_DIR="${APP_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
 DEPLOY_BRANCH="${DEPLOY_BRANCH:-main}"
-DEPLOY_EXPECTED_SHA="${DEPLOY_EXPECTED_SHA:-}"
+DEPLOY_TARGET_SHA="${DEPLOY_TARGET_SHA:-${DEPLOY_EXPECTED_SHA:-}}"
 COMPOSE_FILE="${COMPOSE_FILE:-${APP_DIR}/compose.yaml}"
 ENV_FILE="${ENV_FILE:-${APP_DIR}/.env}"
 HEALTH_URL="${HEALTH_URL:-http://127.0.0.1:8000/api/health}"
@@ -31,15 +31,24 @@ echo "Fetching origin/${DEPLOY_BRANCH} ..."
 git fetch --prune origin "${DEPLOY_BRANCH}"
 
 remote_sha="$(git rev-parse "origin/${DEPLOY_BRANCH}")"
-if [[ -n "${DEPLOY_EXPECTED_SHA}" && "${DEPLOY_EXPECTED_SHA}" != "${remote_sha}" ]]; then
-  echo "Push ${DEPLOY_EXPECTED_SHA} was superseded by ${remote_sha}; deploying the latest origin/${DEPLOY_BRANCH}."
+target_sha="${DEPLOY_TARGET_SHA:-${remote_sha}}"
+if [[ ! "${target_sha}" =~ ^[0-9a-f]{40}$ ]]; then
+  echo "Invalid deployment target SHA: ${target_sha}" >&2
+  exit 1
+fi
+if ! git merge-base --is-ancestor "${target_sha}" "origin/${DEPLOY_BRANCH}"; then
+  echo "Deployment target ${target_sha} is not in origin/${DEPLOY_BRANCH} history." >&2
+  exit 1
+fi
+if [[ "${target_sha}" != "${remote_sha}" ]]; then
+  echo "Deploying selected version ${target_sha}; origin/${DEPLOY_BRANCH} is ${remote_sha}."
 fi
 
 # This directory is a dedicated deployment checkout. Keep ignored runtime files
 # such as .env and backups, but remove untracked source files from bootstrapping.
 git clean -fd
-git checkout -B "${DEPLOY_BRANCH}" "origin/${DEPLOY_BRANCH}"
-git reset --hard "origin/${DEPLOY_BRANCH}"
+git checkout -B "${DEPLOY_BRANCH}" "${target_sha}"
+git reset --hard "${target_sha}"
 
 compose_args=(--env-file "${ENV_FILE}" -f "${COMPOSE_FILE}")
 docker compose "${compose_args[@]}" config --quiet

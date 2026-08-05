@@ -1,7 +1,7 @@
 # 办公资产管理系统开发指南
 
 本文档面向需要维护、扩展、部署和排查本项目的开发人员及系统管理员。
-文档以当前仓库代码为准，适用于 Docker Compose 部署和 Gitea 自动更新流程。
+文档以当前仓库代码为准，适用于 Docker Compose 部署和 Gitea 手动版本更新流程。
 
 本文档不包含任何真实密码、SSH 私钥、Webhook Secret、更新控制令牌、业务数据或
 数据库备份。生产运行时配置只保存在服务器上的 `.env` 或 systemd 环境文件中。
@@ -40,16 +40,19 @@
   |
   +-- Gitea:2222
           |
-          +-- 签名 Webhook --> 宿主机部署服务:9000
+          +-- 签名 Webhook --> 宿主机更新服务:9000
                                    |
-                                   +-- git fetch/reset
+                                   +-- 只记录 push，不自动部署
+
+设置页检查并选择版本
+  |
+  +-- app 容器 --> host.docker.internal:9000/control/status
+  +-- 管理员确认 --> host.docker.internal:9000/control/update
+                                   |
+                                   +-- 按指定提交 git fetch/reset
                                    +-- docker compose build
                                    +-- docker compose up
                                    +-- /api/health
-
-设置页一键检查更新
-  |
-  +-- app 容器 --> host.docker.internal:9000/control/update
 ```
 
 当前服务器约定：
@@ -213,7 +216,7 @@
 | `deploy/scripts/init_database.sh` | 按顺序初始化数据库 |
 | `deploy/scripts/backup_database.sh` | 使用 `mysqldump` 生成独立备份 |
 | `deploy/scripts/update_from_gitea.sh` | 拉取指定分支、构建和重启 Docker 服务 |
-| `deploy/gitea/deploy_webhook.py` | 接收签名 Webhook，并提供一键更新控制接口 |
+| `deploy/gitea/deploy_webhook.py` | 接收签名 Webhook，并提供手动版本更新控制接口 |
 | `deploy/gitea/office-asset-gitea-webhook.service` | systemd 托管 Webhook 服务 |
 | `deploy/gitea/compose.yaml` | Gitea + PostgreSQL 部署 |
 | `deploy/nginx/office-asset-mgmt.conf` | Nginx 反向代理示例 |
@@ -338,7 +341,8 @@ curl --fail http://127.0.0.1:8000/api/health
 | `PUT` | `/api/users/{id}` | admin + CSRF | 修改用户角色、状态或密码 |
 | `GET` | `/api/settings` | 登录 | 获取系统设置 |
 | `PUT` | `/api/settings` | admin + CSRF | 保存系统和备份设置 |
-| `POST` | `/api/updates/check` | admin + CSRF | 检查 Gitea 并排队更新 |
+| `POST` | `/api/updates/check` | admin + CSRF | 检查 Gitea 并返回可选版本 |
+| `POST` | `/api/updates/apply` | admin + CSRF | 按指定提交排队手动更新 |
 | `GET` | `/api/backups` | admin | 获取备份记录 |
 | `POST` | `/api/backups` | admin + CSRF | 创建手动备份 |
 | `POST` | `/api/backups/{id}/download` | admin + CSRF + 当前密码 | 下载备份文件 |
@@ -681,7 +685,7 @@ ASCII '\0' appeared in the statement
 应先确认文件类型和编码，再用 `gzip -dc` 解压。`--binary-mode=1` 只适用于确实
 包含二进制内容的合法导入场景，不能替代解压、编码转换或文件修复。
 
-## 8. Gitea 自动发布和一键更新
+## 8. Gitea 手动版本发布和更新
 
 ### 8.1 正常发布流程
 
@@ -710,36 +714,44 @@ ssh://git@192.168.253.25:2222/admin1/office-asset-management.git
 - 分支是否为 `main`。
 - commit SHA 是否为有效的 40 位 SHA。
 
-校验通过后，部署服务只保留最新待发布 SHA，避免短时间内多次 push 造成重复构建。
+校验通过后只记录事件并返回成功，不会调用部署脚本，也不会重启 Docker
+容器。版本更新必须从设置页检查、选择并确认。
 
-### 8.2 自动部署步骤
+### 8.2 手动部署步骤
 
 `deploy/scripts/update_from_gitea.sh` 的流程是：
 
 1. 使用锁文件防止并发部署。
 2. 检查部署目录、Git checkout 和运行时 `.env`。
 3. `git fetch --prune origin main`。
-4. 清理未跟踪源文件，但保留被忽略的 `.env` 和备份。
-5. 将工作树重置到 `origin/main`。
-6. 执行 `docker compose config --quiet`。
-7. 构建 app 镜像。
-8. `docker compose up -d --remove-orphans`。
-9. 轮询 `/api/health`，失败时输出容器状态和日志。
+4. 检查目标提交是否属于 `origin/main` 历史且不早于当前部署版本。
+5. 清理未跟踪源文件，但保留被忽略的 `.env` 和备份。
+6. 将工作树重置到管理员选择的目标提交。
+7. 执行 `docker compose config --quiet`。
+8. 构建 app 镜像。
+9. `docker compose up -d --remove-orphans`。
+10. 轮询 `/api/health`，失败时输出容器状态和日志。
 
 数据库迁移不在这一步自动执行。发布包含 SQL 迁移时，要先手动迁移，再发布依赖
 新结构的代码。
 
-### 8.3 设置页一键检查更新
+### 8.3 设置页检查、选择和更新版本
 
 调用链如下：
 
 ```text
-设置页按钮
+设置页“检查版本”
   -> POST /api/updates/check
   -> 后端校验 admin + CSRF
+  -> app 容器请求 host.docker.internal:9000/control/status
+  -> 宿主机服务 fetch origin/main 并返回最近提交列表
+
+管理员选择目标提交并点击“更新到所选版本”
+  -> POST /api/updates/apply
+  -> 后端校验提交 SHA、admin + CSRF
   -> app 容器请求 host.docker.internal:9000/control/update
-  -> 宿主机服务比较当前 HEAD 和 origin/main
-  -> 有新提交则排队执行 update_from_gitea.sh
+  -> 宿主机服务校验目标提交属于 origin/main 历史且不早于当前版本
+  -> 排队执行 update_from_gitea.sh
 ```
 
 宿主机控制接口使用独立的 `DEPLOY_CONTROL_TOKEN`，应用容器中对应
@@ -749,16 +761,30 @@ ssh://git@192.168.253.25:2222/admin1/office-asset-management.git
 更新状态：
 
 - `up_to_date`：当前部署已经是 Gitea 最新提交。
-- `queued`：发现新提交，部署已排队。
+- `update_available`：存在可选版本，但尚未执行更新。
+- `queued`：管理员选择的版本已排队。
 - `running`：部署正在执行。
 
 部署服务还提供：
 
 - `GET /healthz`：服务存活检查。
 - `GET /control/status`：带控制令牌的版本状态查询。
-- `POST /control/update`：带控制令牌的检查并排队更新。
+- `POST /control/update`：带控制令牌并提交 `targetSha` 后排队指定版本更新。
 
-### 8.4 发布后验证
+### 8.4 版本更新说明要求
+
+每次准备推送到 Gitea 的可部署变更，必须同步修改
+`VERSION_NOTES.md`，至少包含：
+
+1. 日期和版本对应的提交范围或目标提交。
+2. 功能、修复和安全变更摘要。
+3. 是否包含数据库迁移。
+4. 更新前备份要求、配置变更和回滚注意事项。
+
+管理员选择版本前，应先阅读 `VERSION_NOTES.md` 中对应条目。数据库迁移不由
+更新脚本自动执行，涉及结构变更时必须先完成评审和备份。
+
+### 8.5 发布后验证
 
 服务器上执行：
 
@@ -853,12 +879,14 @@ curl -i http://127.0.0.1:8000/api/auth/bootstrap-status
 ### 9.5 更新回归清单
 
 - Gitea 中推送一个测试提交。
-- 设置页点击“检查更新”。
-- 返回 `queued` 或 `running`。
-- 观察 Webhook 服务日志。
+- 确认 Webhook 日志显示已接收但未自动部署。
+- 设置页点击“检查版本”。
+- 确认返回 `update_available` 和可选提交列表。
+- 选择目标版本并点击“更新到所选版本”。
+- 确认返回 `queued`，观察更新服务日志。
 - 等待 app、db 变为 healthy。
 - 检查页面资源版本和新功能。
-- 再次检查更新，返回 `up_to_date`。
+- 再次检查版本，确认当前版本和目标提交一致。
 
 ## 10. 常见问题和排查
 
@@ -918,9 +946,16 @@ docker compose down -v
 
 该命令会删除 Docker 管理的数据库卷，只有在备份已验证且明确要清空环境时才能用。
 
-### 10.4 Gitea push 后没有更新
+### 10.4 Gitea push 后没有自动更新
 
-检查：
+这是预期行为。当前 push webhook 已取消自动部署。需要：
+
+1. 在设置页点击“检查版本”。
+2. 选择目标提交。
+3. 点击“更新到所选版本”。
+4. 检查更新服务日志是否出现排队或失败。
+
+Webhook 仍需检查：
 
 ```bash
 sudo systemctl status office-asset-gitea-webhook
@@ -937,7 +972,7 @@ sudo curl --fail http://127.0.0.1:9000/healthz
 - `/opt/office-asset-mgmt/.env` 存在且权限正确。
 - 部署用户具备 Docker Compose 执行权限。
 
-### 10.5 一键更新返回未授权或请求失败
+### 10.5 手动版本更新返回未授权或请求失败
 
 检查应用容器的 `UPDATE_SERVICE_URL`、宿主机 Webhook 服务监听地址和
 `UPDATE_CONTROL_TOKEN`/`DEPLOY_CONTROL_TOKEN` 是否成对一致。
@@ -1021,13 +1056,13 @@ sudo curl --fail http://127.0.0.1:9000/healthz
 - [ ] 登录、角色、CSRF 正常
 - [ ] 主要业务流程正常
 - [ ] 备份创建和恢复验证
-- [ ] Gitea 一键更新验证
+- [ ] Gitea 手动版本更新验证
 
 ### 发布
 
 - [ ] `.env` 和运行时令牌没有进入 commit。
 - [ ] 已推送 Gitea `main`。
-- [ ] Webhook 或一键更新已触发。
+- [ ] 已确认 Webhook 不会自动部署，并完成手动版本更新验证。
 - [ ] app、db 均 healthy。
 - [ ] 页面已加载新资源版本。
 - [ ] 数据库迁移已按顺序手动执行。
@@ -1088,13 +1123,14 @@ sudo curl --fail http://127.0.0.1:9000/healthz
 
 - [README.md](README.md)：项目简介和快速启动。
 - [DOCKER_DEPLOY.md](DOCKER_DEPLOY.md)：Docker Compose 部署。
-- [GITEA_DEPLOY.md](GITEA_DEPLOY.md)：私有 Gitea 和自动部署。
+- [GITEA_DEPLOY.md](GITEA_DEPLOY.md)：私有 Gitea 和手动版本更新。
 - [MYSQL_CONNECTION_GUIDE.md](MYSQL_CONNECTION_GUIDE.md)：服务器数据库连接、备份和恢复。
 - [DEPLOY_UBUNTU.md](DEPLOY_UBUNTU.md)：Ubuntu 原生部署。
 - [compose.yaml](compose.yaml)：应用和 MySQL 编排。
 - [server.py](server.py)：后端、API 和备份实现。
 - [web/app.js](web/app.js)：前端状态、渲染和交互。
 - [database/01_schema.sql](database/01_schema.sql)：核心表结构。
-- [deploy/scripts/update_from_gitea.sh](deploy/scripts/update_from_gitea.sh)：自动发布脚本。
-- [deploy/gitea/deploy_webhook.py](deploy/gitea/deploy_webhook.py)：Webhook 和一键更新控制服务。
+- [deploy/scripts/update_from_gitea.sh](deploy/scripts/update_from_gitea.sh)：按指定版本发布脚本。
+- [deploy/gitea/deploy_webhook.py](deploy/gitea/deploy_webhook.py)：Webhook 和手动版本更新控制服务。
 - [SECURITY_REVIEW.md](SECURITY_REVIEW.md)：网络安全检查、已修复问题和生产运维注意事项。
+- [VERSION_NOTES.md](VERSION_NOTES.md)：每次版本发布的更新说明。
