@@ -4,21 +4,24 @@ import base64
 import gzip
 import hashlib
 import hmac
+import ipaddress
 import json
 import os
 import re
 import secrets
+import ssl
 import shutil
 import subprocess
 import threading
 import traceback
 import time
+from collections import defaultdict, deque
 from datetime import datetime, timedelta
 from http import HTTPStatus
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.error import HTTPError, URLError
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, urlencode, urlparse
 from urllib.request import Request, urlopen
 
 
@@ -38,9 +41,13 @@ DB_PASSWORD = os.environ.get("DB_PASSWORD", "")
 SERVER_HOST = os.environ.get("SERVER_HOST", "127.0.0.1")
 SERVER_PORT = int(os.environ.get("SERVER_PORT", "8000"))
 BACKUP_DIR = Path(os.environ.get("BACKUP_DIR", str(ROOT_DIR / "backups"))).expanduser().resolve()
-UPDATE_SERVICE_URL = os.environ.get("UPDATE_SERVICE_URL", "http://host.docker.internal:9000").rstrip("/")
+UPDATE_SERVICE_URL = os.environ.get("UPDATE_SERVICE_URL", "https://host.docker.internal:9000").rstrip("/")
 UPDATE_CONTROL_TOKEN = os.environ.get("UPDATE_CONTROL_TOKEN", "").strip()
 UPDATE_REQUEST_TIMEOUT = max(3, int(os.environ.get("UPDATE_REQUEST_TIMEOUT", "12")))
+UPDATE_SERVICE_CA_FILE = os.environ.get("UPDATE_SERVICE_CA_FILE", "").strip()
+UPDATE_SERVICE_ALLOW_HTTP = (
+    os.environ.get("UPDATE_SERVICE_ALLOW_HTTP", "").lower() in {"1", "true", "yes"}
+)
 AUTH_COOKIE_NAME = "oa_session"
 CSRF_COOKIE_NAME = "oa_csrf"
 AUTH_SESSION_HOURS = max(1, int(os.environ.get("AUTH_SESSION_HOURS", "8")))
@@ -48,6 +55,7 @@ AUTH_COOKIE_SECURE = os.environ.get("AUTH_COOKIE_SECURE", "").lower() in {"1", "
 
 DB_LOCK = threading.Lock()
 BACKUP_LOCK = threading.Lock()
+LOGIN_RATE_LOCK = threading.Lock()
 AUDIT_LOG_LIMIT = 300
 AUDIT_QUERY_LIMIT = 5000
 BACKUP_LIST_LIMIT = 500
@@ -55,6 +63,24 @@ BACKUP_SCHEDULER_POLL_SECONDS = max(
     15,
     int(os.environ.get("BACKUP_SCHEDULER_POLL_SECONDS", "30")),
 )
+BACKUP_SCHEDULER_RETRY_SECONDS = max(
+    60,
+    int(os.environ.get("BACKUP_SCHEDULER_RETRY_SECONDS", "300")),
+)
+PASSWORD_MIN_LENGTH = 8
+PASSWORD_MAX_LENGTH = min(
+    1024,
+    max(32, int(os.environ.get("PASSWORD_MAX_LENGTH", "256"))),
+)
+LOGIN_RATE_WINDOW_SECONDS = max(
+    60,
+    int(os.environ.get("LOGIN_RATE_WINDOW_SECONDS", "300")),
+)
+LOGIN_RATE_MAX_ATTEMPTS = min(
+    100,
+    max(5, int(os.environ.get("LOGIN_RATE_MAX_ATTEMPTS", "15"))),
+)
+LOGIN_RATE_BUCKETS: dict[str, deque[float]] = defaultdict(deque)
 MAX_REQUEST_BODY_BYTES = min(
     64 * 1024 * 1024,
     max(64 * 1024, int(os.environ.get("MAX_REQUEST_BODY_BYTES", str(8 * 1024 * 1024)))),
@@ -98,7 +124,7 @@ AUDIT_CATEGORY_ENTITY_TYPES = {
 AUDIT_CATEGORY_LABELS = {
     "inventory": "物资变动",
     "employee": "人员变动",
-    "computer": "电脑信息变动",
+    "computer": "办公终端信息变动",
     "organization": "组织架构变动",
     "other": "其他变动",
 }
@@ -118,9 +144,9 @@ AUDIT_CHANGE_LABELS = {
     "non_asset_quantity_changed": "人员物资数量变更",
     "computer_added": "新增办公终端",
     "computer_removed": "删除办公终端",
-    "computer_status_changed": "电脑状态变更",
-    "computer_assignment_changed": "电脑使用人变更",
-    "computer_info_changed": "电脑信息变更",
+    "computer_status_changed": "办公终端状态变更",
+    "computer_assignment_changed": "办公终端使用人变更",
+    "computer_info_changed": "办公终端信息变更",
     "inventory_group_added": "物资分组新增",
     "inventory_group_changed": "物资分组变更",
     "inventory_group_removed": "物资分组删除",
@@ -151,6 +177,80 @@ class PayloadTooLargeError(ApiError):
     pass
 
 
+SCP_REPOSITORY_URL_RE = re.compile(
+    r"^(?P<user>[A-Za-z0-9._-]+)@(?P<host>[A-Za-z0-9.-]+|\[[0-9A-Fa-f:.]+\]):(?P<path>[A-Za-z0-9._~/%+-]+(?:\.git)?)$"
+)
+
+
+def repository_host_allows_http(host: str) -> bool:
+    host_value = (host or "").strip().strip("[]").lower()
+    if not host_value:
+        return False
+    if host_value in {"localhost"} or "." not in host_value:
+        return True
+    if host_value.endswith((".local", ".lan", ".internal")):
+        return True
+    try:
+        address = ipaddress.ip_address(host_value)
+    except ValueError:
+        return False
+    return address.is_private or address.is_loopback or address.is_link_local
+
+
+def validate_repository_host(host: str) -> None:
+    host_value = (host or "").strip().strip("[]")
+    if not host_value or len(host_value) > 253:
+        raise ApiError("更新项目地址主机无效。")
+    try:
+        ipaddress.ip_address(host_value)
+        return
+    except ValueError:
+        pass
+    if not re.fullmatch(r"[A-Za-z0-9.-]+", host_value):
+        raise ApiError("更新项目地址主机无效。")
+    if any(not label or label.startswith("-") or label.endswith("-") for label in host_value.split(".")):
+        raise ApiError("更新项目地址主机无效。")
+
+
+def normalize_update_repository_url(value: object | None) -> str:
+    repository_url = "" if value is None else str(value).strip()
+    if not repository_url:
+        return ""
+    if len(repository_url) > 512:
+        raise ApiError("更新项目地址过长。")
+    if any(ord(char) < 32 for char in repository_url) or any(char.isspace() for char in repository_url):
+        raise ApiError("更新项目地址不能包含空白或控制字符。")
+
+    scp_match = SCP_REPOSITORY_URL_RE.fullmatch(repository_url)
+    if scp_match:
+        validate_repository_host(scp_match.group("host"))
+        return repository_url
+
+    parsed = urlparse(repository_url)
+    if parsed.scheme not in {"https", "http", "ssh"} or not parsed.netloc:
+        raise ApiError("更新项目地址必须是 HTTPS、SSH 或内网 HTTP 的 Git 仓库地址。")
+    if parsed.username and parsed.scheme != "ssh":
+        raise ApiError("HTTPS/HTTP 更新项目地址不能包含账号或令牌。")
+    if parsed.password:
+        raise ApiError("更新项目地址不能包含密码或令牌。")
+    if parsed.params or parsed.query or parsed.fragment:
+        raise ApiError("更新项目地址不能包含查询参数或片段。")
+    validate_repository_host(parsed.hostname or "")
+    if parsed.scheme == "http" and not repository_host_allows_http(parsed.hostname or ""):
+        raise ApiError("HTTP 更新项目地址仅允许内网、本机或内部域名。")
+    if parsed.scheme == "ssh" and parsed.username and not re.fullmatch(r"[A-Za-z0-9._-]+", parsed.username):
+        raise ApiError("SSH 更新项目地址用户名无效。")
+    if not re.fullmatch(r"/[A-Za-z0-9._~/%+-]+(?:\.git)?", parsed.path or ""):
+        raise ApiError("更新项目地址路径无效。")
+    return repository_url
+
+
+class RateLimitError(ApiError):
+    def __init__(self, message: str, retry_after: int) -> None:
+        super().__init__(message)
+        self.retry_after = max(1, retry_after)
+
+
 class UnauthorizedError(ApiError):
     pass
 
@@ -179,8 +279,10 @@ def encode_token(value: str) -> str:
 
 
 def password_hash(password: str) -> str:
-    if len(password) < 8:
-        raise ApiError("密码长度不能少于 8 位。")
+    if len(password) < PASSWORD_MIN_LENGTH:
+        raise ApiError(f"密码长度不能少于 {PASSWORD_MIN_LENGTH} 位。")
+    if len(password) > PASSWORD_MAX_LENGTH:
+        raise ApiError(f"密码长度不能超过 {PASSWORD_MAX_LENGTH} 位。")
     salt = secrets.token_bytes(16)
     derived = hashlib.scrypt(
         password.encode("utf-8"),
@@ -198,6 +300,8 @@ def password_hash(password: str) -> str:
 
 
 def verify_password(password: str, stored_hash: str) -> bool:
+    if len(password) > PASSWORD_MAX_LENGTH:
+        return False
     try:
         scheme, params, encoded_salt, encoded_digest = stored_hash.split("$", 3)
         if scheme != "scrypt":
@@ -224,6 +328,54 @@ def validate_username(value: object | None) -> str:
     return username
 
 
+def client_ip(handler: SimpleHTTPRequestHandler) -> str:
+    address = getattr(handler, "client_address", None)
+    if isinstance(address, tuple) and address:
+        return text_value(address[0]) or "unknown"
+    return "unknown"
+
+
+def _login_rate_keys(handler: SimpleHTTPRequestHandler, username: str) -> tuple[str, str]:
+    return (
+        f"ip:{client_ip(handler)}",
+        f"user:{username.lower()}",
+    )
+
+
+def enforce_login_rate_limit(handler: SimpleHTTPRequestHandler, username: str) -> None:
+    now = time.monotonic()
+    keys = _login_rate_keys(handler, username)
+    with LOGIN_RATE_LOCK:
+        retry_after = 0
+        for key in keys:
+            bucket = LOGIN_RATE_BUCKETS[key]
+            while bucket and now - bucket[0] >= LOGIN_RATE_WINDOW_SECONDS:
+                bucket.popleft()
+            if len(bucket) >= LOGIN_RATE_MAX_ATTEMPTS:
+                retry_after = max(
+                    retry_after,
+                    int(LOGIN_RATE_WINDOW_SECONDS - (now - bucket[0])) + 1,
+                )
+        if retry_after:
+            raise RateLimitError("登录请求过于频繁，请稍后再试。", retry_after)
+        for key in keys:
+            LOGIN_RATE_BUCKETS[key].append(now)
+        if len(LOGIN_RATE_BUCKETS) > 4096:
+            stale_keys = [
+                key
+                for key, bucket in LOGIN_RATE_BUCKETS.items()
+                if not bucket or now - bucket[-1] >= LOGIN_RATE_WINDOW_SECONDS
+            ]
+            for key in stale_keys:
+                LOGIN_RATE_BUCKETS.pop(key, None)
+
+
+def clear_login_rate_limit(handler: SimpleHTTPRequestHandler, username: str) -> None:
+    with LOGIN_RATE_LOCK:
+        for key in _login_rate_keys(handler, username):
+            LOGIN_RATE_BUCKETS.pop(key, None)
+
+
 def auth_user_public(user: dict) -> dict:
     return {
         "id": text_value(user.get("id") or user.get("userId")),
@@ -237,6 +389,30 @@ def auth_user_public(user: dict) -> dict:
 
 def auth_user_count() -> int:
     return sql_int(run_mysql("SELECT COUNT(*) FROM user_account;", database=DB_NAME).strip(), 0)
+
+
+def create_first_admin(username: str, display_name: str, stored_hash: str) -> dict:
+    output = run_mysql(
+        f"""
+        START TRANSACTION;
+        INSERT INTO auth_bootstrap_guard (guard_id)
+        VALUES (1)
+        ON DUPLICATE KEY UPDATE guard_id = VALUES(guard_id);
+        INSERT INTO user_account (username, display_name, password_hash, user_role)
+        SELECT {sql_quote(username)}, {sql_quote(display_name)}, {sql_quote(stored_hash)}, 'admin'
+        WHERE NOT EXISTS (SELECT 1 FROM user_account LIMIT 1);
+        SELECT ROW_COUNT();
+        COMMIT;
+        """,
+        database=DB_NAME,
+    )
+    lines = [line.strip() for line in output.splitlines() if line.strip()]
+    if not lines or sql_int(lines[-1], 0) != 1:
+        raise ConflictError("系统管理员已经初始化，不能重复初始化。")
+    user = find_user_by_username(username)
+    if not user:
+        raise InternalServerError("管理员账号创建后无法读取。")
+    return user
 
 
 def configured_session_hours() -> int:
@@ -320,10 +496,15 @@ def list_users() -> list[dict]:
     return rows if isinstance(rows, list) else []
 
 
-def create_auth_session(user_id: str) -> tuple[str, str]:
+def create_auth_session(
+    user_id: str,
+    handler: SimpleHTTPRequestHandler | None = None,
+) -> tuple[str, str]:
     session_token = secrets.token_urlsafe(32)
     csrf_token = secrets.token_urlsafe(24)
     session_hours = configured_session_hours()
+    ip_address = client_ip(handler) if handler else ""
+    user_agent = text_value(handler.headers.get("User-Agent", ""))[:500] if handler else ""
     run_mysql(
         f"""
         INSERT INTO auth_session (
@@ -333,8 +514,8 @@ def create_auth_session(user_id: str) -> tuple[str, str]:
           {sql_quote(encode_token(csrf_token))},
           {sql_quote(user_id)},
           DATE_ADD(NOW(), INTERVAL {session_hours} HOUR),
-          '',
-          ''
+           {sql_quote(ip_address)},
+           {sql_quote(user_agent)}
         );
         """,
         database=DB_NAME,
@@ -430,9 +611,10 @@ def cookie_headers(session_token: str, csrf_token: str) -> list[tuple[str, str]]
 
 
 def clear_auth_cookie_headers() -> list[tuple[str, str]]:
+    secure = "; Secure" if AUTH_COOKIE_SECURE else ""
     return [
-        ("Set-Cookie", f"{AUTH_COOKIE_NAME}=; Max-Age=0; Path=/; HttpOnly; SameSite=Lax"),
-        ("Set-Cookie", f"{CSRF_COOKIE_NAME}=; Max-Age=0; Path=/; SameSite=Lax"),
+        ("Set-Cookie", f"{AUTH_COOKIE_NAME}=; Max-Age=0; Path=/; HttpOnly; SameSite=Lax{secure}"),
+        ("Set-Cookie", f"{CSRF_COOKIE_NAME}=; Max-Age=0; Path=/; SameSite=Lax{secure}"),
     ]
 
 
@@ -467,15 +649,29 @@ def settings_payload() -> dict:
     return value if isinstance(value, dict) else {}
 
 
-def request_update_service(target_sha: str = "") -> dict:
+def request_update_service(target_sha: str = "", repository_url: str = "") -> dict:
     if not UPDATE_SERVICE_URL or not UPDATE_CONTROL_TOKEN:
         raise ApiError("服务器更新服务尚未配置，请联系系统管理员。")
 
+    parsed_url = urlparse(UPDATE_SERVICE_URL)
+    if parsed_url.scheme not in {"http", "https"} or not parsed_url.netloc:
+        raise ApiError("服务器更新服务地址配置无效。")
+    if parsed_url.scheme == "http" and not UPDATE_SERVICE_ALLOW_HTTP:
+        raise ApiError("更新服务必须使用 HTTPS；仅可在隔离的本地开发环境显式允许 HTTP。")
+
+    repository_url = normalize_update_repository_url(repository_url)
     endpoint = "/control/update" if target_sha else "/control/status"
     method = "POST" if target_sha else "GET"
-    data = json.dumps({"targetSha": target_sha}).encode("utf-8") if target_sha else None
+    data = (
+        json.dumps({"targetSha": target_sha, "repositoryUrl": repository_url}).encode("utf-8")
+        if target_sha
+        else None
+    )
+    request_url = f"{UPDATE_SERVICE_URL}{endpoint}"
+    if repository_url and not target_sha:
+        request_url = f"{request_url}?{urlencode({'repositoryUrl': repository_url})}"
     request = Request(
-        f"{UPDATE_SERVICE_URL}{endpoint}",
+        request_url,
         data=data,
         headers={
             "Content-Type": "application/json",
@@ -484,7 +680,16 @@ def request_update_service(target_sha: str = "") -> dict:
         method=method,
     )
     try:
-        with urlopen(request, timeout=UPDATE_REQUEST_TIMEOUT) as response:
+        ssl_context = None
+        if parsed_url.scheme == "https":
+            if UPDATE_SERVICE_CA_FILE:
+                try:
+                    ssl_context = ssl.create_default_context(cafile=UPDATE_SERVICE_CA_FILE)
+                except (OSError, ssl.SSLError) as exc:
+                    raise ApiError("更新服务 CA 证书配置无效。") from exc
+            else:
+                ssl_context = ssl.create_default_context()
+        with urlopen(request, timeout=UPDATE_REQUEST_TIMEOUT, context=ssl_context) as response:
             raw = response.read().decode("utf-8", errors="replace")
     except HTTPError as exc:
         raw = exc.read().decode("utf-8", errors="replace")
@@ -507,6 +712,33 @@ def request_update_service(target_sha: str = "") -> dict:
     return payload
 
 
+STATE_ARRAY_KEYS = (
+    "orgs",
+    "nonAssetTypes",
+    "inventoryBrands",
+    "inventoryModels",
+    "inventoryMovementLogs",
+    "inventoryPurchaseLogs",
+    "employees",
+    "leftEmployees",
+    "computers",
+)
+
+
+def validate_state_payload(payload: dict) -> None:
+    if not isinstance(payload, dict):
+        raise ApiError("请求数据格式必须是 JSON 对象。")
+    missing = [key for key in (*STATE_ARRAY_KEYS, "stateRevision") if key not in payload]
+    if missing:
+        raise ApiError("数据同步必须提交完整状态快照，请刷新页面后重试。")
+    invalid_arrays = [key for key in STATE_ARRAY_KEYS if not isinstance(payload.get(key), list)]
+    if invalid_arrays:
+        raise ApiError("数据同步状态快照格式无效，请刷新页面后重试。")
+    revision = payload.get("stateRevision")
+    if isinstance(revision, bool) or not re.fullmatch(r"[1-9]\d*", text_value(revision)):
+        raise ApiError("数据版本号无效，请刷新页面后重试。")
+
+
 def validate_payload(payload: dict) -> None:
     if not isinstance(payload, dict):
         raise ApiError("请求数据格式必须是 JSON 对象。")
@@ -524,7 +756,7 @@ def validate_payload(payload: dict) -> None:
 
     ensure_unique([text_value(item.get("id")) for item in payload.get("orgs") or []], "组织")
     ensure_unique([text_value(item.get("employeeNo")) for item in payload.get("employees") or []], "人员编号")
-    ensure_unique([text_value(item.get("deviceName")) for item in payload.get("computers") or []], "电脑设备名")
+    ensure_unique([text_value(item.get("deviceName")) for item in payload.get("computers") or []], "办公终端设备名")
     ensure_unique([text_value(item.get("fixedAssetCode")) for item in payload.get("computers") or []], "固资编码")
     ensure_unique([text_value(item.get("snSt")) for item in payload.get("computers") or []], "SN/ST")
 
@@ -607,26 +839,26 @@ def validate_payload(payload: dict) -> None:
         org_id = text_value(computer.get("orgId"))
         user_id = text_value(computer.get("userId"))
         inventory_model_id = text_value(computer.get("inventoryModelId"))
-        if inventory_model_id and inventory_model_id not in model_ids and not is_numeric_id(computer.get("id")):
-            raise ApiError("Computer inventory model does not exist.")
+        if inventory_model_id and inventory_model_id not in model_ids:
+            raise ApiError("办公终端关联的库存型号不存在。")
         if org_id and org_id not in org_ids:
-            raise ApiError(f"电脑 {text_value(computer.get('deviceName'))} 关联的组织不存在。")
+            raise ApiError(f"办公终端 {text_value(computer.get('deviceName'))} 关联的组织不存在。")
         if user_id and user_id not in employee_ids:
-            raise ApiError(f"电脑 {text_value(computer.get('deviceName'))} 的使用人不存在。")
+            raise ApiError(f"办公终端 {text_value(computer.get('deviceName'))} 的使用人不存在。")
         if user_id and text_value(computer.get("status")) in {"retired", "lost"}:
-            raise ApiError(f"电脑 {text_value(computer.get('deviceName'))} 已报废或遗失，不能继续分配。")
+            raise ApiError(f"办公终端 {text_value(computer.get('deviceName'))} 已报废或遗失，不能继续分配。")
         purchase_date = text_value(computer.get("purchaseDate"))
         registered_date = text_value(computer.get("registeredDate"))
         if purchase_date and not re.fullmatch(r"\d{4}-\d{2}-\d{2}", purchase_date):
-            raise ApiError(f"电脑 {text_value(computer.get('deviceName'))} 的购置日期格式无效。")
+            raise ApiError(f"办公终端 {text_value(computer.get('deviceName'))} 的购置日期格式无效。")
         if registered_date and not re.fullmatch(r"\d{4}-\d{2}-\d{2}", registered_date):
-            raise ApiError(f"电脑 {text_value(computer.get('deviceName'))} 的注册日期格式无效。")
+            raise ApiError(f"办公终端 {text_value(computer.get('deviceName'))} 的注册日期格式无效。")
         if purchase_date and registered_date and registered_date < purchase_date:
-            raise ApiError(f"电脑 {text_value(computer.get('deviceName'))} 的注册日期不能早于购置日期。")
+            raise ApiError(f"办公终端 {text_value(computer.get('deviceName'))} 的注册日期不能早于购置日期。")
         for field, label in (("wifiMac", "Wifi MAC"), ("ethernetMac", "网口 MAC")):
             mac = normalize_mac_address(computer.get(field))
             if not valid_mac_address(mac):
-                raise ApiError(f"电脑 {text_value(computer.get('deviceName'))} 的{label}格式无效。")
+                raise ApiError(f"办公终端 {text_value(computer.get('deviceName'))} 的{label}格式无效。")
 
     monitor_keys: set[tuple[str, str, str]] = set()
     non_asset_keys: set[tuple[str, str, str, str]] = set()
@@ -635,10 +867,10 @@ def validate_payload(payload: dict) -> None:
         for monitor in employee.get("monitors") or []:
             inventory_brand_id = text_value(monitor.get("inventoryBrandId"))
             inventory_model_id = text_value(monitor.get("inventoryModelId"))
-            if inventory_brand_id and inventory_brand_id not in brand_ids and not is_numeric_id(monitor.get("id")):
-                raise ApiError("Monitor inventory brand does not exist.")
-            if inventory_model_id and inventory_model_id not in model_ids and not is_numeric_id(monitor.get("id")):
-                raise ApiError("Monitor inventory model does not exist.")
+            if inventory_brand_id and inventory_brand_id not in brand_ids:
+                raise ApiError("人员显示屏关联的库存品牌不存在。")
+            if inventory_model_id and inventory_model_id not in model_ids:
+                raise ApiError("人员显示屏关联的库存型号不存在。")
             key = (employee_id, text_value(monitor.get("brand")).lower(), text_value(monitor.get("model")).lower())
             if key[1:] in {item[1:] for item in monitor_keys if item[0] == employee_id}:
                 raise ApiError(f"人员 {text_value(employee.get('name'))} 的显示屏品牌型号重复。")
@@ -647,10 +879,10 @@ def validate_payload(payload: dict) -> None:
             quantity = sql_int(item.get("quantity"), 1)
             inventory_brand_id = text_value(item.get("inventoryBrandId"))
             inventory_model_id = text_value(item.get("inventoryModelId"))
-            if inventory_brand_id and inventory_brand_id not in brand_ids and not is_numeric_id(item.get("id")):
-                raise ApiError("Non-asset inventory brand does not exist.")
-            if inventory_model_id and inventory_model_id not in model_ids and not is_numeric_id(item.get("id")):
-                raise ApiError("Non-asset inventory model does not exist.")
+            if inventory_brand_id and inventory_brand_id not in brand_ids:
+                raise ApiError("人员非资产设备关联的库存品牌不存在。")
+            if inventory_model_id and inventory_model_id not in model_ids:
+                raise ApiError("人员非资产设备关联的库存型号不存在。")
             if quantity <= 0:
                 raise ApiError(f"人员 {text_value(employee.get('name'))} 的非资产设备数量必须大于 0。")
             key = (
@@ -676,8 +908,8 @@ def validate_payload(payload: dict) -> None:
             ("modelId", model_ids, "model"),
         ):
             ref_id = text_value(log.get(field))
-            if ref_id and ref_id not in valid_ids and not is_numeric_id(log.get("id")):
-                raise ApiError(f"Purchase log {label} reference does not exist.")
+            if ref_id and ref_id not in valid_ids:
+                raise ApiError(f"采购入库记录关联的 {label} 编号不存在。")
         inbound_date = text_value(log.get("inboundDate"))
         if inbound_date and not re.fullmatch(r"\d{4}-\d{2}-\d{2}", inbound_date):
             raise ApiError(f"采购入库记录 {text_value(log.get('modelName'))} 的入库日期格式无效。")
@@ -1123,21 +1355,24 @@ def run_scheduled_database_backup(now: datetime | None = None) -> dict | None:
 
 
 def database_backup_scheduler_loop() -> None:
-    last_attempt_date = ""
+    next_retry_at = 0.0
     while True:
         try:
             settings = settings_payload()
             current_time = datetime.now()
             scheduled_time = validate_backup_time(settings.get("backup_time", "02:00"))
             scheduled_hour, scheduled_minute = (int(part) for part in scheduled_time.split(":"))
-            date_key = current_time.date().isoformat()
             if (
                 backup_setting_enabled(settings.get("backup_enabled", "0"))
                 and (current_time.hour, current_time.minute) >= (scheduled_hour, scheduled_minute)
-                and last_attempt_date != date_key
+                and time.monotonic() >= next_retry_at
             ):
-                last_attempt_date = date_key
-                run_scheduled_database_backup(current_time)
+                try:
+                    run_scheduled_database_backup(current_time)
+                    next_retry_at = 0.0
+                except Exception:
+                    next_retry_at = time.monotonic() + BACKUP_SCHEDULER_RETRY_SECONDS
+                    raise
         except Exception as exc:  # pragma: no cover - scheduler must keep serving requests
             print(f"Database backup scheduler error: {exc}")
         time.sleep(BACKUP_SCHEDULER_POLL_SECONDS)
@@ -1296,7 +1531,7 @@ def normalize_inventory_brands(brands: list[dict]) -> list[dict]:
 
 def is_computer_inventory_type_name(value: object | None) -> bool:
     text = text_value(value).lower()
-    return text in {"电脑", "computer", "pc"}
+    return text in {"电脑", "办公终端", "办公设备终端", "computer", "pc"}
 
 
 def normalize_inventory_models(
@@ -3525,6 +3760,7 @@ def build_sync_sql(
     audit_entries: list[dict] | None = None,
     id_starts: dict[str, int] | None = None,
 ) -> str:
+    validate_state_payload(payload)
     data = normalize_payload(payload)
     id_starts = id_starts or {}
     orgs = sort_orgs_for_insert(data["orgs"])
@@ -3607,7 +3843,6 @@ def build_sync_sql(
     )
 
     lines = [
-        "USE office_asset_mgmt;",
         "SET NAMES utf8mb4;",
         "START TRANSACTION;",
         "UPDATE org_unit SET is_active = 0;",
@@ -4220,11 +4455,11 @@ def build_sync_sql(
 
 
 def sync_state(payload: dict, actor: str = "web") -> dict:
-    validate_payload(payload)
+    validate_state_payload(payload)
     old_snapshot = build_state_payload()
-    expected_revision = max(0, sql_int(payload.get("stateRevision"), 0))
+    expected_revision = sql_int(payload.get("stateRevision"), 0)
     current_revision = max(0, sql_int(old_snapshot.get("stateRevision"), 0))
-    if expected_revision and expected_revision != current_revision:
+    if expected_revision != current_revision:
         raise ConflictError(
             f"数据版本已变化，当前版本为 {current_revision}，提交版本为 {expected_revision}。"
         )
@@ -4233,7 +4468,7 @@ def sync_state(payload: dict, actor: str = "web") -> dict:
         entry["actor"] = actor or "web"
     id_starts = load_current_max_ids()
     sql = build_sync_sql(payload, audit_entries, id_starts)
-    run_mysql(sql)
+    run_mysql(sql, database=DB_NAME)
     return build_state_payload()
 
 
@@ -4275,7 +4510,7 @@ class AppHandler(SimpleHTTPRequestHandler):
         except (BrokenPipeError, ConnectionResetError):
             pass
 
-    def read_json(self) -> dict:
+    def read_json(self, *, allow_empty: bool = False) -> dict:
         try:
             content_length = int(self.headers.get("Content-Length", "0"))
         except (TypeError, ValueError) as exc:
@@ -4286,7 +4521,11 @@ class AppHandler(SimpleHTTPRequestHandler):
             raise PayloadTooLargeError(
                 f"请求体过大，最大允许 {MAX_REQUEST_BODY_BYTES // (1024 * 1024)} MB。"
             )
-        raw = self.rfile.read(content_length) if content_length else b"{}"
+        if content_length == 0:
+            if not allow_empty:
+                raise ApiError("请求体不能为空。")
+            return {}
+        raw = self.rfile.read(content_length)
         try:
             payload = json.loads(raw.decode("utf-8"))
         except (UnicodeDecodeError, json.JSONDecodeError) as exc:
@@ -4359,8 +4598,6 @@ class AppHandler(SimpleHTTPRequestHandler):
             return
 
         if parsed.path == "/api/auth/bootstrap" and self.command == "POST":
-            if auth_user_count() > 0:
-                raise ConflictError("系统管理员已经初始化，不能重复初始化。")
             payload = self.read_json()
             username = validate_username(payload.get("username"))
             display_name = text_value(payload.get("displayName")) or username
@@ -4368,18 +4605,9 @@ class AppHandler(SimpleHTTPRequestHandler):
             confirm_password = text_value(payload.get("confirmPassword"))
             if password != confirm_password:
                 raise ApiError("两次输入的密码不一致。")
-            if find_user_by_username(username):
-                raise ConflictError("账号已经存在。")
             stored_hash = password_hash(password)
-            run_mysql(
-                f"""
-                INSERT INTO user_account (username, display_name, password_hash, user_role)
-                VALUES ({sql_quote(username)}, {sql_quote(display_name)}, {sql_quote(stored_hash)}, 'admin');
-                """,
-                database=DB_NAME,
-            )
-            user = find_user_by_username(username)
-            session_token, csrf_token = create_auth_session(text_value(user.get("id")))
+            user = create_first_admin(username, display_name, stored_hash)
+            session_token, csrf_token = create_auth_session(text_value(user.get("id")), self)
             write_auth_audit(username, "user_account_bootstrapped", text_value(user.get("id")), username, f"初始化管理员账号 {username}")
             self.send_json(
                 {"authenticated": True, "user": auth_user_public(user)},
@@ -4391,6 +4619,7 @@ class AppHandler(SimpleHTTPRequestHandler):
             payload = self.read_json()
             username = validate_username(payload.get("username"))
             password = text_value(payload.get("password"))
+            enforce_login_rate_limit(self, username)
             user = find_user_by_username(username)
             if not user or not bool(user.get("isActive", True)):
                 raise UnauthorizedError("账号或密码错误。")
@@ -4418,7 +4647,8 @@ class AppHandler(SimpleHTTPRequestHandler):
                 """,
                 database=DB_NAME,
             )
-            session_token, csrf_token = create_auth_session(text_value(user.get("id")))
+            clear_login_rate_limit(self, username)
+            session_token, csrf_token = create_auth_session(text_value(user.get("id")), self)
             write_auth_audit(username, "user_login", text_value(user.get("id")), username, f"账号 {username} 登录系统")
             self.send_json(
                 {"authenticated": True, "user": auth_user_public(user)},
@@ -4427,6 +4657,7 @@ class AppHandler(SimpleHTTPRequestHandler):
             return
 
         if parsed.path == "/api/auth/logout" and self.command == "POST":
+            self.read_json(allow_empty=True)
             token = cookie_value(self, AUTH_COOKIE_NAME)
             if token:
                 run_mysql(
@@ -4623,13 +4854,31 @@ class AppHandler(SimpleHTTPRequestHandler):
             context = require_auth(self)
             require_role(context, "admin")
             require_csrf(self, context)
-            update_payload = request_update_service()
+            payload = self.read_json(allow_empty=True)
+            repository_url = normalize_update_repository_url(payload.get("repositoryUrl", ""))
+            update_payload = request_update_service(repository_url=repository_url)
+            if "repositoryUrl" in payload:
+                run_mysql(
+                    f"""
+                    INSERT INTO system_setting (setting_key, setting_value, setting_description, updated_by)
+                    VALUES (
+                      'update_repository_url',
+                      {sql_quote(repository_url)},
+                      '用于版本检查的 GitHub 或 Gitea Git 仓库地址；为空时使用服务器部署目录 origin',
+                      {sql_quote(context.get("id"))}
+                    )
+                    ON DUPLICATE KEY UPDATE
+                      setting_value = VALUES(setting_value),
+                      updated_by = VALUES(updated_by)
+                    """,
+                    database=DB_NAME,
+                )
             write_auth_audit(
                 text_value(context.get("username")),
                 "system_update_checked",
                 "",
                 "system_update",
-                "检查 Gitea 可用版本",
+                f"检查可用版本：{repository_url or '服务器默认 origin'}",
             )
             self.send_json(update_payload)
             return
@@ -4642,7 +4891,8 @@ class AppHandler(SimpleHTTPRequestHandler):
             target_sha = text_value(payload.get("targetSha")).lower()
             if not re.fullmatch(r"[0-9a-f]{40}", target_sha):
                 raise ApiError("请选择有效的版本。")
-            update_payload = request_update_service(target_sha)
+            repository_url = normalize_update_repository_url(payload.get("repositoryUrl", ""))
+            update_payload = request_update_service(target_sha, repository_url)
             status = text_value(update_payload.get("status"))
             target_version = text_value(update_payload.get("targetVersion")) or target_sha[:7]
             write_auth_audit(
@@ -4650,7 +4900,7 @@ class AppHandler(SimpleHTTPRequestHandler):
                 "system_update_queued" if status == "queued" else "system_update_checked",
                 "",
                 "system_update",
-                f"手动选择 Gitea 发布版本 {target_version}（{target_sha[:7]}）",
+                f"手动选择发布版本 {target_version}（{target_sha[:7]}），来源：{repository_url or '服务器默认 origin'}",
             )
             response_status = HTTPStatus.ACCEPTED if status == "queued" else HTTPStatus.OK
             self.send_json(update_payload, status=response_status)
@@ -4666,6 +4916,7 @@ class AppHandler(SimpleHTTPRequestHandler):
             context = require_auth(self)
             require_role(context, "admin")
             require_csrf(self, context)
+            self.read_json(allow_empty=True)
             record = create_database_backup("manual", context)
             public_record = serialize_database_backup(record)
             write_database_backup_audit(
@@ -4757,6 +5008,12 @@ class AppHandler(SimpleHTTPRequestHandler):
                 {"error": str(exc), "code": "PAYLOAD_TOO_LARGE"},
                 status=HTTPStatus.REQUEST_ENTITY_TOO_LARGE,
             )
+        except RateLimitError as exc:
+            self.send_json(
+                {"error": str(exc), "code": "LOGIN_RATE_LIMITED"},
+                status=HTTPStatus.TOO_MANY_REQUESTS,
+                headers=[("Retry-After", str(exc.retry_after))],
+            )
         except InternalServerError as exc:
             print(f"Internal server error: {exc}")
             traceback.print_exc()
@@ -4791,6 +5048,12 @@ class AppHandler(SimpleHTTPRequestHandler):
             self.send_json(
                 {"error": str(exc), "code": "PAYLOAD_TOO_LARGE"},
                 status=HTTPStatus.REQUEST_ENTITY_TOO_LARGE,
+            )
+        except RateLimitError as exc:
+            self.send_json(
+                {"error": str(exc), "code": "LOGIN_RATE_LIMITED"},
+                status=HTTPStatus.TOO_MANY_REQUESTS,
+                headers=[("Retry-After", str(exc.retry_after))],
             )
         except InternalServerError as exc:
             print(f"Internal server error: {exc}")
@@ -4827,6 +5090,12 @@ class AppHandler(SimpleHTTPRequestHandler):
                 {"error": str(exc), "code": "PAYLOAD_TOO_LARGE"},
                 status=HTTPStatus.REQUEST_ENTITY_TOO_LARGE,
             )
+        except RateLimitError as exc:
+            self.send_json(
+                {"error": str(exc), "code": "LOGIN_RATE_LIMITED"},
+                status=HTTPStatus.TOO_MANY_REQUESTS,
+                headers=[("Retry-After", str(exc.retry_after))],
+            )
         except InternalServerError as exc:
             print(f"Internal server error: {exc}")
             traceback.print_exc()
@@ -4858,6 +5127,8 @@ class AppHandler(SimpleHTTPRequestHandler):
         self.send_header("Permissions-Policy", "camera=(), geolocation=(), microphone=(), payment=(), usb=()")
         self.send_header("Cross-Origin-Opener-Policy", "same-origin")
         self.send_header("Cross-Origin-Resource-Policy", "same-origin")
+        if AUTH_COOKIE_SECURE:
+            self.send_header("Strict-Transport-Security", "max-age=31536000; includeSubDomains")
         if self.command == "GET" and (
             parsed_path == "/"
             or parsed_path.endswith(".html")
@@ -4883,6 +5154,10 @@ def main() -> None:
         raise SystemExit(f"MySQL client not found: {MYSQL_BIN}")
     if not DB_PASSWORD:
         raise SystemExit("DB_PASSWORD environment variable is required.")
+    if not AUTH_COOKIE_SECURE and SERVER_HOST not in {"127.0.0.1", "localhost", "::1"}:
+        print("WARNING: AUTH_COOKIE_SECURE is disabled while the server is not loopback-only.")
+    if UPDATE_SERVICE_URL.startswith("http://") and not UPDATE_SERVICE_ALLOW_HTTP:
+        print("WARNING: HTTP update service is disabled; configure HTTPS or explicitly allow isolated development HTTP.")
 
     server = ThreadingHTTPServer((SERVER_HOST, SERVER_PORT), AppHandler)
     scheduler = threading.Thread(

@@ -155,30 +155,58 @@ Verify the repository's `origin` URL uses the same Gitea host and port.
 
 ## 5. Enable manual Docker deployment controls
 
-Create a strong webhook secret:
+Manual deployment control does not require a push webhook. It reads the configured
+Gitea repository directly when an administrator checks for versions. Create a dedicated
+control token:
 
 ```bash
 openssl rand -hex 32
 ```
 
+Configure a TLS certificate whose subject alternative name matches the hostname used by
+the application container, for example `host.docker.internal` or an internal DNS name.
+Store the certificate and key outside the repository:
+
+```bash
+sudo install -d -m 750 -o root -g officeasset-deploy /etc/office-asset-mgmt/tls
+sudo install -m 640 -o root -g officeasset-deploy update-control.crt \
+  /etc/office-asset-mgmt/tls/update-control.crt
+sudo install -m 640 -o root -g officeasset-deploy update-control.key \
+  /etc/office-asset-mgmt/tls/update-control.key
+sudo install -d -m 700 -o officeasset-deploy -g officeasset-deploy \
+  /opt/office-asset-mgmt/secrets/update-service
+sudo install -m 600 -o officeasset-deploy -g officeasset-deploy update-control-ca.pem \
+  /opt/office-asset-mgmt/secrets/update-service/update-control-ca.pem
+```
+
 Create `/etc/office-asset-mgmt/gitea-webhook.env` with mode `600`:
 
 ```dotenv
-GITEA_WEBHOOK_SECRET=replace-with-the-generated-secret
 DEPLOY_CONTROL_TOKEN=replace-with-a-different-generated-secret
 WEBHOOK_BIND=0.0.0.0
 WEBHOOK_PORT=9000
-WEBHOOK_PATH=/gitea
 DEPLOY_REPO=OWNER/office-asset-management
 DEPLOY_BRANCH=main
 DEPLOY_VERSION_LIST_LIMIT=30
 APP_DIR=/opt/office-asset-mgmt
+DEPLOY_TLS_CERT_FILE=/etc/office-asset-mgmt/tls/update-control.crt
+DEPLOY_TLS_KEY_FILE=/etc/office-asset-mgmt/tls/update-control.key
+DEPLOY_ALLOW_INSECURE_HTTP=false
 ```
 
 Set the same `DEPLOY_CONTROL_TOKEN` in `/opt/office-asset-mgmt/.env` as
-`UPDATE_CONTROL_TOKEN`. The application uses this separate token to read available
-release tags and queue a manually selected published version. It is not the Gitea
-webhook signature and must not be exposed to browsers.
+`UPDATE_CONTROL_TOKEN`, then configure:
+
+```dotenv
+UPDATE_SERVICE_URL=https://host.docker.internal:9000
+UPDATE_SERVICE_CA_FILE=/run/office-asset-mgmt/update-service/update-control-ca.pem
+UPDATE_SERVICE_CERTS_DIR=./secrets/update-service
+UPDATE_SERVICE_ALLOW_HTTP=false
+```
+
+The application uses the token only to read available release tags and queue a manually
+selected version. It is never sent to browsers. The CA file is mounted read-only into
+the app container by `compose.yaml` and must remain outside Git.
 
 Install and start the receiver:
 
@@ -189,36 +217,31 @@ sudo chmod 600 /etc/office-asset-mgmt/gitea-webhook.env
 sudo systemctl daemon-reload
 sudo systemctl enable --now office-asset-gitea-webhook
 sudo systemctl status office-asset-gitea-webhook
-curl --fail http://127.0.0.1:9000/healthz
+curl --fail --cacert /opt/office-asset-mgmt/secrets/update-service/update-control-ca.pem \
+  --resolve host.docker.internal:9000:127.0.0.1 \
+  https://host.docker.internal:9000/healthz
 ```
 
-In the Gitea repository, open **Settings > Webhooks > Add Webhook > Gitea** and use:
+Push webhooks are optional. When enabled, they only record a signed push and return
+`204`; they never trigger a deployment. Set `GITEA_WEBHOOK_SECRET` and `WEBHOOK_PATH`
+in the service environment, then configure a Gitea webhook with an HTTPS URL trusted by
+Gitea. Do not enable an HTTP webhook merely to receive log events.
 
-```text
-Target URL: http://host.docker.internal:9000/gitea
-HTTP Method: POST
-POST Content Type: application/json
-Secret: the same value as GITEA_WEBHOOK_SECRET
-Trigger: Push Events only
-Branch filter: main
-Active: enabled
-```
-
-The Gitea Compose file maps `host.docker.internal` to the Docker host and allows
-Webhook delivery to private addresses. Do not publish TCP port 9000 to the public
-Internet; allow it only from the Docker bridge or use a firewall rule that blocks
-external access.
-
-Now a push to `main` only runs:
-
-```text
-HMAC validation -> repository/branch validation -> 204 acknowledgement
-```
+The update-control port must be restricted by the host firewall to the Docker bridge and
+required administration sources. Do not expose TCP `9000` to the public Internet.
+The certificate SAN must match the hostname used by the app container, such as
+`host.docker.internal`; the `--resolve` option above keeps TLS hostname validation while
+testing from the host.
 
 Administrators use **Settings > 版本更新** to check published SemVer tags, select a
-higher version, and confirm the update. The deployment service verifies that the
-selected tag belongs to `origin/main` history and is newer than the current release
-before building and restarting Docker.
+higher version, and confirm the update. The project URL field may be left empty to use
+the deployment checkout's `origin`, or filled with a GitHub/Gitea Git URL. The
+deployment service verifies that the selected tag is annotated, belongs to the selected
+repository's `main` history, has a matching `VERSION_NOTES.md` entry, and is newer than
+the current release before building and restarting Docker. Pre-release tags are excluded
+unless `DEPLOY_ALLOW_PRERELEASE=true` is explicitly configured. HTTP repository URLs are
+accepted only for internal, local or private-network hosts and must not contain
+credentials or tokens.
 
 Each release must add a corresponding entry to `VERSION_NOTES.md`, including database
 migrations, backup requirements, configuration changes, and rollback notes.
@@ -230,8 +253,8 @@ git tag -a v1.0.0 -m "Release v1.0.0"
 git push origin v1.0.0
 ```
 
-Use the next unused SemVer tag for later releases, then open the tag in Gitea
-**Releases** and add the matching release notes and attachments.
+Use the next unused SemVer tag for later releases. The tag must be annotated and the
+matching version notes must already exist in the tagged commit.
 
 Watch deployment logs:
 
@@ -242,7 +265,9 @@ docker compose -f /opt/office-asset-mgmt/compose.yaml logs --tail=100 app
 ```
 
 Database migrations are intentionally not run automatically. Back up the database and
-apply a reviewed migration manually before deploying a schema-changing release.
+apply a reviewed migration manually before deploying a schema-changing release. The
+deployment script restores the prior Git commit and rebuilds the previous application
+image if the new build, startup, or health check fails.
 
 ## 6. Backup Gitea
 

@@ -1,5 +1,3 @@
-USE office_asset_mgmt;
-
 SET NAMES utf8mb4;
 
 INSERT INTO non_asset_type (type_code, type_name, unit_name)

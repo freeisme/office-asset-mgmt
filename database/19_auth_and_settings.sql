@@ -1,6 +1,11 @@
-USE office_asset_mgmt;
-
 SET NAMES utf8mb4;
+
+CREATE TABLE IF NOT EXISTS auth_bootstrap_guard (
+  guard_id TINYINT UNSIGNED NOT NULL,
+  created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (guard_id),
+  CONSTRAINT ck_auth_bootstrap_guard_id CHECK (guard_id = 1)
+) ENGINE = InnoDB;
 
 CREATE TABLE IF NOT EXISTS user_account (
   user_id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,

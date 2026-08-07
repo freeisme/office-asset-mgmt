@@ -44,7 +44,11 @@ DB_USER=office_asset_app
 DB_PASSWORD=replace-with-a-long-random-password
 MYSQL_ROOT_PASSWORD=replace-with-a-different-long-random-password
 AUTH_SESSION_HOURS=8
-AUTH_COOKIE_SECURE=false
+AUTH_COOKIE_SECURE=true
+UPDATE_SERVICE_URL=https://host.docker.internal:9000
+UPDATE_CONTROL_TOKEN=replace-with-a-dedicated-update-control-token
+UPDATE_SERVICE_CA_FILE=/run/office-asset-mgmt/update-service/update-control-ca.pem
+UPDATE_SERVICE_CERTS_DIR=./secrets/update-service
 ```
 
 Rules:
@@ -52,8 +56,11 @@ Rules:
 - `DB_PASSWORD` is the application database account password.
 - `MYSQL_ROOT_PASSWORD` is only for MySQL administration and must differ from `DB_PASSWORD`.
 - Do not commit `.env` to Git.
-- Keep `AUTH_COOKIE_SECURE=false` only when accessing the system by HTTP. Set it to
-  `true` after HTTPS is configured through a reverse proxy.
+- Keep `AUTH_COOKIE_SECURE=true` in production. Only local HTTP debugging may set it
+  to `false`; Secure cookies do not work over plain HTTP.
+- `UPDATE_SERVICE_URL` must use HTTPS in production. Place the issuing CA certificate
+  at `${UPDATE_SERVICE_CERTS_DIR}/update-control-ca.pem`; this directory is mounted
+  read-only into the application and is ignored by Git.
 
 ## 3. First Startup
 
@@ -66,14 +73,15 @@ docker compose ps
 docker compose logs -f
 ```
 
-The first start initializes MySQL and runs every SQL file in `database/` in numeric order.
-This creates schema and reference data only; it does not import business data.
+The first start initializes MySQL through `deploy/docker/init_database.sh`. It selects
+`MYSQL_DATABASE` explicitly and runs only the reviewed schema, migration and reference
+scripts in the required order. Smoke-test and ad hoc import scripts are not run.
 
 Verify the services:
 
 ```bash
 curl http://127.0.0.1:8000/api/health
-docker compose exec db sh -c 'mysql -u"$MYSQL_USER" -p"$MYSQL_PASSWORD" "$MYSQL_DATABASE" -e "SHOW TABLES;"'
+docker compose exec db sh -c 'MYSQL_PWD="$MYSQL_PASSWORD" mysql -u"$MYSQL_USER" "$MYSQL_DATABASE" -e "SHOW TABLES;"'
 ```
 
 Open the application:
@@ -81,6 +89,11 @@ Open the application:
 ```text
 http://SERVER_IP:8000/
 ```
+
+With `AUTH_COOKIE_SECURE=true`, the application must be opened through an HTTPS reverse
+proxy before logging in. For an isolated local HTTP test only, set
+`AUTH_COOKIE_SECURE=false` in `.env`, recreate the app container, and restore it to
+`true` before production use.
 
 The first browser visit opens the administrator initialization page. The system has no
 fixed default password.
@@ -126,7 +139,7 @@ For an additional independent raw SQL backup from the command line:
 ```bash
 mkdir -p backups
 docker compose exec -T db sh -c \
-  'exec mysqldump --single-transaction --routines --events --triggers -u"$MYSQL_USER" -p"$MYSQL_PASSWORD" "$MYSQL_DATABASE"' \
+  'MYSQL_PWD="$MYSQL_PASSWORD" exec mysqldump --single-transaction --skip-lock-tables --no-tablespaces --routines --events --triggers --hex-blob -u"$MYSQL_USER" "$MYSQL_DATABASE"' \
   > "backups/office_asset_mgmt_$(date +%Y%m%d_%H%M%S).sql"
 ```
 
@@ -134,7 +147,7 @@ Restore a verified backup:
 
 ```bash
 docker compose exec -T db sh -c \
-  'exec mysql -u"$MYSQL_USER" -p"$MYSQL_PASSWORD" "$MYSQL_DATABASE"' \
+  'MYSQL_PWD="$MYSQL_PASSWORD" exec mysql --binary-mode=1 -u"$MYSQL_USER" "$MYSQL_DATABASE"' \
   < backups/office_asset_mgmt_YYYYMMDD_HHMMSS.sql
 ```
 
@@ -153,9 +166,10 @@ docker compose ps
 curl http://127.0.0.1:8000/api/health
 ```
 
-Database scripts in `/docker-entrypoint-initdb.d` run only when the MySQL volume is empty.
-For schema changes on an existing system, review the release migration notes and run the
-appropriate SQL migration manually against the `db` service.
+The Docker initialization wrapper runs only when the MySQL volume is empty. For schema
+changes on an existing system, review the release notes and run the appropriate SQL
+migration manually against the `db` service. Never delete the data volume merely to
+rerun initialization.
 
 ## 7. Stop and Remove
 
@@ -180,7 +194,7 @@ docker compose ps
 docker compose logs --tail=200 app
 docker compose logs --tail=200 db
 docker compose exec app python -c "import urllib.request; print(urllib.request.urlopen('http://127.0.0.1:8000/api/health').read().decode())"
-docker compose exec db sh -c 'mysql -u"$MYSQL_USER" -p"$MYSQL_PASSWORD" "$MYSQL_DATABASE" -e "SELECT 1;"'
+docker compose exec db sh -c 'MYSQL_PWD="$MYSQL_PASSWORD" mysql -u"$MYSQL_USER" "$MYSQL_DATABASE" -e "SELECT 1;"'
 ```
 
 If the database initialization was interrupted during the first startup, inspect the

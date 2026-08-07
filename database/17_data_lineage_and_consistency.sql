@@ -1,5 +1,3 @@
-USE office_asset_mgmt;
-
 SET NAMES utf8mb4;
 
 -- Keep the human-readable snapshot fields, but also retain the selected
@@ -157,6 +155,50 @@ SET purchase_row.non_asset_type_id = type_row.non_asset_type_id,
     purchase_row.brand_id = brand.brand_id,
     purchase_row.model_id = model.model_id
 WHERE purchase_row.model_id IS NULL;
+
+-- Remove stale references before adding foreign keys. The application keeps
+-- catalog rows as soft-deleted records, so valid inactive IDs are retained.
+UPDATE computer_asset computer_row
+LEFT JOIN it_inventory_model model_row
+  ON model_row.model_id = computer_row.inventory_model_id
+SET computer_row.inventory_model_id = NULL,
+    computer_row.inventory_stock_adjusted = 0
+WHERE computer_row.inventory_model_id IS NOT NULL
+  AND model_row.model_id IS NULL;
+
+UPDATE employee_monitor_usage usage_row
+LEFT JOIN it_inventory_brand brand_row
+  ON brand_row.brand_id = usage_row.inventory_brand_id
+LEFT JOIN it_inventory_model model_row
+  ON model_row.model_id = usage_row.inventory_model_id
+SET usage_row.inventory_brand_id = CASE WHEN brand_row.brand_id IS NULL THEN NULL ELSE usage_row.inventory_brand_id END,
+    usage_row.inventory_model_id = CASE WHEN model_row.model_id IS NULL THEN NULL ELSE usage_row.inventory_model_id END
+WHERE (usage_row.inventory_brand_id IS NOT NULL AND brand_row.brand_id IS NULL)
+   OR (usage_row.inventory_model_id IS NOT NULL AND model_row.model_id IS NULL);
+
+UPDATE employee_non_asset_usage usage_row
+LEFT JOIN it_inventory_brand brand_row
+  ON brand_row.brand_id = usage_row.inventory_brand_id
+LEFT JOIN it_inventory_model model_row
+  ON model_row.model_id = usage_row.inventory_model_id
+SET usage_row.inventory_brand_id = CASE WHEN brand_row.brand_id IS NULL THEN NULL ELSE usage_row.inventory_brand_id END,
+    usage_row.inventory_model_id = CASE WHEN model_row.model_id IS NULL THEN NULL ELSE usage_row.inventory_model_id END
+WHERE (usage_row.inventory_brand_id IS NOT NULL AND brand_row.brand_id IS NULL)
+   OR (usage_row.inventory_model_id IS NOT NULL AND model_row.model_id IS NULL);
+
+UPDATE inventory_purchase_log purchase_row
+LEFT JOIN non_asset_type type_row
+  ON type_row.non_asset_type_id = purchase_row.non_asset_type_id
+LEFT JOIN it_inventory_brand brand_row
+  ON brand_row.brand_id = purchase_row.brand_id
+LEFT JOIN it_inventory_model model_row
+  ON model_row.model_id = purchase_row.model_id
+SET purchase_row.non_asset_type_id = CASE WHEN type_row.non_asset_type_id IS NULL THEN NULL ELSE purchase_row.non_asset_type_id END,
+    purchase_row.brand_id = CASE WHEN brand_row.brand_id IS NULL THEN NULL ELSE purchase_row.brand_id END,
+    purchase_row.model_id = CASE WHEN model_row.model_id IS NULL THEN NULL ELSE purchase_row.model_id END
+WHERE (purchase_row.non_asset_type_id IS NOT NULL AND type_row.non_asset_type_id IS NULL)
+   OR (purchase_row.brand_id IS NOT NULL AND brand_row.brand_id IS NULL)
+   OR (purchase_row.model_id IS NOT NULL AND model_row.model_id IS NULL);
 
 SET @add_computer_inventory_model_index := IF(
   (SELECT COUNT(*)

@@ -12,12 +12,13 @@ services:
       MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:?Set MYSQL_ROOT_PASSWORD in .env}
     volumes:
       - mysql-data:/var/lib/mysql
-      - ./database:/docker-entrypoint-initdb.d:ro
+      - ./database:/seed/database:ro
+      - ./deploy/docker/init_database.sh:/docker-entrypoint-initdb.d/00_init_database.sh:ro
     healthcheck:
       test:
         [
           "CMD-SHELL",
-          "mysql --protocol=TCP -h 127.0.0.1 -u\"$$MYSQL_USER\" -p\"$$MYSQL_PASSWORD\" \"$$MYSQL_DATABASE\" -e 'SELECT 1 FROM app_state_revision LIMIT 1' > /dev/null 2>&1",
+          "MYSQL_PWD=\"$$MYSQL_PASSWORD\" mysql --protocol=TCP -h 127.0.0.1 -u\"$$MYSQL_USER\" \"$$MYSQL_DATABASE\" -e 'SELECT 1 FROM app_state_revision LIMIT 1' > /dev/null 2>&1",
         ]
       interval: 5s
       timeout: 5s
@@ -41,14 +42,17 @@ services:
       SERVER_HOST: 0.0.0.0
       SERVER_PORT: "8000"
       AUTH_SESSION_HOURS: ${AUTH_SESSION_HOURS:-8}
-      AUTH_COOKIE_SECURE: ${AUTH_COOKIE_SECURE:-false}
+      AUTH_COOKIE_SECURE: ${AUTH_COOKIE_SECURE:-true}
       MAX_REQUEST_BODY_BYTES: ${MAX_REQUEST_BODY_BYTES:-8388608}
-      UPDATE_SERVICE_URL: ${UPDATE_SERVICE_URL:-http://host.docker.internal:9000}
+      UPDATE_SERVICE_URL: ${UPDATE_SERVICE_URL:-https://host.docker.internal:9000}
       UPDATE_CONTROL_TOKEN: ${UPDATE_CONTROL_TOKEN:-}
+      UPDATE_SERVICE_CA_FILE: ${UPDATE_SERVICE_CA_FILE:-}
+      UPDATE_SERVICE_ALLOW_HTTP: ${UPDATE_SERVICE_ALLOW_HTTP:-false}
     extra_hosts:
       - "host.docker.internal:host-gateway"
     volumes:
       - backup-data:/app/backups
+      - ${UPDATE_SERVICE_CERTS_DIR:-./secrets/update-service}:/run/office-asset-mgmt/update-service:ro
     ports:
       - "${APP_PORT:-8000}:8000"
     depends_on:

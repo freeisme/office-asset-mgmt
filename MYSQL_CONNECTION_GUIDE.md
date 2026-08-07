@@ -1,4 +1,4 @@
-﻿# 办公资产管理系统 MySQL 连接指南
+# 办公资产管理系统 MySQL 连接指南
 
 本文档对应当前服务器部署：
 
@@ -243,7 +243,7 @@ sudo docker exec office-asset-mgmt-db-1 sh -lc \
    --triggers \
    --hex-blob \
    --no-tablespaces \
-   --databases office_asset_mgmt' \
+   --databases "$MYSQL_DATABASE"' \
   | sudo gzip > "/var/backups/office-asset-mgmt/office_asset_mgmt_$(date +%Y%m%d_%H%M%S).sql.gz"
 
 sudo chmod 600 /var/backups/office-asset-mgmt/*.sql.gz
@@ -272,7 +272,7 @@ sudo docker compose \
 
 ```bash
 sudo docker exec -i office-asset-mgmt-db-1 sh -lc \
-  'MYSQL_PWD="$MYSQL_ROOT_PASSWORD" mysql --protocol=tcp -uroot' \
+  'MYSQL_PWD="$MYSQL_ROOT_PASSWORD" mysql --binary-mode=1 --protocol=tcp -uroot' \
   < /path/to/office_asset_mgmt.sql
 ```
 
@@ -281,7 +281,16 @@ sudo docker exec -i office-asset-mgmt-db-1 sh -lc \
 ```bash
 gzip -dc /path/to/office_asset_mgmt.sql.gz \
   | sudo docker exec -i office-asset-mgmt-db-1 sh -lc \
-    'MYSQL_PWD="$MYSQL_ROOT_PASSWORD" mysql --protocol=tcp -uroot'
+    'MYSQL_PWD="$MYSQL_ROOT_PASSWORD" mysql --binary-mode=1 --protocol=tcp -uroot'
+```
+
+如果备份不包含 `CREATE DATABASE` 或 `USE`，必须把当前 Compose 配置中的数据库名
+显式传给客户端：
+
+```bash
+sudo docker exec -i office-asset-mgmt-db-1 sh -lc \
+  'MYSQL_PWD="$MYSQL_ROOT_PASSWORD" mysql --binary-mode=1 --protocol=tcp -uroot "$MYSQL_DATABASE"' \
+  < /path/to/office_asset_mgmt.sql
 ```
 
 恢复完成后启动应用：
@@ -298,7 +307,7 @@ curl --fail http://127.0.0.1:8000/api/health
 不要把办公资产数据库 SQL 恢复到 Gitea 数据库。当前 Gitea 使用
 PostgreSQL 容器 `gitea-db`，不是 `office-asset-mgmt-db-1`。
 
-## 10. 从远程电脑使用 GUI 客户端
+## 10. 从远程办公终端使用 GUI 客户端
 
 当前办公资产 MySQL 没有发布到宿主机，因此不能直接在本地 GUI
 中连接 `192.168.253.25:3306`。该地址目前是另一套 1Panel MySQL。

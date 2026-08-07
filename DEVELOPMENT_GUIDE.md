@@ -95,12 +95,16 @@
 │   ├── 17_data_lineage_and_consistency.sql
 │   ├── 18_backfill_computer_inbound_dates.sql
 │   ├── 19_auth_and_settings.sql
-│   └── 20_database_backup.sql
+│   ├── 20_database_backup.sql
+│   ├── 21_security_hardening.sql
+│   └── 22_update_repository_setting.sql
 ├── deploy/
 │   ├── gitea/
+│   ├── docker/
 │   ├── nginx/
 │   ├── scripts/
 │   └── systemd/
+├── tests/
 ├── compose.yaml
 ├── Dockerfile
 ├── .env.example
@@ -152,7 +156,7 @@
 
 | 模块 | 作用 |
 | --- | --- |
-| `state` | 组织、人员、电脑、库存、日志等业务状态 |
+| `state` | 组织、人员、办公终端、库存、日志等业务状态 |
 | `settingsState` | 系统设置、用户、备份和版本检查状态 |
 | `loadInitialState`、`normalizeState` | 从本地缓存读取并兼容旧状态 |
 | `hydrateStateFromServer` | 从 `/api/state` 加载数据库状态 |
@@ -162,7 +166,7 @@
 | `handle*Submit` | 处理表单提交、校验和状态修改 |
 | `requestJson`、`requestDownload` | 统一处理 API、CSRF 和错误响应 |
 | `document.addEventListener` | 通过 `data-action`、`data-form`、`data-filter` 处理事件 |
-| Excel 导出函数 | 生成员工、电脑、库存、采购和操作日志导出文件 |
+| Excel 导出函数 | 生成员工、办公终端、库存、采购和操作日志导出文件 |
 | `applyTheme`、`toggleTheme` | 持久化并切换亮色/暗色主题 |
 
 浏览器本地只保存界面偏好和主题：
@@ -186,10 +190,9 @@
 ### 2.5 数据库脚本 `database/`
 
 数据库脚本按数字顺序组织。初始化脚本
-`deploy/scripts/init_database.sh` 会依次执行：
+`deploy/scripts/init_database.sh` 先按 `DB_NAME` 创建并选中数据库，再依次执行：
 
 ```text
-00_create_database.sql
 01_schema.sql
 02_seed_reference_data.sql
 03_views.sql
@@ -204,16 +207,21 @@
 18_backfill_computer_inbound_dates.sql
 19_auth_and_settings.sql
 20_database_backup.sql
+21_security_hardening.sql
+22_update_repository_setting.sql
 ```
 
-`06_smoke_test.sql` 是检查脚本，不属于初始化顺序，不应在生产初始化时误当作迁移
-执行。`01_schema.sql` 会删除并重建核心表，只适合空库初始化或明确批准的重建操作。
+`00_create_database.sql` 是兼容性辅助文件，使用固定默认库名时才单独执行；它不属于
+可配置 `DB_NAME` 的初始化顺序。`06_smoke_test.sql` 是检查脚本，不属于初始化顺序，
+不应在生产初始化时误当作迁移执行。`01_schema.sql` 会删除并重建核心表，只适合空库
+初始化或明确批准的重建操作。
 
 ### 2.6 部署目录 `deploy/`
 
 | 路径 | 作用 |
 | --- | --- |
 | `deploy/scripts/init_database.sh` | 按顺序初始化数据库 |
+| `deploy/docker/init_database.sh` | Docker 空库初始化包装脚本，选择 `MYSQL_DATABASE` 并执行审核过的文件 |
 | `deploy/scripts/backup_database.sh` | 使用 `mysqldump` 生成独立备份 |
 | `deploy/scripts/update_from_gitea.sh` | 拉取指定分支、构建和重启 Docker 服务 |
 | `deploy/gitea/deploy_webhook.py` | 接收签名 Webhook，并提供手动版本更新控制接口 |
@@ -245,9 +253,16 @@
 | `AUTH_SESSION_HOURS` | 登录会话有效小时数 | 默认 `8`，有效范围 `1-168` |
 | `AUTH_COOKIE_SECURE` | 是否给 Cookie 加 Secure | HTTPS 反代后设为 `true` |
 | `MAX_REQUEST_BODY_BYTES` | JSON 请求体最大字节数 | 默认 `8388608`，最大支持 `64 MB` |
+| `PASSWORD_MAX_LENGTH` | 密码最大长度 | 默认 `256`，最大支持 `1024` |
+| `LOGIN_RATE_WINDOW_SECONDS` | 登录限流窗口 | 默认 `300` 秒 |
+| `LOGIN_RATE_MAX_ATTEMPTS` | 每个 IP/账号窗口内允许的登录次数 | 默认 `15` |
 | `BACKUP_SCHEDULER_POLL_SECONDS` | 自动备份轮询间隔 | 默认 `30` 秒 |
-| `UPDATE_SERVICE_URL` | 容器访问宿主机更新服务 | 默认 `http://host.docker.internal:9000` |
+| `BACKUP_SCHEDULER_RETRY_SECONDS` | 自动备份失败后的重试间隔 | 默认 `300` 秒 |
+| `UPDATE_SERVICE_URL` | 容器访问宿主机更新服务 | 默认 `https://host.docker.internal:9000` |
 | `UPDATE_CONTROL_TOKEN` | 容器到宿主机的更新控制令牌 | 与宿主机配置一致，只放运行时环境 |
+| `UPDATE_SERVICE_CA_FILE` | 更新服务 CA 证书路径 | 自签或内部 CA 时指定，不能提交到 Git |
+| `UPDATE_SERVICE_CERTS_DIR` | CA 证书目录 | Compose 只读挂载到 app 容器 |
+| `UPDATE_SERVICE_ALLOW_HTTP` | 是否允许 HTTP 更新服务 | 仅隔离开发环境显式设为 `true` |
 | `UPDATE_REQUEST_TIMEOUT` | 请求更新服务的超时秒数 | 默认 `12` 秒 |
 
 注意：Docker Compose 中 `db` 是服务名。应用容器内的 `127.0.0.1` 指向应用容器
@@ -369,6 +384,8 @@ curl --fail http://127.0.0.1:8000/api/health
 - 权限不足：HTTP 403，`code=FORBIDDEN`
 - 状态冲突：HTTP 409，`code=STATE_CONFLICT`
 - 参数或业务校验失败：HTTP 400
+- 请求体超过限制：HTTP 413，`code=PAYLOAD_TOO_LARGE`
+- 登录频率超过限制：HTTP 429，`code=LOGIN_RATE_LIMITED`，并返回 `Retry-After`
 - 未捕获异常：HTTP 500
 
 前端 `requestJson` 会解析这些错误并在页面显示 Toast。不要在业务函数中重复实现
@@ -401,6 +418,10 @@ auditLogs
 后端的 `build_state_payload` 负责数据库到前端的映射，`build_sync_sql` 负责前端到
 数据库的映射。新增字段时必须同时修改这两个方向，不能只修改其中一边。
 
+`PUT /api/state` 必须提交所有状态数组和正数 `stateRevision`。后端先比较数据库当前
+版本，再在事务中同步；不能用 `0` 或缺失字段绕过版本冲突检查。新增状态数组时必须
+同步修改 `STATE_ARRAY_KEYS`、前端状态归一化和测试快照。
+
 ### 5.2 主要业务模块
 
 #### 组织架构
@@ -408,8 +429,8 @@ auditLogs
 - `org_unit` 保存树形组织节点。
 - `parent_org_unit_id` 指向上级组织。
 - `org_code` 在同一父节点下必须唯一。
-- 组织用于人员归属、电脑归属和路径展示。
-- 删除组织前需要处理下属组织、人员和电脑的引用。
+- 组织用于人员归属、办公终端归属和路径展示。
+- 删除组织前需要处理下属组织、人员和办公终端的引用。
 
 前端相关函数包括 `openOrgModal`、`handleOrgSubmit`、组织树渲染和编码生成函数。
 
@@ -423,17 +444,17 @@ auditLogs
 前端相关函数包括 `openEmployeeModal`、`handleEmployeeSubmit`、离职字段切换和
 离职档案恢复流程。
 
-#### 电脑资产
+#### 办公终端资产
 
 - `computer_asset` 保存设备名称、类型、品牌、型号、配置、固定资产编码、
   采购日期、登记日期、序列号、MAC、位置和 IT 状态。
 - `computer_assignment` 表示当前分配关系。
 - `computer_assignment_history` 保存分配历史快照。
-- 每台电脑只能存在一条未归还的有效分配记录。
+- 每台办公终端只能存在一条未归还的有效分配记录。
 - `it_asset_status` 支持 `in_use`、`idle`、`repair`、`retired`、`lost`。
 - Wi-Fi 和网口 MAC 在前端规范化为带短横线格式，并由数据库约束校验。
 
-保存电脑时还可能联动物资库存型号，产生库存扣减或回收动作。
+保存办公终端时还可能联动物资库存型号，产生库存扣减或回收动作。
 
 #### IT 物资库存
 
@@ -445,15 +466,15 @@ non_asset_type
         └── it_inventory_model
 ```
 
-- `non_asset_type`：鼠标、键盘、显示屏、电脑等类型。
+- `non_asset_type`：鼠标、键盘、显示屏、办公终端等类型。
 - `it_inventory_brand`：类型下的品牌。
-- `it_inventory_model`：品牌下的型号、数量、批次和电脑配置。
+- `it_inventory_model`：品牌下的型号、数量、批次和办公终端配置。
 - `inventory_movement_log`：增加/减少库存的流水。
 - `inventory_purchase_log`：采购入库记录。
 - `employee_monitor_usage`：人员使用的显示屏。
 - `employee_non_asset_usage`：人员使用的鼠标、键盘等非资产设备。
 
-库存数量必须保持非负。分配电脑、保存显示屏或非资产设备、回收设备时，需要同步
+库存数量必须保持非负。分配办公终端、保存显示屏或非资产设备、回收设备时，需要同步
 处理库存数量和流水日志，不能只修改前端显示。
 
 #### 操作日志
@@ -496,14 +517,14 @@ non_asset_type
 
 ### 6.2 新增业务字段
 
-以“给电脑增加一个字段”为例，完整修改链路应包括：
+以“给办公终端增加一个字段”为例，完整修改链路应包括：
 
 1. 新增编号递增的数据库迁移脚本，使用幂等的列存在检查。
 2. 修改 `build_state_payload` 的 SQL JSON 映射。
 3. 修改 `normalize_computers` 或相关归一化函数。
 4. 修改 `build_sync_sql` 的 INSERT/UPDATE 字段。
 5. 修改前端 `normalizeComputerRecord`。
-6. 修改电脑表单渲染函数和 `handleComputerSubmit`。
+6. 修改办公终端表单渲染函数和 `handleComputerSubmit`。
 7. 修改详情展示、筛选和 Excel 导出（如果字段需要导出）。
 8. 修改审计字段比较逻辑或字段标签。
 9. 增加迁移、保存、刷新、备份恢复测试。
@@ -562,8 +583,6 @@ non_asset_type
 推荐结构：
 
 ```sql
-USE office_asset_mgmt;
-
 SET NAMES utf8mb4;
 
 SET @column_exists := (
@@ -584,6 +603,9 @@ PREPARE stmt FROM @sql;
 EXECUTE stmt;
 DEALLOCATE PREPARE stmt;
 ```
+
+迁移由客户端通过 `--database="$DB_NAME"` 或等效参数选定目标数据库；不要在新迁移
+中加入固定的 `USE office_asset_mgmt`。
 
 实际脚本应根据变更类型增加索引、外键、默认值、数据回填和回滚说明。
 迁移执行前必须：
@@ -623,12 +645,12 @@ DEALLOCATE PREPARE stmt;
 
 - 组织编码在同一父节点下唯一。
 - 员工编号唯一。
-- 电脑设备名、固定资产编码、序列号唯一。
-- 一个电脑只能有一条有效分配。
+- 办公终端设备名、固定资产编码、序列号唯一。
+- 一个办公终端只能有一条有效分配。
 - 库存数量不能小于零。
-- 电脑状态、员工状态、用户角色和备份状态使用固定枚举。
-- 电脑登记日期不能早于采购日期。
-- 电脑 MAC 地址必须是规定格式。
+- 办公终端状态、员工状态、用户角色和备份状态使用固定枚举。
+- 办公终端登记日期不能早于采购日期。
+- 办公终端 MAC 地址必须是规定格式。
 
 对已经被业务引用的组织、人员、库存品牌和型号，优先使用 `is_active=0` 或现有
 归档流程，不要直接物理删除。物理删除可能破坏历史日志、分配历史和库存关联。
@@ -640,13 +662,14 @@ DEALLOCATE PREPARE stmt;
 ```bash
 mysqldump \
   --single-transaction \
+  --skip-lock-tables \
   --routines \
   --events \
   --triggers \
   --default-character-set=utf8mb4 \
   --hex-blob \
   --no-tablespaces \
-  office_asset_mgmt
+  "$DB_NAME"
 ```
 
 包含存储过程或函数时，数据库账号可能需要 `SHOW ROUTINE` 权限。若备份出现
@@ -666,7 +689,7 @@ mysqldump \
 ```bash
 gzip -dc /path/to/office_asset_mgmt.sql.gz \
   | sudo docker exec -i office-asset-mgmt-db-1 sh -lc \
-    'MYSQL_PWD="$MYSQL_ROOT_PASSWORD" mysql --protocol=tcp -uroot'
+    'MYSQL_PWD="$MYSQL_ROOT_PASSWORD" mysql --binary-mode=1 --protocol=tcp -uroot'
 ```
 
 出现以下错误时：
@@ -724,13 +747,14 @@ ssh://git@192.168.253.25:2222/admin1/office-asset-management.git
 1. 使用锁文件防止并发部署。
 2. 检查部署目录、Git checkout 和运行时 `.env`。
 3. `git fetch --prune origin main`。
-4. 检查目标提交是否属于 `origin/main` 历史且不早于当前部署版本。
+4. 检查目标提交是否属于所选来源的 `main` 历史且不早于当前部署版本。
 5. 清理未跟踪源文件，但保留被忽略的 `.env` 和备份。
 6. 将工作树重置到管理员选择的目标提交。
 7. 执行 `docker compose config --quiet`。
 8. 构建 app 镜像。
 9. `docker compose up -d --remove-orphans`。
 10. 轮询 `/api/health`，失败时输出容器状态和日志。
+11. 构建、启动或健康检查失败时恢复之前的提交并重建旧 app 镜像。
 
 数据库迁移不在这一步自动执行。发布包含 SQL 迁移时，要先手动迁移，再发布依赖
 新结构的代码。
@@ -740,17 +764,18 @@ ssh://git@192.168.253.25:2222/admin1/office-asset-management.git
 调用链如下：
 
 ```text
-设置页“检查版本”
+设置页填写项目地址并点击“检查版本”
   -> POST /api/updates/check
-  -> 后端校验 admin + CSRF
-  -> app 容器请求 host.docker.internal:9000/control/status
-  -> 宿主机服务 fetch origin/main 和版本标签，并返回已发布 SemVer 列表
+  -> 后端校验 admin + CSRF + repositoryUrl
+  -> app 容器请求 host.docker.internal:9000/control/status?repositoryUrl=...
+  -> 宿主机服务 fetch 指定 GitHub/Gitea 地址；留空时 fetch origin/main
+  -> 返回已发布 SemVer 列表
 
 管理员选择版本号更高的已发布版本并点击“更新到所选版本”
   -> POST /api/updates/apply
-  -> 后端校验发布版本 SHA、admin + CSRF
+  -> 后端校验发布版本 SHA、admin + CSRF + repositoryUrl
   -> app 容器请求 host.docker.internal:9000/control/update
-  -> 宿主机服务校验目标标签属于 origin/main 历史且版本号高于当前版本
+  -> 宿主机服务重新 fetch 同一项目地址并校验目标标签属于该 main 历史且版本号高于当前版本
   -> 排队执行 update_from_gitea.sh
 ```
 
@@ -762,7 +787,7 @@ ssh://git@192.168.253.25:2222/admin1/office-asset-management.git
 
 - `up_to_date`：当前部署已经是最新发布版本。
 - `update_available`：存在版本号更高的已发布版本，但尚未执行更新。
-- `no_releases`：Gitea 中没有符合 SemVer 的发布标签。
+- `no_releases`：所选项目地址中没有符合 SemVer 的发布标签。
 - `no_release_available`：没有高于当前部署版本的已发布版本。
 - `queued`：管理员选择的版本已排队。
 - `running`：部署正在执行。
@@ -770,12 +795,22 @@ ssh://git@192.168.253.25:2222/admin1/office-asset-management.git
 部署服务还提供：
 
 - `GET /healthz`：服务存活检查。
-- `GET /control/status`：带控制令牌的版本状态查询。
-- `POST /control/update`：带控制令牌并提交已发布版本对应的 `targetSha` 后排队更新。
+- `GET /control/status`：带控制令牌的版本状态查询，可带 `repositoryUrl` 查询参数。
+- `POST /control/update`：带控制令牌并提交已发布版本对应的 `targetSha`，可同时提交
+  `repositoryUrl` 后排队更新。
 
-检查响应中的 `availableVersions` 只包含 Gitea 中已合并到 `origin/main` 的
-`vMAJOR.MINOR.PATCH` 标签。每项包含 `version`、`tag`、`sha`、提交说明、发布时间、
+检查响应中的 `availableVersions` 只包含所选项目地址中已合并到 `main` 的
+SemVer 注释标签，并且标签对应提交必须包含匹配的 `VERSION_NOTES.md` 标题。默认排除
+预发布版本。每项包含 `version`、`tag`、`sha`、提交说明、发布时间、`releaseNotes`、
 `isCurrent`、`isLatest` 和 `isSelectable`。前端只允许选择 `isSelectable` 为真的版本。
+
+`repositoryUrl` 支持 HTTPS、SSH 和内网 HTTP Git 地址，例如 GitHub HTTPS、Gitea HTTPS、
+`ssh://git@host:port/owner/repo.git` 或 `git@host:owner/repo.git`。HTTP 只允许内网、
+本机或内部域名；URL 不能包含账号密码、令牌、查询参数、片段、空白或本地文件协议。
+
+更新控制服务必须使用 TLS。应用通过 `UPDATE_SERVICE_CA_FILE` 验证自签或内部 CA；
+只有隔离的开发环境可以同时设置 `UPDATE_SERVICE_ALLOW_HTTP=true` 和 HTTP 地址。
+控制令牌必须独立于 Gitea Webhook Secret，并只存在于服务器运行时配置中。
 
 ### 8.4 版本更新说明要求
 
@@ -864,9 +899,9 @@ curl -i http://127.0.0.1:8000/api/auth/bootstrap-status
 
 - 新增、编辑、停用组织。
 - 新增、编辑、离职归档和恢复员工。
-- 新增、编辑、分配、归还电脑。
+- 新增、编辑、分配、归还办公终端。
 - 新增库存类型、品牌、型号和采购入库。
-- 库存不足时分配电脑是否被拒绝。
+- 库存不足时分配办公终端是否被拒绝。
 - 显示屏和非资产设备增加、修改、回收。
 - 库存增加/减少流水和采购日志。
 - 操作日志旧值、新值、操作者和摘要。
@@ -959,16 +994,19 @@ docker compose down -v
 这是预期行为。当前 push webhook 已取消自动部署。需要：
 
 1. 在设置页点击“检查版本”。
-2. 选择目标提交。
+2. 选择版本号更高的已发布版本。
 3. 点击“更新到所选版本”。
 4. 检查更新服务日志是否出现排队或失败。
 
-Webhook 仍需检查：
+如果启用了 push Webhook，仍需检查：
 
 ```bash
 sudo systemctl status office-asset-gitea-webhook
 sudo journalctl -u office-asset-gitea-webhook -n 200 --no-pager
-sudo curl --fail http://127.0.0.1:9000/healthz
+sudo curl --fail \
+  --cacert /opt/office-asset-mgmt/secrets/update-service/update-control-ca.pem \
+  --resolve host.docker.internal:9000:127.0.0.1 \
+  https://host.docker.internal:9000/healthz
 ```
 
 再确认：
@@ -1060,6 +1098,7 @@ sudo curl --fail http://127.0.0.1:9000/healthz
 
 - [ ] `git diff --check`
 - [ ] `python -m py_compile server.py`
+- [ ] `python -m unittest discover -s tests -v`
 - [ ] `/api/health` 正常
 - [ ] 登录、角色、CSRF 正常
 - [ ] 主要业务流程正常
@@ -1105,7 +1144,7 @@ sudo curl --fail http://127.0.0.1:9000/healthz
 
 1. 在 `web/styles.css` 增加全局 `[hidden] { display: none !important; }`。
 2. 保留认证代码对 `hidden` 属性的统一管理，不在各个页面中重复设置内联显示样式。
-3. 将 `web/index.html` 中的 JS/CSS 资源版本更新为 `20260805-01`，避免浏览器继续
+3. 将 `web/index.html` 中的 JS/CSS 资源版本更新为 `20260807-01`，避免浏览器继续
    使用旧样式。
 4. 认证失败、会话过期、主动退出和重新登录仍然使用同一套显示状态切换流程。
 

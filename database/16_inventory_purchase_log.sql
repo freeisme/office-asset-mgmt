@@ -1,5 +1,3 @@
-USE office_asset_mgmt;
-
 SET NAMES utf8mb4;
 
 CREATE TABLE IF NOT EXISTS inventory_purchase_log (
@@ -27,7 +25,7 @@ CREATE TABLE IF NOT EXISTS inventory_purchase_log (
   CONSTRAINT ck_inventory_purchase_active CHECK (is_active IN (0, 1))
 ) ENGINE = InnoDB;
 
--- 非电脑库存不再保留电脑配置或库存型号入库日期。
+-- 非办公终端库存不再保留办公终端配置或库存型号入库日期。
 UPDATE it_inventory_model model
 JOIN non_asset_type type
   ON type.non_asset_type_id = model.non_asset_type_id
@@ -38,10 +36,10 @@ SET model.inbound_date = NULL,
     model.gpu = NULL
 WHERE NOT (
   LOWER(TRIM(type.type_code)) IN ('computer', 'pc')
-  OR TRIM(type.type_name) = '电脑'
+  OR TRIM(type.type_name) IN ('电脑', '办公终端', '办公设备终端')
 );
 
--- 将已有的外部导入、电脑入库、手工新增流水回填为采购入库记录。
+-- 将已有的外部导入、办公终端入库、手工新增流水回填为采购入库记录。
 -- 回填只执行一次：source_movement_log_id 使用原流水唯一关联。
 INSERT IGNORE INTO inventory_purchase_log (
   type_name,
@@ -65,7 +63,7 @@ SELECT
   movement.quantity,
   DATE(movement.occurred_at),
   CASE
-    WHEN TRIM(movement.type_name) = '电脑' THEN (
+    WHEN TRIM(movement.type_name) IN ('电脑', '办公终端', '办公设备终端') THEN (
       SELECT model.cpu
       FROM it_inventory_model model
       JOIN it_inventory_brand brand
@@ -81,7 +79,7 @@ SELECT
     ELSE NULL
   END,
   CASE
-    WHEN TRIM(movement.type_name) = '电脑' THEN (
+    WHEN TRIM(movement.type_name) IN ('电脑', '办公终端', '办公设备终端') THEN (
       SELECT model.memory
       FROM it_inventory_model model
       JOIN it_inventory_brand brand
@@ -97,7 +95,7 @@ SELECT
     ELSE NULL
   END,
   CASE
-    WHEN TRIM(movement.type_name) = '电脑' THEN (
+    WHEN TRIM(movement.type_name) IN ('电脑', '办公终端', '办公设备终端') THEN (
       SELECT model.storage
       FROM it_inventory_model model
       JOIN it_inventory_brand brand
@@ -113,7 +111,7 @@ SELECT
     ELSE NULL
   END,
   CASE
-    WHEN TRIM(movement.type_name) = '电脑' THEN (
+    WHEN TRIM(movement.type_name) IN ('电脑', '办公终端', '办公设备终端') THEN (
       SELECT model.gpu
       FROM it_inventory_model model
       JOIN it_inventory_brand brand
@@ -134,4 +132,4 @@ SELECT
   movement.occurred_at
 FROM inventory_movement_log movement
 WHERE movement.movement_direction = 'increase'
-  AND movement.source_label IN ('外部导入', '电脑入库', '手工新增');
+  AND movement.source_label IN ('外部导入', '电脑入库', '办公终端入库', '手工新增');

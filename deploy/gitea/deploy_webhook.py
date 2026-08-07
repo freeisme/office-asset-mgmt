@@ -5,15 +5,17 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import ipaddress
 import json
 import logging
 import os
 import re
+import ssl
 import subprocess
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import urlsplit
+from urllib.parse import parse_qs, urlparse, urlsplit
 
 
 LOG = logging.getLogger("gitea-deploy")
@@ -30,6 +32,11 @@ WEBHOOK_BIND = os.environ.get("WEBHOOK_BIND", "0.0.0.0")
 WEBHOOK_PORT = int(os.environ.get("WEBHOOK_PORT", "9000"))
 MAX_BODY_BYTES = int(os.environ.get("WEBHOOK_MAX_BODY_BYTES", "1048576"))
 VERSION_LIST_LIMIT = max(5, min(50, int(os.environ.get("DEPLOY_VERSION_LIST_LIMIT", "30"))))
+ALLOW_PRERELEASE = os.environ.get("DEPLOY_ALLOW_PRERELEASE", "").lower() in {"1", "true", "yes"}
+RELEASE_NOTES_MAX_CHARS = max(
+    1000,
+    min(20000, int(os.environ.get("DEPLOY_RELEASE_NOTES_MAX_CHARS", "10000"))),
+)
 CONTROL_TOKEN = os.environ.get("DEPLOY_CONTROL_TOKEN", "").strip()
 CONTROL_PATH = os.environ.get("DEPLOY_CONTROL_PATH", "/control/update").rstrip("/") or "/"
 CONTROL_STATUS_PATH = os.environ.get("DEPLOY_CONTROL_STATUS_PATH", "/control/status").rstrip("/") or "/"
@@ -42,16 +49,96 @@ DEPLOY_SCRIPT = Path(
         str(APP_DIR / "deploy" / "scripts" / "update_from_gitea.sh"),
     )
 ).resolve()
+TLS_CERT_FILE = os.environ.get("DEPLOY_TLS_CERT_FILE", "").strip()
+TLS_KEY_FILE = os.environ.get("DEPLOY_TLS_KEY_FILE", "").strip()
+ALLOW_INSECURE_HTTP = os.environ.get("DEPLOY_ALLOW_INSECURE_HTTP", "").lower() in {
+    "1",
+    "true",
+    "yes",
+}
 
 state_lock = threading.Lock()
 git_lock = threading.Lock()
 deployment_running = False
 deployment_pending = False
 pending_sha = ""
+pending_repository_url = ""
 
 
 class InvalidTargetVersionError(ValueError):
     pass
+
+
+class InvalidRepositoryUrlError(ValueError):
+    pass
+
+
+SCP_REPOSITORY_URL_RE = re.compile(
+    r"^(?P<user>[A-Za-z0-9._-]+)@(?P<host>[A-Za-z0-9.-]+|\[[0-9A-Fa-f:.]+\]):(?P<path>[A-Za-z0-9._~/%+-]+(?:\.git)?)$"
+)
+
+
+def _repository_host_allows_http(host: str) -> bool:
+    host_value = (host or "").strip().strip("[]").lower()
+    if not host_value:
+        return False
+    if host_value in {"localhost"} or "." not in host_value:
+        return True
+    if host_value.endswith((".local", ".lan", ".internal")):
+        return True
+    try:
+        address = ipaddress.ip_address(host_value)
+    except ValueError:
+        return False
+    return address.is_private or address.is_loopback or address.is_link_local
+
+
+def _validate_repository_host(host: str) -> None:
+    host_value = (host or "").strip().strip("[]")
+    if not host_value or len(host_value) > 253:
+        raise InvalidRepositoryUrlError("invalid repository host")
+    try:
+        ipaddress.ip_address(host_value)
+        return
+    except ValueError:
+        pass
+    if not re.fullmatch(r"[A-Za-z0-9.-]+", host_value):
+        raise InvalidRepositoryUrlError("invalid repository host")
+    if any(not label or label.startswith("-") or label.endswith("-") for label in host_value.split(".")):
+        raise InvalidRepositoryUrlError("invalid repository host")
+
+
+def _normalize_repository_url(value: object | None) -> str:
+    repository_url = "" if value is None else str(value).strip()
+    if not repository_url:
+        return ""
+    if len(repository_url) > 512:
+        raise InvalidRepositoryUrlError("repository URL is too long")
+    if any(ord(char) < 32 for char in repository_url) or any(char.isspace() for char in repository_url):
+        raise InvalidRepositoryUrlError("repository URL contains invalid characters")
+
+    scp_match = SCP_REPOSITORY_URL_RE.fullmatch(repository_url)
+    if scp_match:
+        _validate_repository_host(scp_match.group("host"))
+        return repository_url
+
+    parsed = urlparse(repository_url)
+    if parsed.scheme not in {"https", "http", "ssh"} or not parsed.netloc:
+        raise InvalidRepositoryUrlError("repository URL must use https, ssh, or internal http")
+    if parsed.username and parsed.scheme != "ssh":
+        raise InvalidRepositoryUrlError("http repository URLs must not contain credentials")
+    if parsed.password:
+        raise InvalidRepositoryUrlError("repository URL must not contain credentials")
+    if parsed.params or parsed.query or parsed.fragment:
+        raise InvalidRepositoryUrlError("repository URL must not contain query or fragment")
+    _validate_repository_host(parsed.hostname or "")
+    if parsed.scheme == "http" and not _repository_host_allows_http(parsed.hostname or ""):
+        raise InvalidRepositoryUrlError("http repository URL must be internal")
+    if parsed.scheme == "ssh" and parsed.username and not re.fullmatch(r"[A-Za-z0-9._-]+", parsed.username):
+        raise InvalidRepositoryUrlError("invalid ssh username")
+    if not re.fullmatch(r"/[A-Za-z0-9._~/%+-]+(?:\.git)?", parsed.path or ""):
+        raise InvalidRepositoryUrlError("invalid repository path")
+    return repository_url
 
 
 def _verify_signature(body: bytes, supplied_signature: str) -> bool:
@@ -65,11 +152,12 @@ def _verify_signature(body: bytes, supplied_signature: str) -> bool:
     return hmac.compare_digest(expected, signature.lower())
 
 
-def _enqueue_deployment(commit_sha: str) -> None:
-    global deployment_pending, deployment_running, pending_sha
+def _enqueue_deployment(commit_sha: str, repository_url: str = "") -> None:
+    global deployment_pending, deployment_running, pending_sha, pending_repository_url
 
     with state_lock:
         pending_sha = commit_sha
+        pending_repository_url = repository_url
         deployment_pending = True
         if deployment_running:
             return
@@ -79,7 +167,7 @@ def _enqueue_deployment(commit_sha: str) -> None:
 
 
 def _deployment_worker() -> None:
-    global deployment_pending, deployment_running, pending_sha
+    global deployment_pending, deployment_running, pending_sha, pending_repository_url
 
     while True:
         with state_lock:
@@ -88,10 +176,15 @@ def _deployment_worker() -> None:
                 return
             deployment_pending = False
             commit_sha = pending_sha
+            repository_url = pending_repository_url
 
         env = os.environ.copy()
         env["DEPLOY_BRANCH"] = DEPLOY_BRANCH
         env["DEPLOY_TARGET_SHA"] = commit_sha
+        if repository_url:
+            env["DEPLOY_REPOSITORY_URL"] = repository_url
+        else:
+            env.pop("DEPLOY_REPOSITORY_URL", None)
         LOG.info("Starting deployment for commit %s", commit_sha)
         try:
             with git_lock:
@@ -123,7 +216,36 @@ def _git_sha(*args: str) -> str:
     return output.splitlines()[0].strip() if output else ""
 
 
-def _fetch_remote_branch() -> None:
+def _origin_url() -> str:
+    try:
+        return _git_output("remote", "get-url", "origin")
+    except subprocess.CalledProcessError:
+        return ""
+
+
+def _candidate_branch_ref() -> str:
+    return f"refs/remotes/update-candidate/{DEPLOY_BRANCH}"
+
+
+def _fetch_update_source(repository_url: str = "") -> str:
+    repository_url = _normalize_repository_url(repository_url)
+    if repository_url:
+        subprocess.run(
+            [
+                "git",
+                "-C",
+                str(APP_DIR),
+                "fetch",
+                "--tags",
+                repository_url,
+                f"+refs/heads/{DEPLOY_BRANCH}:{_candidate_branch_ref()}",
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=90,
+        )
+        return _candidate_branch_ref()
     subprocess.run(
         ["git", "-C", str(APP_DIR), "fetch", "--prune", "--tags", "origin", DEPLOY_BRANCH],
         check=True,
@@ -131,6 +253,7 @@ def _fetch_remote_branch() -> None:
         text=True,
         timeout=60,
     )
+    return f"origin/{DEPLOY_BRANCH}"
 
 
 def _current_sha() -> str:
@@ -140,8 +263,8 @@ def _current_sha() -> str:
     return sha
 
 
-def _latest_sha() -> str:
-    sha = _git_sha("rev-parse", f"origin/{DEPLOY_BRANCH}")
+def _latest_sha(branch_ref: str) -> str:
+    sha = _git_sha("rev-parse", branch_ref)
     if not HEX_SHA_RE.fullmatch(sha):
         raise RuntimeError("deployment checkout returned an invalid remote branch")
     return sha
@@ -166,6 +289,7 @@ def _parse_semver_tag(tag_name: str) -> dict | None:
     )
     return {
         "version": tag_name,
+        "isPrerelease": bool(prerelease),
         "_sortKey": (
             int(match.group("major")),
             int(match.group("minor")),
@@ -174,6 +298,29 @@ def _parse_semver_tag(tag_name: str) -> dict | None:
             prerelease_key,
         ),
     }
+
+
+def _tag_is_annotated(tag_name: str) -> bool:
+    try:
+        return _git_output("cat-file", "-t", tag_name) == "tag"
+    except subprocess.CalledProcessError:
+        return False
+
+
+def _release_notes_for_tag(tag_name: str) -> str:
+    try:
+        notes = _git_output("show", f"{tag_name}:VERSION_NOTES.md")
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
+        return ""
+    heading_re = re.compile(r"^##\s+(?P<version>v\S+)\s*$", re.MULTILINE)
+    matches = list(heading_re.finditer(notes))
+    for index, match in enumerate(matches):
+        if match.group("version") != tag_name:
+            continue
+        end = matches[index + 1].start() if index + 1 < len(matches) else len(notes)
+        body = notes[match.end() : end].strip()
+        return body[:RELEASE_NOTES_MAX_CHARS]
+    return ""
 
 
 def _tag_commit_sha(tag_name: str) -> str:
@@ -195,11 +342,11 @@ def _public_version(version: dict | None) -> dict | None:
     return {key: value for key, value in version.items() if not key.startswith("_")}
 
 
-def _available_versions(current_sha: str) -> tuple[list[dict], dict | None, dict | None]:
+def _available_versions(current_sha: str, branch_ref: str) -> tuple[list[dict], dict | None, dict | None]:
     output = _git_output(
         "tag",
         "--merged",
-        f"origin/{DEPLOY_BRANCH}",
+        branch_ref,
         "--list",
         "v*",
     )
@@ -207,6 +354,13 @@ def _available_versions(current_sha: str) -> tuple[list[dict], dict | None, dict
     for tag_name in output.splitlines():
         parsed = _parse_semver_tag(tag_name.strip())
         if not parsed:
+            continue
+        if parsed["isPrerelease"] and not ALLOW_PRERELEASE:
+            continue
+        if not _tag_is_annotated(tag_name):
+            continue
+        release_notes = _release_notes_for_tag(tag_name)
+        if not release_notes:
             continue
         commit_sha = _tag_commit_sha(tag_name)
         if not commit_sha:
@@ -220,6 +374,7 @@ def _available_versions(current_sha: str) -> tuple[list[dict], dict | None, dict
                 "shortSha": commit_sha[:7],
                 "subject": subject,
                 "authoredAt": authored_at,
+                "releaseNotes": release_notes,
             }
         )
 
@@ -300,18 +455,21 @@ def _snapshot_status(snapshot: dict) -> str:
     return "no_release_available"
 
 
-def _update_snapshot() -> dict:
+def _update_snapshot(repository_url: str = "") -> dict:
+    repository_url = _normalize_repository_url(repository_url)
     with git_lock:
-        _fetch_remote_branch()
+        branch_ref = _fetch_update_source(repository_url)
         current_sha = _current_sha()
-        latest_sha_remote = _latest_sha()
-        versions, current_version, latest_version = _available_versions(current_sha)
+        latest_sha_remote = _latest_sha(branch_ref)
+        versions, current_version, latest_version = _available_versions(current_sha, branch_ref)
     with state_lock:
         running = deployment_running
         pending = deployment_pending
     return {
         "ok": True,
         "repository": DEPLOY_REPO,
+        "repositoryUrl": repository_url,
+        "effectiveRepositoryUrl": repository_url or _origin_url(),
         "branch": DEPLOY_BRANCH,
         "currentSha": current_sha,
         "latestSha": latest_sha_remote,
@@ -325,11 +483,14 @@ def _update_snapshot() -> dict:
         "deploymentPending": pending,
         "availableVersions": versions,
         "automaticDeployment": False,
+        "currentReleaseNotes": current_version.get("releaseNotes", "") if current_version else "",
+        "latestReleaseNotes": latest_version.get("releaseNotes", "") if latest_version else "",
     }
 
 
-def _check_and_queue_update(target_sha: str = "") -> dict:
-    snapshot = _update_snapshot()
+def _check_and_queue_update(target_sha: str = "", repository_url: str = "") -> dict:
+    repository_url = _normalize_repository_url(repository_url)
+    snapshot = _update_snapshot(repository_url)
     target_sha = target_sha.strip().lower()
     if target_sha:
         target_version = next(
@@ -346,7 +507,7 @@ def _check_and_queue_update(target_sha: str = "") -> dict:
             )
         snapshot["targetSha"] = target_sha
         snapshot["targetVersion"] = target_version["version"]
-        _enqueue_deployment(target_sha)
+        _enqueue_deployment(target_sha, repository_url)
         snapshot["deploymentPending"] = True
         snapshot["status"] = "queued"
         return snapshot
@@ -379,7 +540,8 @@ class WebhookHandler(BaseHTTPRequestHandler):
         return bool(CONTROL_TOKEN) and hmac.compare_digest(supplied, CONTROL_TOKEN)
 
     def do_GET(self) -> None:  # noqa: N802
-        path = urlsplit(self.path).path.rstrip("/") or "/"
+        parsed_url = urlsplit(self.path)
+        path = parsed_url.path.rstrip("/") or "/"
         if path == HEALTH_PATH:
             self._reply(200, b"ok\n")
         elif path == CONTROL_STATUS_PATH:
@@ -387,7 +549,12 @@ class WebhookHandler(BaseHTTPRequestHandler):
                 self._reply(401, b"unauthorized\n")
                 return
             try:
-                snapshot = _update_snapshot()
+                query = parse_qs(parsed_url.query, keep_blank_values=True)
+                repository_url = query.get("repositoryUrl", [""])[0]
+                snapshot = _update_snapshot(repository_url)
+            except InvalidRepositoryUrlError:
+                self._reply_json(400, {"ok": False, "error": "invalid_repository_url"})
+                return
             except Exception as exc:
                 LOG.exception("Unable to inspect update status")
                 self._reply_json(502, {"ok": False, "error": "update_status_unavailable"})
@@ -421,13 +588,21 @@ class WebhookHandler(BaseHTTPRequestHandler):
                 self._reply(400, b"invalid JSON object\n")
                 return
             target_sha = str(payload.get("targetSha", "")).strip().lower()
+            try:
+                repository_url = _normalize_repository_url(payload.get("repositoryUrl", ""))
+            except InvalidRepositoryUrlError:
+                self._reply_json(400, {"ok": False, "error": "invalid_repository_url"})
+                return
             if not target_sha:
                 self._reply_json(400, {"ok": False, "error": "target_version_required"})
                 return
             try:
-                snapshot = _check_and_queue_update(target_sha)
+                snapshot = _check_and_queue_update(target_sha, repository_url)
             except InvalidTargetVersionError:
                 self._reply_json(400, {"ok": False, "error": "invalid_target_version"})
+                return
+            except InvalidRepositoryUrlError:
+                self._reply_json(400, {"ok": False, "error": "invalid_repository_url"})
                 return
             except Exception as exc:
                 LOG.exception("Unable to check or queue an update")
@@ -491,20 +666,37 @@ class WebhookHandler(BaseHTTPRequestHandler):
 
 
 def main() -> None:
-    if not WEBHOOK_SECRET:
-        raise SystemExit("GITEA_WEBHOOK_SECRET must be set")
     if not DEPLOY_SCRIPT.is_file():
         raise SystemExit(f"Deployment script not found: {DEPLOY_SCRIPT}")
-    if not CONTROL_TOKEN:
-        LOG.warning("DEPLOY_CONTROL_TOKEN is not set; manual update control is disabled")
+    if bool(TLS_CERT_FILE) != bool(TLS_KEY_FILE):
+        raise SystemExit("DEPLOY_TLS_CERT_FILE and DEPLOY_TLS_KEY_FILE must be set together")
+    if not TLS_CERT_FILE and not ALLOW_INSECURE_HTTP:
+        raise SystemExit(
+            "HTTPS is required for the update control service; "
+            "set DEPLOY_TLS_CERT_FILE/DEPLOY_TLS_KEY_FILE or explicitly enable "
+            "DEPLOY_ALLOW_INSECURE_HTTP for isolated development"
+        )
 
     logging.basicConfig(
         level=os.environ.get("LOG_LEVEL", "INFO").upper(),
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
+    if not WEBHOOK_SECRET:
+        LOG.warning("GITEA_WEBHOOK_SECRET is not set; push webhook handling is disabled")
+    if not CONTROL_TOKEN:
+        LOG.warning("DEPLOY_CONTROL_TOKEN is not set; manual update control is disabled")
     server = ThreadingHTTPServer((WEBHOOK_BIND, WEBHOOK_PORT), WebhookHandler)
+    if TLS_CERT_FILE:
+        tls_context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        tls_context.minimum_version = ssl.TLSVersion.TLSv1_2
+        try:
+            tls_context.load_cert_chain(TLS_CERT_FILE, TLS_KEY_FILE)
+        except (OSError, ssl.SSLError) as exc:
+            raise SystemExit(f"Unable to load deployment service TLS certificate: {exc}") from exc
+        server.socket = tls_context.wrap_socket(server.socket, server_side=True)
     LOG.info(
-        "Listening on %s:%s%s (control: %s)",
+        "Listening on %s://%s:%s%s (control: %s)",
+        "https" if TLS_CERT_FILE else "http",
         WEBHOOK_BIND,
         WEBHOOK_PORT,
         WEBHOOK_PATH,

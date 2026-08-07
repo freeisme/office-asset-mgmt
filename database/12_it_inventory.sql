@@ -1,5 +1,3 @@
-USE office_asset_mgmt;
-
 SET NAMES utf8mb4;
 
 INSERT INTO non_asset_type (type_code, type_name, unit_name)
@@ -11,7 +9,7 @@ ON DUPLICATE KEY UPDATE
   updated_at = CURRENT_TIMESTAMP;
 
 INSERT INTO non_asset_type (type_code, type_name, unit_name)
-VALUES ('computer', '电脑', '台')
+VALUES ('computer', '办公终端', '台')
 ON DUPLICATE KEY UPDATE
   type_name = VALUES(type_name),
   unit_name = VALUES(unit_name),

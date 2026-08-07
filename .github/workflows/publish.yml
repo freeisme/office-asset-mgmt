@@ -1,16 +1,17 @@
-name: Verify and publish
+name: Verify source
 
 on:
   push:
     branches:
       - main
+  pull_request:
   workflow_dispatch:
 
 permissions:
   contents: read
 
 concurrency:
-  group: production-publish
+  group: source-verification-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
@@ -30,58 +31,11 @@ jobs:
       - name: Compile Python source
         run: python -m compileall -q server.py
 
+      - name: Run regression tests
+        run: python -m unittest discover -s tests -v
+
       - name: Check shell scripts
-        run: bash -n deploy/scripts/*.sh
+        run: bash -n deploy/scripts/*.sh deploy/docker/*.sh
 
-  publish:
-    name: Publish to Ubuntu server
-    needs: verify
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    environment:
-      name: production
-    steps:
-      - name: Prepare SSH
-        env:
-          DEPLOY_PRIVATE_KEY: ${{ secrets.DEPLOY_PRIVATE_KEY }}
-          DEPLOY_KNOWN_HOSTS: ${{ secrets.DEPLOY_KNOWN_HOSTS }}
-        run: |
-          set -euo pipefail
-          test -n "${DEPLOY_PRIVATE_KEY}" || {
-            echo "Missing repository secret: DEPLOY_PRIVATE_KEY" >&2
-            exit 1
-          }
-          test -n "${DEPLOY_KNOWN_HOSTS}" || {
-            echo "Missing repository secret: DEPLOY_KNOWN_HOSTS" >&2
-            exit 1
-          }
-          install -m 700 -d "${HOME}/.ssh"
-          printf '%s\n' "${DEPLOY_PRIVATE_KEY}" > "${HOME}/.ssh/deploy_key"
-          printf '%s\n' "${DEPLOY_KNOWN_HOSTS}" > "${HOME}/.ssh/known_hosts"
-          chmod 600 "${HOME}/.ssh/deploy_key"
-          chmod 644 "${HOME}/.ssh/known_hosts"
-
-      - name: Update application and restart service
-        env:
-          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
-          DEPLOY_PORT: ${{ secrets.DEPLOY_PORT || '22' }}
-          DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
-          DEPLOY_PATH: ${{ secrets.DEPLOY_PATH || '/opt/office-asset-mgmt' }}
-          DEPLOY_BRANCH: ${{ secrets.DEPLOY_BRANCH || 'main' }}
-        run: |
-          set -euo pipefail
-          test -n "${DEPLOY_HOST}" || {
-            echo "Missing repository secret: DEPLOY_HOST" >&2
-            exit 1
-          }
-          test -n "${DEPLOY_USER}" || {
-            echo "Missing repository secret: DEPLOY_USER" >&2
-            exit 1
-          }
-          ssh \
-            -i "${HOME}/.ssh/deploy_key" \
-            -p "${DEPLOY_PORT}" \
-            -o BatchMode=yes \
-            -o StrictHostKeyChecking=yes \
-            "${DEPLOY_USER}@${DEPLOY_HOST}" \
-            "cd '${DEPLOY_PATH}' && DEPLOY_BRANCH='${DEPLOY_BRANCH}' bash deploy/scripts/update_from_git.sh"
+      - name: Check JavaScript syntax
+        run: node --check web/app.js

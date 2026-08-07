@@ -46,7 +46,7 @@ const pageMeta = {
   },
   computers: {
     title: "办公终端",
-    description: "维护电脑资产台账、归属人员和 IT 资产状态。",
+    description: "维护办公终端资产台账、归属人员和 IT 资产状态。",
   },
   employees: {
     title: "使用人员",
@@ -58,7 +58,7 @@ const pageMeta = {
   },
   inventory: {
     title: "IT物资",
-    description: "管理电脑、显示屏和其他 IT 物资库存、采购入库与分配状态。",
+    description: "管理办公终端、显示屏和其他 IT 物资库存、采购入库与分配状态。",
   },
   dictionary: {
     title: "基础字典",
@@ -115,6 +115,7 @@ let settingsState = {
   updateChecking: false,
   updateApplying: false,
   updateSelectedSha: "",
+  updateRepositoryUrl: "",
 };
 let authBootPromise = null;
 
@@ -180,7 +181,7 @@ function getSeedState() {
       { id: "headset", code: "headset", name: "耳机", unit: "件" },
       { id: "usb_hub", code: "usb_hub", name: "USB集线器", unit: "件" },
       { id: "webcam", code: "webcam", name: "摄像头", unit: "件" },
-      { id: "computer", code: "computer", name: "电脑", unit: "台" },
+      { id: "computer", code: "computer", name: "办公终端", unit: "台" },
     ],
     inventoryBrands: [],
     inventoryModels: [],
@@ -245,7 +246,7 @@ function normalizeState(value) {
   const expandedOrgIds = Array.isArray(value.expandedOrgIds) ? value.expandedOrgIds : orgs.map((org) => org.id);
   let nonAssetTypes = Array.isArray(value.nonAssetTypes) ? value.nonAssetTypes : seed.nonAssetTypes;
   if (!nonAssetTypes.some((type) => isComputerInventoryType(type))) {
-    nonAssetTypes = nonAssetTypes.concat([{ id: "computer", code: "computer", name: "电脑", unit: "台" }]);
+    nonAssetTypes = nonAssetTypes.concat([{ id: "computer", code: "computer", name: "办公终端", unit: "台" }]);
   }
   const inventoryBrands = Array.isArray(value.inventoryBrands)
     ? value.inventoryBrands.map((brand) => ({
@@ -656,6 +657,7 @@ function requestJson(url, options = {}) {
           updateChecking: false,
           updateApplying: false,
           updateSelectedSha: "",
+          updateRepositoryUrl: "",
         };
         authBootPromise = null;
         startAuth();
@@ -815,8 +817,15 @@ async function loadSettingsState(options = {}) {
   if (isAdminUser()) {
     const backupsPayload = await requestJson(API_BACKUPS_URL);
     settingsState.backups = Array.isArray(backupsPayload.backups) ? backupsPayload.backups : [];
+    settingsState.updateRepositoryUrl = Object.prototype.hasOwnProperty.call(
+      settingsState.settings,
+      "update_repository_url",
+    )
+      ? settingsState.settings.update_repository_url || ""
+      : settingsState.updateRepositoryUrl || "";
   } else {
     settingsState.backups = [];
+    settingsState.updateRepositoryUrl = "";
   }
   settingsState.loaded = true;
   updateAuthenticatedChrome();
@@ -901,6 +910,7 @@ async function logout() {
     updateChecking: false,
     updateApplying: false,
     updateSelectedSha: "",
+    updateRepositoryUrl: "",
   };
   document.querySelector("#modalRoot").innerHTML = "";
   authBootPromise = null;
@@ -1048,12 +1058,16 @@ function getType(id) {
 function isComputerInventoryType(type) {
   const code = inventoryText(type?.code);
   const name = inventoryText(type?.name);
-  return code === "computer" || code === "pc" || name === "电脑";
+  return (
+    code === "computer" ||
+    code === "pc" ||
+    ["电脑", "办公终端", "办公设备终端"].includes(name)
+  );
 }
 
 function isComputerInventoryTypeName(name) {
   const text = inventoryText(name);
-  return text === "电脑" || text === "computer" || text === "pc";
+  return ["电脑", "办公终端", "办公设备终端", "computer", "pc"].includes(text);
 }
 
 function computerInventoryType() {
@@ -1131,11 +1145,13 @@ const inventoryTypeCodeOverrides = {
   支架: "ZJ",
   笔记本支架: "BJBZJ",
   电脑支架: "DNZJ",
+  办公终端支架: "DNZJ",
   USB集线器: "USB",
   电源适配器: "DYSPQ",
   充电器: "CDQ",
   数据线: "SJX",
   电脑: "DN",
+  办公终端: "DN",
 };
 
 function inventoryCodeBase(name) {
@@ -2285,7 +2301,7 @@ function openLeaveRecoveryModal(employee, archiveInput) {
                       } />
                       <span><strong>${escapeHtml(device.label)}</strong><small>${escapeHtml(
                         `${device.detail}${device.quantity > 1 ? ` x${device.quantity}` : ""}`,
-                      )}${recoverable ? "" : " / 仅解除电脑分配"}</small></span>
+                      )}${recoverable ? "" : " / 仅解除办公终端分配"}</small></span>
                     </label>
                   `;
                 })
@@ -2348,7 +2364,7 @@ function deviceChips(employee) {
         device.category === "computer"
           ? `<button class="device-chip device-chip-button" data-action="open-computer" data-id="${escapeHtml(
               device.id,
-            )}" title="查看电脑信息">${escapeHtml(device.label)}<small>${escapeHtml(device.detail)}</small></button>`
+            )}" title="查看办公终端信息">${escapeHtml(device.label)}<small>${escapeHtml(device.detail)}</small></button>`
           : `<span class="device-chip">${escapeHtml(device.label)}<small>${escapeHtml(device.detail)}</small></span>`,
     )
     .join("")}</div>`;
@@ -2505,21 +2521,30 @@ function updateStatusDetail(status) {
   if (status === "update_available") return "请选择版本号更高的已发布版本，再手动执行更新。推送不会自动部署。";
   if (status === "queued") return "服务器将按所选发布版本构建应用，完成后请刷新页面。";
   if (status === "running") return "应用服务可能会短暂重启，请稍后刷新页面。";
-  if (status === "up_to_date") return "当前部署版本与服务器 Gitea 仓库一致。";
-  if (status === "no_releases") return "Gitea 仓库中还没有 vMAJOR.MINOR.PATCH 格式的已发布版本标签。";
+  if (status === "up_to_date") return "当前部署版本与所选项目地址一致。";
+  if (status === "no_releases") return "所选项目地址中还没有 vMAJOR.MINOR.PATCH 格式的已发布版本标签。";
   if (status === "no_release_available") return "当前部署版本没有更高的已发布版本，不能直接选择普通提交更新。";
-  return "点击按钮读取 Gitea 中已发布的语义化版本标签。";
+  return "点击按钮读取项目地址中已发布的语义化版本标签。";
+}
+
+function currentUpdateRepositoryUrl() {
+  return (
+    document.querySelector("[data-update-repository-url]")?.value ||
+    settingsState.updateRepositoryUrl ||
+    ""
+  ).trim();
 }
 
 function renderUpdatePanel(admin) {
   if (!admin) {
     return `<section class="data-panel settings-panel settings-readonly-note">
-      <strong>版本更新</strong><span>只有管理员可以检查并执行 Gitea 版本更新。</span>
+      <strong>版本更新</strong><span>只有管理员可以检查并执行项目版本更新。</span>
     </section>`;
   }
   const status = settingsState.updateStatus || {};
   const checking = settingsState.updateChecking;
   const applying = settingsState.updateApplying;
+  const repositoryUrl = settingsState.updateRepositoryUrl || status.repositoryUrl || "";
   const deploymentBusy = ["queued", "running"].includes(status.status);
   const busy = checking || applying || deploymentBusy;
   const currentSha = status.currentShortSha || (status.currentSha ? String(status.currentSha).slice(0, 7) : "-");
@@ -2530,6 +2555,7 @@ function renderUpdatePanel(admin) {
   const latestVersion = status.latestVersion
     ? `${status.latestVersion} · ${(status.latestVersionSha || status.latestSha || latestSha).slice(0, 7)}`
     : "暂无已发布版本";
+  const sourceLabel = status.effectiveRepositoryUrl || repositoryUrl || "服务器默认 origin";
   const statusValue = status.status || "";
   const versions = Array.isArray(status.availableVersions) ? status.availableVersions : [];
   const selectedSha = versions.some(
@@ -2538,6 +2564,11 @@ function renderUpdatePanel(admin) {
   )
     ? settingsState.updateSelectedSha
     : "";
+  const selectedVersion =
+    versions.find((version) => version.sha === selectedSha) ||
+    versions.find((version) => version.isLatest) ||
+    null;
+  const releaseNotes = selectedVersion?.releaseNotes || status.latestReleaseNotes || "";
   const versionOptions = versions.length
     ? `<option value="">请选择一个版本</option>${versions
         .map((version) => {
@@ -2565,11 +2596,17 @@ function renderUpdatePanel(admin) {
       }</option>`;
   return `<section class="data-panel settings-panel update-panel">
     <div class="section-heading settings-panel-heading">
-      <div><h2>版本更新</h2><span>从 Gitea 读取已发布的语义化版本标签，只能选择版本号更高的版本更新应用。</span></div>
+      <div><h2>版本更新</h2><span>从 GitHub 或 Gitea 读取已发布的语义化版本标签，只能选择版本号更高的版本更新应用。</span></div>
+    </div>
+    <div class="update-target-field">
+      <label for="updateRepositoryUrl">项目地址</label>
+      <input id="updateRepositoryUrl" data-update-repository-url type="text" value="${escapeHtml(
+        repositoryUrl,
+      )}" placeholder="留空使用服务器默认 origin，或填写 GitHub/Gitea 仓库地址" ${busy ? "disabled" : ""} />
     </div>
     <div class="update-version-grid">
       <div class="update-version-item"><span>当前版本</span><strong>${escapeHtml(currentVersion)}</strong></div>
-      <div class="update-version-item"><span>Gitea 最新发布版本</span><strong>${escapeHtml(latestVersion)}</strong></div>
+      <div class="update-version-item"><span>来源最新发布版本</span><strong>${escapeHtml(latestVersion)}</strong></div>
     </div>
     <div class="update-target-field">
       <label for="updateTargetVersion">目标版本</label>
@@ -2577,9 +2614,17 @@ function renderUpdatePanel(admin) {
         ${versionOptions}
       </select>
     </div>
+    <div class="update-release-notes">
+      <div class="update-release-notes-heading"><strong>版本更新说明</strong><span>${
+        selectedVersion ? escapeHtml(selectedVersion.version || selectedVersion.tag || "") : "检查后显示"
+      }</span></div>
+      <div class="update-release-notes-body">${
+        releaseNotes ? escapeHtml(releaseNotes) : "该版本暂无匹配的 VERSION_NOTES.md 说明。"
+      }</div>
+    </div>
     <div class="settings-readonly-note update-status-note">
       <strong>${escapeHtml(updateStatusLabel(statusValue))}</strong>
-      <span>${escapeHtml(updateStatusDetail(statusValue))}</span>
+      <span>${escapeHtml(updateStatusDetail(statusValue))} 来源：${escapeHtml(sourceLabel)}</span>
     </div>
     <div class="modal-footer settings-form-footer">
       <button type="button" class="secondary-button" data-action="check-for-update" ${busy ? "disabled" : ""}>
@@ -2760,8 +2805,8 @@ const auditActionLabels = {
   employee_removed: "删除人员",
   employee_archived: "离职归档",
   employee_status_changed: "人员状态变更",
-  computer_status_changed: "电脑状态变更",
-  computer_assignment_changed: "电脑分配变更",
+  computer_status_changed: "办公终端状态变更",
+  computer_assignment_changed: "办公终端分配变更",
   computer_added: "新增办公终端",
   computer_removed: "删除办公终端",
   monitor_added: "增加显示屏",
@@ -2781,7 +2826,7 @@ function auditActionLabel(actionType) {
 
 const auditActionExtraLabels = {
   employee_info_changed: "人员信息变更",
-  computer_info_changed: "电脑信息变更",
+  computer_info_changed: "办公终端信息变更",
   monitor_changed: "人员显示屏信息变更",
   non_asset_changed: "人员非资产物资信息变更",
   inventory_type_changed: "物资类型变更",
@@ -2796,7 +2841,7 @@ const auditActionExtraLabels = {
 const auditCategoryLabels = {
   inventory: "物资变动",
   employee: "人员变动",
-  computer: "电脑信息变动",
+  computer: "办公终端信息变动",
   organization: "组织架构变动",
   other: "其他变动",
 };
@@ -2930,7 +2975,7 @@ function renderAuditPage() {
 
   return `
     <div class="page-intro">
-      <div><h2>操作日志</h2><p>按操作类别查看物资、人员和电脑变动，再结合具体变动、人员和日期进行筛选。</p></div>
+      <div><h2>操作日志</h2><p>按操作类别查看物资、人员和办公终端变动，再结合具体变动、人员和日期进行筛选。</p></div>
       <div class="toolbar-actions">
         <button class="secondary-button" data-action="refresh-audit">刷新日志</button>
         <button class="secondary-button" data-action="export-audit" ${logs.length ? "" : "disabled"}>导出当前结果</button>
@@ -3057,7 +3102,7 @@ function renderDashboardComputerStatusChart() {
     <div class="dashboard-status-layout">
       <div class="dashboard-status-number">
         <strong>${total}</strong>
-        <span>电脑总数</span>
+        <span>办公终端总数</span>
       </div>
       <div class="dashboard-status-summary">
         <ul class="dashboard-status-legend">
@@ -3120,7 +3165,7 @@ function renderDashboardOrgTreeNode(org, depth = 0) {
         <span class="dashboard-org-marker" aria-hidden="true"></span>
         <div class="dashboard-org-main">
           <div><strong>${escapeHtml(org.name)}</strong><span>${escapeHtml(org.code)}</span></div>
-          <small>${summary.employees} 人 · ${summary.computers} 台电脑${summary.children ? ` · ${summary.children} 个下级` : ""}</small>
+          <small>${summary.employees} 人 · ${summary.computers} 台办公终端${summary.children ? ` · ${summary.children} 个下级` : ""}</small>
         </div>
       </div>
       ${children.length ? `<div class="dashboard-org-children">${children.map((child) => renderDashboardOrgTreeNode(child, depth + 1)).join("")}</div>` : ""}
@@ -3156,13 +3201,13 @@ function renderDashboardPage() {
       </div>
       <div class="toolbar-actions">
         <button class="secondary-button" data-action="navigate" data-page="employees">查看组织树</button>
-        <button class="primary-button" data-action="open-computer">＋ 新增电脑</button>
+        <button class="primary-button" data-action="open-computer">＋ 新增办公终端</button>
       </div>
     </div>
 
     <div class="stats-grid">
       <div class="stat-card">
-        <div class="stat-label"><span>电脑资产</span><span class="stat-mark">▣</span></div>
+        <div class="stat-label"><span>办公终端资产</span><span class="stat-mark">▣</span></div>
         <div class="stat-value">${computerCount}</div>
         <div class="stat-foot">${inUseCount} 台当前在用</div>
       </div>
@@ -3186,7 +3231,7 @@ function renderDashboardPage() {
     <div class="content-grid">
       <section class="section-block">
         <div class="section-heading">
-          <div><h2>最近登记的电脑</h2><span>按注册日期倒序</span></div>
+          <div><h2>最近登记的办公终端</h2><span>按注册日期倒序</span></div>
           <button class="text-button" data-action="navigate" data-page="computers">查看全部 →</button>
         </div>
         <div class="data-panel">
@@ -3195,7 +3240,7 @@ function renderDashboardPage() {
       </section>
       <section class="section-block">
         <div class="section-heading">
-          <div><h2>电脑资产状态</h2><span>在用、闲置、维修分布</span></div>
+          <div><h2>办公终端资产状态</h2><span>在用、闲置、维修分布</span></div>
           <button class="text-button" data-action="navigate" data-page="computers">查看台账 →</button>
         </div>
         <div class="data-panel dashboard-status-panel">
@@ -3216,7 +3261,7 @@ function renderDashboardPage() {
       </section>
       <section class="section-block">
         <div class="section-heading">
-          <div><h2>组织架构树</h2><span>含人员与电脑数量汇总</span></div>
+          <div><h2>组织架构树</h2><span>含人员与办公终端数量汇总</span></div>
           <button class="text-button" data-action="navigate" data-page="employees">查看人员 →</button>
         </div>
         <div class="data-panel dashboard-org-tree-panel">
@@ -3227,7 +3272,7 @@ function renderDashboardPage() {
 
     <section class="section-block">
       <div class="section-heading">
-        <div><h2>人员设备概览</h2><span>电脑名称、显示屏型号和非资产数量</span></div>
+        <div><h2>人员设备概览</h2><span>办公终端名称、显示屏型号和非资产数量</span></div>
         <button class="text-button" data-action="navigate" data-page="employees">查看组织树 →</button>
       </div>
       <div class="data-panel">
@@ -3243,7 +3288,7 @@ function renderRootOrgMetrics() {
   return `<div class="metric-strip">${roots
     .map((org) => {
       const summary = getOrgSummary(org.id);
-      return `<div class="metric-line"><span>${escapeHtml(org.name)}</span><strong>${summary.employees} 人</strong><span class="secondary-text">${summary.computers} 台电脑</span></div>`;
+      return `<div class="metric-line"><span>${escapeHtml(org.name)}</span><strong>${summary.employees} 人</strong><span class="secondary-text">${summary.computers} 台办公终端</span></div>`;
     })
     .join("")}</div>`;
 }
@@ -3260,7 +3305,7 @@ function renderComputersPage() {
         <button class="secondary-button" data-action="select-all-computers">全选当前结果</button>
         <button class="secondary-button" data-action="clear-computer-selection">清空选择</button>
         <button class="secondary-button" data-action="export-computers" ${selectedCount ? "" : "disabled"}>导出选中 ${selectedCount}</button>
-        <button class="primary-button" data-action="open-computer">＋ 新增电脑</button>
+        <button class="primary-button" data-action="open-computer">＋ 新增办公终端</button>
       </div>
     </div>
     <div class="toolbar">
@@ -3287,7 +3332,7 @@ function renderComputersPage() {
 }
 
 function renderComputerTable(computers, withActions, selectable = false) {
-  if (!computers.length) return '<div class="empty-state">暂无符合条件的电脑记录</div>';
+  if (!computers.length) return '<div class="empty-state">暂无符合条件的办公终端记录</div>';
   const allVisibleComputersSelected =
     selectable && computers.length > 0 && computers.every((computer) => state.selectedComputerIds.includes(computer.id));
   return `
@@ -3375,7 +3420,7 @@ function renderEmployeesPage() {
 
   return `
     <div class="page-intro">
-      <div><h2>办公设备使用人员</h2><p>按组织架构树查看人员，节点下直接展示电脑、显示屏和非资产设备</p></div>
+      <div><h2>办公设备使用人员</h2><p>按组织架构树查看人员，节点下直接展示办公终端、显示屏和非资产设备</p></div>
       <div class="toolbar-actions">
         <button class="secondary-button" data-action="select-all-employees">全选当前结果</button>
         <button class="secondary-button" data-action="clear-employee-selection">清空选择</button>
@@ -3441,7 +3486,7 @@ function renderEmployeesPage() {
         <div class="stat-foot">支持设备直接维护</div>
       </div>
       <div class="stat-card">
-        <div class="stat-label"><span>已分配电脑</span><span class="stat-mark">▣</span></div>
+        <div class="stat-label"><span>已分配办公终端</span><span class="stat-mark">▣</span></div>
         <div class="stat-value">${state.computers.filter((computer) => computer.userId).length}</div>
         <div class="stat-foot">和人员树同步联动</div>
       </div>
@@ -4037,7 +4082,7 @@ function renderInventoryPurchaseTable(logs) {
     sections.push(`
       <section class="purchase-table-group">
         <div class="purchase-table-heading">
-          <strong>电脑入库</strong>
+          <strong>办公终端入库</strong>
           <span>${computerLogs.length} 条记录</span>
         </div>
         <div class="table-wrap">
@@ -4346,7 +4391,7 @@ function renderEmployeeOrgNode(org, context) {
           <div class="tree-node-title"><span>${escapeHtml(org.name)}</span><span class="tree-node-code">${escapeHtml(
             org.code,
           )}</span></div>
-          <div class="tree-node-meta">排序 ${escapeHtml(org.sortOrder)} · ${summary.employees} 人 · ${summary.computers} 台电脑 · ${escapeHtml(
+          <div class="tree-node-meta">排序 ${escapeHtml(org.sortOrder)} · ${summary.employees} 人 · ${summary.computers} 台办公终端 · ${escapeHtml(
             orgPathName(org.id),
           )}</div>
         </div>
@@ -4525,7 +4570,7 @@ function renderDictionaryOrgNode(org, context) {
           <div class="tree-node-title"><span>${escapeHtml(org.name)}</span><span class="tree-node-code">${escapeHtml(
             org.code,
           )}</span></div>
-          <div class="tree-node-meta">排序 ${escapeHtml(org.sortOrder)} · ${summary.employees} 人 · ${summary.computers} 台电脑 · ${
+          <div class="tree-node-meta">排序 ${escapeHtml(org.sortOrder)} · ${summary.employees} 人 · ${summary.computers} 台办公终端 · ${
             summary.children
           } 个下级</div>
         </div>
@@ -4687,7 +4732,7 @@ function openComputerModal(id = "") {
             ${inputField("备注", "remarks", computer.remarks || "", false, "可填写采购批次、工单号等")}
           </div>
         </section>
-        <div class="modal-footer"><button type="button" class="secondary-button" data-action="close-modal">取消</button><button class="primary-button" type="submit">保存电脑</button></div>
+        <div class="modal-footer"><button type="button" class="secondary-button" data-action="close-modal">取消</button><button class="primary-button" type="submit">保存办公终端</button></div>
       </form>`,
   );
 }
@@ -4913,9 +4958,9 @@ function renderComputerInventorySelectionFields(computer = {}) {
       selected: String(option.value) === String(selectedModel?.id || "__custom__"),
     }));
   return `
-    ${inventorySelectField("库存电脑品牌", "computerInventoryBrandId", brandOptions, false)}
+    ${inventorySelectField("库存办公终端品牌", "computerInventoryBrandId", brandOptions, false)}
     ${inputField("设备品牌", "brand", selectedComputerBrand, false, "Dell / Lenovo / HP")}
-    ${inventorySelectField("库存电脑型号", "computerInventoryModelId", modelOptions, false)}
+    ${inventorySelectField("库存办公终端型号", "computerInventoryModelId", modelOptions, false)}
     ${inputField("型号", "model", selectedComputerModel, false, "Latitude 5440")}
   `;
 }
@@ -5063,11 +5108,11 @@ function openDeviceManager(employeeId) {
                   </div>`,
                 )
                 .join("")
-            : '<div class="empty-state">当前没有分配电脑</div>'
+            : '<div class="empty-state">当前没有分配办公终端</div>'
         }
         <div class="assignment-form">
           <select data-assign-computer="${escapeHtml(employee.id)}">
-            <option value="">选择一台可分配电脑</option>
+            <option value="">选择一台可分配办公终端</option>
             ${availableComputers
               .map(
                 (computer) =>
@@ -5133,7 +5178,7 @@ function openOrgModal(id = "", presetParentId = "") {
   const org = existing || { id: "", code: "", name: "", parentId: presetParentId, sortOrder: 1000 };
   const excludeIds = existing ? [existing.id].concat(getDescendantOrgIds(existing.id)) : [];
   openModal(
-    `${modalHeader(id ? "编辑组织" : "新增组织", "组织会用于树状视图展示和电脑、人员归属")}
+    `${modalHeader(id ? "编辑组织" : "新增组织", "组织会用于树状视图展示和办公终端、人员归属")}
       <form data-form="org" data-id="${escapeHtml(org.id)}">
         <div class="form-grid">
           ${inputField(
@@ -5268,15 +5313,20 @@ async function handleBackupScheduleSubmit(form) {
 
 async function handleUpdateCheck(button) {
   if (!isAdminUser()) return showToast("只有管理员可以检查版本更新", true);
+  const repositoryUrl = currentUpdateRepositoryUrl();
+  settingsState.updateRepositoryUrl = repositoryUrl;
   settingsState.updateChecking = true;
   if (button) button.disabled = true;
   render();
   try {
     const payload = await requestJson(API_UPDATE_CHECK_URL, {
       method: "POST",
-      body: "{}",
+      body: JSON.stringify({ repositoryUrl }),
     });
     settingsState.updateStatus = payload;
+    const hasRepositoryUrl = Object.prototype.hasOwnProperty.call(payload, "repositoryUrl");
+    settingsState.updateRepositoryUrl = hasRepositoryUrl ? payload.repositoryUrl || "" : repositoryUrl;
+    settingsState.settings.update_repository_url = settingsState.updateRepositoryUrl;
     const versions = Array.isArray(payload.availableVersions) ? payload.availableVersions : [];
     settingsState.updateSelectedSha =
       payload.status === "update_available"
@@ -5288,7 +5338,7 @@ async function handleUpdateCheck(button) {
     } else if (status === "update_available") {
       showToast(`发现可用发布版本 ${payload.latestVersion || ""}，请选择后手动更新`);
     } else if (status === "no_releases") {
-      showToast("检查完成：Gitea 中暂无已发布版本", true);
+      showToast("检查完成：项目地址中暂无已发布版本", true);
     } else if (status === "no_release_available") {
       showToast("检查完成：当前没有版本号更高的已发布版本");
     } else {
@@ -5304,6 +5354,11 @@ async function handleUpdateCheck(button) {
 
 async function handleApplySelectedUpdate() {
   if (!isAdminUser()) return showToast("只有管理员可以执行版本更新", true);
+  const repositoryUrl = currentUpdateRepositoryUrl();
+  const checkedRepositoryUrl = settingsState.updateStatus?.repositoryUrl || "";
+  if (repositoryUrl !== checkedRepositoryUrl) {
+    return showToast("项目地址已变化，请先重新检查版本", true);
+  }
   const targetSha =
     settingsState.updateSelectedSha || document.querySelector("[data-update-target]")?.value || "";
   const version = settingsState.updateStatus?.availableVersions?.find((item) => item.sha === targetSha);
@@ -5320,9 +5375,11 @@ async function handleApplySelectedUpdate() {
   try {
     const payload = await requestJson(API_UPDATE_APPLY_URL, {
       method: "POST",
-      body: JSON.stringify({ targetSha }),
+      body: JSON.stringify({ targetSha, repositoryUrl }),
     });
     settingsState.updateStatus = payload;
+    const hasRepositoryUrl = Object.prototype.hasOwnProperty.call(payload, "repositoryUrl");
+    settingsState.updateRepositoryUrl = hasRepositoryUrl ? payload.repositoryUrl || "" : repositoryUrl;
     settingsState.updateSelectedSha = payload.targetSha || targetSha;
     if (payload.status === "queued" || payload.status === "running") {
       showToast(`版本 ${payload.targetVersion || targetLabel} 已进入手动更新队列`);
@@ -5489,7 +5546,7 @@ function handleComputerSubmit(form) {
       const type = model ? getType(model.typeId) : null;
       recordInventoryMovement({
         direction: delta < 0 ? "decrease" : "increase",
-        typeName: type?.name || "电脑",
+        typeName: type?.name || "办公终端",
         brandName: brand?.name || "",
         modelName: model?.name || "",
         quantity: Math.abs(delta),
@@ -5509,7 +5566,7 @@ function handleComputerSubmit(form) {
   persistState(true);
   closeModal();
   render();
-  showToast(id ? "电脑信息已更新" : "电脑已新增");
+  showToast(id ? "办公终端信息已更新" : "办公终端已新增");
 }
 
 function handleEmployeeSubmit(form) {
@@ -5851,7 +5908,7 @@ function handleInventoryModelSubmit(form) {
   const batchKey = previous?.batchKey || (isComputerModel ? createId("batch") : "");
   const inboundDate = isComputerModel ? String(data.inboundDate || previous?.inboundDate || "").trim() : "";
   if (isComputerModel && !/^\d{4}-\d{2}-\d{2}$/.test(inboundDate)) {
-    return showToast("电脑库存型号必须填写有效的入库时间。", true);
+    return showToast("办公终端库存型号必须填写有效的入库时间。", true);
   }
   const duplicate = state.inventoryModels.find(
     (model) =>
@@ -5950,13 +6007,13 @@ function handleInventoryImportSubmit(form) {
     type = {
       id: createId("type"),
       code: isComputerImport ? "computer" : inventoryTypeCodeFor(typeName),
-      name: isComputerImport ? "电脑" : typeName,
+      name: isComputerImport ? "办公终端" : typeName,
       unit: isComputerImport ? "台" : "件",
       sortOrder: nextTypeSortOrder(),
     };
     state.nonAssetTypes.push(type);
   } else if (isComputerImport) {
-    type.name = "电脑";
+    type.name = "办公终端";
     type.code = type.code || "computer";
     type.unit = "台";
   }
@@ -6017,7 +6074,7 @@ function handleInventoryImportSubmit(form) {
     brandName: brand.name,
     modelName: model.name,
     quantity,
-    sourceLabel: isComputerImport ? "电脑入库" : "外部导入",
+    sourceLabel: isComputerImport ? "办公终端入库" : "外部导入",
     targetLabel: "IT物资库存",
     note: noteParts.join("；"),
     triggerAction: "import",
@@ -6036,7 +6093,7 @@ function handleInventoryImportSubmit(form) {
     memory: isComputerImport ? model.memory : "",
     storage: isComputerImport ? model.storage : "",
     gpu: isComputerImport ? model.gpu : "",
-    sourceLabel: isComputerImport ? "电脑入库" : "外部导入",
+    sourceLabel: isComputerImport ? "办公终端入库" : "外部导入",
     note: String(data.note || "").trim(),
     sourceMovementLogId: movement.id,
     createdAt: currentTimestampText(),
@@ -6054,14 +6111,14 @@ function handleInventoryImportSubmit(form) {
 function assignComputer(employeeId) {
   const select = document.querySelector(`[data-assign-computer="${CSS.escape(employeeId)}"]`);
   const computer = state.computers.find((item) => item.id === select?.value);
-  if (!computer) return showToast("请选择可分配的电脑", true);
+  if (!computer) return showToast("请选择可分配的办公终端", true);
 
   computer.userId = employeeId;
   normalizeComputersAgainstEmployees();
   persistState(true);
   openDeviceManager(employeeId);
   render();
-  showToast("电脑已分配");
+  showToast("办公终端已分配");
 }
 
 function releaseComputer(computerId, employeeId) {
@@ -6075,7 +6132,7 @@ function releaseComputer(computerId, employeeId) {
   persistState(true);
   openDeviceManager(employeeId);
   render();
-  showToast("电脑已解除分配");
+  showToast("办公终端已解除分配");
 }
 
 function xmlEscape(value) {
@@ -6358,7 +6415,7 @@ function exportInventoryPurchaseLogs() {
   }
   if (computerLogs.length) {
     sheets.push({
-      name: "电脑入库",
+      name: "办公终端入库",
       headers: ["入库日期", "品牌", "型号", "数量", "CPU", "内存", "存储", "显卡", "来源", "备注", "记录时间"],
       rows: computerLogs
         .sort((a, b) =>
@@ -6853,18 +6910,18 @@ document.addEventListener("click", (event) => {
 
   if (action === "delete-computer") {
     const computer = state.computers.find((item) => item.id === actionElement.dataset.id);
-    if (computer && window.confirm(`确定删除电脑 ${computer.deviceName} 吗？`)) {
+    if (computer && window.confirm(`确定删除办公终端 ${computer.deviceName} 吗？`)) {
       state.computers = state.computers.filter((item) => item.id !== computer.id);
       state.selectedComputerIds = state.selectedComputerIds.filter((id) => id !== computer.id);
       persistState(true);
       render();
-      showToast("电脑已删除");
+      showToast("办公终端已删除");
     }
   }
 
   if (action === "delete-employee") {
     const employee = getEmployee(actionElement.dataset.id);
-    if (employee && window.confirm(`确定删除人员 ${employee.name} 吗？名下电脑会变为未分配。`)) {
+    if (employee && window.confirm(`确定删除人员 ${employee.name} 吗？名下办公终端会变为未分配。`)) {
       employeeRecoveryDevices(employee)
         .filter((device) => device.category !== "computer")
         .forEach((device) => {
@@ -6983,7 +7040,7 @@ document.addEventListener("click", (event) => {
     const type = getType(actionElement.dataset.id);
     if (!type) return;
     if (isProtectedInventoryType(type)) {
-      return showToast("电脑类型为系统保留分组，不能删除。", true);
+      return showToast("办公终端类型为系统保留分组，不能删除。", true);
     }
     const assignedCount = state.employees.reduce((sum, employee) => {
       const monitorCount = (employee.monitors || []).filter((item) => item.typeId === type.id).length;
@@ -7060,6 +7117,8 @@ document.addEventListener("click", (event) => {
         getNonAssetItems(employee).some((item) => item.inventoryModelId === model?.id),
     );
     if (modelInUse) return showToast("该型号仍被人员名下物资引用，无法删除。", true);
+    const terminalInUse = state.computers.some((computer) => computer.inventoryModelId === model?.id);
+    if (terminalInUse) return showToast("该型号仍被办公终端引用，无法删除。", true);
     if (!model || !window.confirm(`确定删除库存型号 ${model.name} 吗？`)) return;
     if (Number(model.quantity || 0) > 0) {
       const brand = getInventoryBrand(model.brandId);
@@ -7132,6 +7191,18 @@ document.addEventListener("submit", (event) => {
 });
 
 document.addEventListener("change", (event) => {
+  const updateRepositoryUrl = event.target.closest("[data-update-repository-url]");
+  if (updateRepositoryUrl) {
+    const nextUrl = updateRepositoryUrl.value.trim();
+    if (nextUrl !== settingsState.updateRepositoryUrl) {
+      settingsState.updateRepositoryUrl = nextUrl;
+      settingsState.updateStatus = null;
+      settingsState.updateSelectedSha = "";
+      render();
+    }
+    return;
+  }
+
   const updateTarget = event.target.closest("[data-update-target]");
   if (updateTarget) {
     settingsState.updateSelectedSha = updateTarget.value || "";

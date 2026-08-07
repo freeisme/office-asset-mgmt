@@ -106,10 +106,9 @@ sudo env \
   bash deploy/scripts/init_database.sh
 ```
 
-脚本执行顺序为：
+脚本会按 `DB_NAME` 创建并选中数据库，然后执行：
 
 ```text
-00_create_database.sql
 01_schema.sql
 02_seed_reference_data.sql
 03_views.sql
@@ -123,9 +122,15 @@ sudo env \
 17_data_lineage_and_consistency.sql
 18_backfill_computer_inbound_dates.sql
 19_auth_and_settings.sql
+20_database_backup.sql
+21_security_hardening.sql
+22_update_repository_setting.sql
 ```
 
-其中 `02_seed_reference_data.sql` 只包含通用物资类型，不包含组织架构、人员、电脑或库存业务数据。组织架构请在系统中按实际情况创建或通过独立的内部初始化脚本导入。
+其中 `00_create_database.sql` 是固定默认库名的兼容辅助文件，不在以上可配置初始化
+顺序中。`02_seed_reference_data.sql` 只包含通用物资类型，不包含组织架构、人员、
+办公终端或库存业务数据。组织架构请在系统中按实际情况创建或通过独立的内部初始化
+脚本导入。
 
 ## 5. 配置服务环境变量
 
@@ -146,6 +151,10 @@ DB_PASSWORD=替换为MySQL应用账号密码
 MYSQL_BIN=/usr/bin/mysql
 SERVER_HOST=127.0.0.1
 SERVER_PORT=8000
+AUTH_COOKIE_SECURE=true
+PASSWORD_MAX_LENGTH=256
+LOGIN_RATE_WINDOW_SECONDS=300
+LOGIN_RATE_MAX_ATTEMPTS=15
 ```
 
 保护配置文件：
@@ -195,16 +204,16 @@ sudo nginx -t
 sudo systemctl reload nginx
 ```
 
-局域网用户访问服务器 IP：
+完成 HTTPS 配置后，局域网用户访问服务器 IP 或域名：
 
 ```text
-http://服务器局域网IP/
+https://服务器局域网IP/
 ```
 
 例如：
 
 ```text
-http://192.168.1.100/
+https://192.168.1.100/
 ```
 
 ## 8. 防火墙
@@ -229,7 +238,9 @@ sudo apt install -y certbot python3-certbot-nginx
 sudo certbot --nginx -d asset.example.com
 ```
 
-没有域名时，至少限制 Nginx 只允许可信局域网网段访问。
+没有域名时，使用受办公终端信任的内部 CA 证书配置 Nginx。当前 Nginx 示例中的
+HTTP 监听仅用于初始配置或申请证书，不能作为生产登录入口。生产环境保持
+`AUTH_COOKIE_SECURE=true`；不要为了长期使用 HTTP 而关闭 Secure Cookie。
 
 ## 10. 备份
 
@@ -268,6 +279,19 @@ sudo systemctl status office-asset-mgmt
 ```
 
 如果数据库结构有变化，先备份数据库，再按版本说明执行对应 SQL。
+
+恢复文本 SQL 时，先停止服务并确认目标数据库名，再启用 MySQL 二进制模式：
+
+```bash
+sudo systemctl stop office-asset-mgmt
+sudo env MYSQL_PWD='从安全环境文件读取' \
+  mysql --binary-mode=1 -h 127.0.0.1 -u root office_asset_mgmt \
+  < /path/to/office_asset_mgmt.sql
+sudo systemctl start office-asset-mgmt
+```
+
+如果数据库名不是 `office_asset_mgmt`，必须将命令中的名称替换为实际 `DB_NAME`；
+不要依赖脚本中的固定数据库选择。
 
 ## 12. 故障排查
 

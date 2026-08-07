@@ -21,7 +21,13 @@ mysql_args=(
   "--default-character-set=utf8mb4"
 )
 
-"${MYSQL_BIN}" "${mysql_args[@]}" < "${ROOT_DIR}/database/00_create_database.sql"
+if [[ ! "${DB_NAME}" =~ ^[A-Za-z0-9_]+$ ]]; then
+  echo "DB_NAME must contain only letters, numbers, and underscores." >&2
+  exit 1
+fi
+
+"${MYSQL_BIN}" "${mysql_args[@]}" \
+  -e "CREATE DATABASE IF NOT EXISTS \`${DB_NAME}\` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;"
 
 for sql_file in \
   01_schema.sql \
@@ -37,7 +43,9 @@ for sql_file in \
   17_data_lineage_and_consistency.sql \
   18_backfill_computer_inbound_dates.sql \
   19_auth_and_settings.sql \
-  20_database_backup.sql
+  20_database_backup.sql \
+  21_security_hardening.sql \
+  22_update_repository_setting.sql
 do
   echo "Applying ${sql_file}"
   "${MYSQL_BIN}" "${mysql_args[@]}" "${DB_NAME}" < "${ROOT_DIR}/database/${sql_file}"

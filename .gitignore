@@ -9,6 +9,7 @@ __pycache__/
 tmp/
 tmp_*
 backups/
+secrets/
 *.bak
 *.dump
 *.sql.gz
