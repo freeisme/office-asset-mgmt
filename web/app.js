@@ -60,6 +60,10 @@ const pageMeta = {
     title: "IT物资",
     description: "管理办公终端、显示屏和其他 IT 物资库存、采购入库与分配状态。",
   },
+  flowControl: {
+    title: "物资流转记录",
+    description: "自动汇总物资变动，识别业务类型和分类，并支持补充备注。",
+  },
   dictionary: {
     title: "基础字典",
     description: "维护组织架构树和非资产设备类型。",
@@ -1319,8 +1323,53 @@ function inventoryDirectionClass(direction) {
   return direction === "decrease" ? "audit-action-alert" : "audit-action-added";
 }
 
-function inventoryMovementParticipants(sourceLabel, targetLabel) {
-  return `${sourceLabel || "—"} → ${targetLabel || "—"}`;
+const flowRecordDefinitions = {
+  import: { label: "导入入库", category: "库存入库", stockDelta: 1 },
+  manual_create: { label: "手工入库", category: "库存入库", stockDelta: 1 },
+  manual_adjustment: { label: "库存调整", category: "库存管理" },
+  computer_inventory_adjustment: { label: "终端库存调整", category: "库存管理" },
+  assignment: { label: "领用发放", category: "领用发放", stockDelta: -1 },
+  return: { label: "归还回收", category: "归还回收", stockDelta: 1 },
+  return_adjustment: { label: "归还回收", category: "归还回收", stockDelta: 1 },
+  employee_device_recovery: { label: "设备回收", category: "归还回收", stockDelta: 1 },
+  leave_recovery: { label: "离职回收", category: "归还回收", stockDelta: 1 },
+  employee_delete_recovery: { label: "人员删除回收", category: "归还回收", stockDelta: 1 },
+  delete_monitor: { label: "显示器回收", category: "归还回收", stockDelta: 1 },
+  delete_nonasset: { label: "物资回收", category: "归还回收", stockDelta: 1 },
+  delete_type: { label: "删除类型", category: "库存管理", stockDelta: -1 },
+  delete_inventory_model: { label: "删除型号", category: "库存管理", stockDelta: -1 },
+};
+
+function flowRecordDefinition(logOrAction, direction = "increase") {
+  const action =
+    typeof logOrAction === "string" ? logOrAction : String(logOrAction?.triggerAction || "manual");
+  return (
+    flowRecordDefinitions[action] || {
+      label: "其他变动",
+      category: "库存管理",
+      stockDelta: direction === "decrease" ? -1 : 1,
+    }
+  );
+}
+
+function flowRecordActionLabel(log) {
+  return flowRecordDefinition(log, log?.direction).label;
+}
+
+function flowRecordCategory(log) {
+  return flowRecordDefinition(log, log?.direction).category;
+}
+
+function flowRecordStockImpact(log) {
+  const definition = flowRecordDefinition(log, log?.direction);
+  if (definition.stockDelta === 0) return "不变";
+  return log?.direction === "decrease" ? "减少" : "增加";
+}
+
+function flowRecordImpactClass(log) {
+  const impact = flowRecordStockImpact(log);
+  if (impact === "不变") return "audit-action-assignment";
+  return inventoryDirectionClass(log.direction);
 }
 
 function upsertInventoryMovementLog(entry) {
@@ -2427,6 +2476,7 @@ function renderPage() {
   if (state.page === "employees") return renderEmployeesPage();
   if (state.page === "leftEmployees") return renderLeftEmployeesPage();
   if (state.page === "inventory") return renderInventoryPage();
+  if (state.page === "flowControl") return renderFlowControlPage();
   if (state.page === "dictionary") return renderDictionaryPage();
   if (state.page === "audit") return renderAuditPage();
   if (state.page === "settings") return renderSettingsPage();
@@ -3996,6 +4046,70 @@ function renderInventoryPage() {
   `;
 }
 
+function renderFlowRecordNoteEditor(log) {
+  return `
+    <form class="flow-record-note-editor" data-form="inventory-log-note" data-id="${escapeHtml(log.id)}">
+      <input
+        class="flow-record-note-input"
+        type="text"
+        name="note"
+        maxlength="500"
+        value="${escapeHtml(log.note || "")}"
+        placeholder="填写备注"
+        aria-label="物资流转备注"
+      />
+      <button class="text-button flow-record-note-save" type="submit">保存</button>
+    </form>
+  `;
+}
+
+function renderFlowControlRecordTable(logs) {
+  if (!logs.length) return '<div class="empty-state">暂无物资流转记录</div>';
+  return `
+    <div class="table-wrap">
+      <table class="audit-table">
+        <thead><tr><th>时间</th><th>业务类型</th><th>业务分类</th><th>物资类型</th><th>品牌 / 型号</th><th>数量</th><th>库存影响</th><th>调出方</th><th>接收方</th><th>关联人员</th><th>备注</th></tr></thead>
+        <tbody>
+          ${logs
+            .map((log) => {
+              const relatedEmployee = [log.relatedEmployeeName, log.relatedEmployeeNo].filter(Boolean).join(" / ");
+              return `<tr>
+                <td class="audit-time">${escapeHtml(formatDateTime(log.occurredAt))}</td>
+                <td><span class="audit-action audit-action-assignment">${escapeHtml(flowRecordActionLabel(log))}</span></td>
+                <td>${escapeHtml(flowRecordCategory(log))}</td>
+                <td>${escapeHtml(log.typeName || "未分类物资")}</td>
+                <td><div class="primary-text">${escapeHtml(log.brandName || "未登记品牌")}</div><div class="secondary-text">${escapeHtml(
+                  log.modelName || "未登记型号",
+                )}</div></td>
+                <td>${escapeHtml(log.quantity)}</td>
+                <td><span class="audit-action ${flowRecordImpactClass(log)}">${escapeHtml(flowRecordStockImpact(log))}</span></td>
+                <td>${escapeHtml(log.sourceLabel || "—")}</td>
+                <td>${escapeHtml(log.targetLabel || "—")}</td>
+                <td>${escapeHtml(relatedEmployee || "—")}</td>
+                <td>${renderFlowRecordNoteEditor(log)}</td>
+              </tr>`;
+            })
+            .join("")}
+        </tbody>
+      </table>
+    </div>
+  `;
+}
+
+function renderFlowControlPage() {
+  const records = [...state.inventoryMovementLogs].sort((left, right) =>
+    String(right.occurredAt || "").localeCompare(String(left.occurredAt || "")),
+  );
+  return `
+    <section class="section-block">
+      <div class="section-heading">
+        <div><h2>物资流转记录表</h2><span>物资动作自动识别业务类型和业务分类，共 ${records.length} 条</span></div>
+      </div>
+      <div class="data-panel">${renderFlowControlRecordTable(records)}</div>
+    </section>
+  `;
+}
+
 function isComputerPurchaseLog(log) {
   const type = log?.typeId ? getType(log.typeId) : null;
   return isComputerInventoryType(type) || isComputerInventoryTypeName(log?.typeName || "");
@@ -4300,11 +4414,16 @@ function handleInventoryMovementNoteSubmit(form) {
   const log = state.inventoryMovementLogs.find((item) => item.id === form.dataset.id);
   if (!log) return;
   const data = Object.fromEntries(new FormData(form).entries());
-  log.note = String(data.note || "").trim();
+  const note = String(data.note || "").trim();
+  if (note === String(log.note || "").trim()) {
+    showToast("备注未发生变化");
+    return;
+  }
+  log.note = note;
   persistState(true);
   closeModal();
   render();
-  showToast("物资标注已保存");
+  showToast("物资流转备注已保存");
 }
 
 function handleInventoryPurchaseNoteSubmit(form) {
@@ -7323,7 +7442,16 @@ document.addEventListener("input", (event) => {
 document.addEventListener("input", (event) => {
   const filter = event.target.closest("[data-filter]");
   if (!filter) return;
-  if (!["auditSearch", "auditEmployee", "inventorySearch", "employees", "employeeAssetSearch"].includes(filter.dataset.filter)) return;
+  if (
+    ![
+      "auditSearch",
+      "auditEmployee",
+      "inventorySearch",
+      "employees",
+      "employeeAssetSearch",
+    ].includes(filter.dataset.filter)
+  )
+    return;
   if (["employees", "employeeAssetSearch"].includes(filter.dataset.filter)) {
     employeeSearchDrafts[filter.dataset.filter] = filter.value;
     return;

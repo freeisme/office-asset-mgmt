@@ -807,6 +807,37 @@ tbody tr:hover {
   white-space: nowrap;
 }
 
+.flow-record-note-editor {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 270px;
+}
+
+.flow-record-note-input {
+  width: min(100%, 300px);
+  min-width: 150px;
+  height: 32px;
+  padding: 0 10px;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  color: var(--ink);
+  background: var(--white);
+  font-size: 12px;
+}
+
+.flow-record-note-input:focus {
+  outline: 0;
+  border-color: var(--teal);
+  box-shadow: 0 0 0 3px rgba(184, 94, 55, 0.1);
+}
+
+.flow-record-note-save {
+  flex: 0 0 auto;
+  color: var(--teal);
+  white-space: nowrap;
+}
+
 .audit-time {
   color: var(--muted);
   font-family: inherit;
