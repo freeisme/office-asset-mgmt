@@ -6,6 +6,25 @@
 本文档不包含任何真实密码、SSH 私钥、Webhook Secret、更新控制令牌、业务数据或
 数据库备份。生产运行时配置只保存在服务器上的 `.env` 或 systemd 环境文件中。
 
+## 文档导航
+
+GitHub Wiki 提供适合团队日常查阅的模块化文档：
+
+- [项目 Wiki](https://github.com/freeisme/office-asset-mgmt/wiki)
+- [项目概览](https://github.com/freeisme/office-asset-mgmt/wiki/Project-Overview)
+- [系统架构](https://github.com/freeisme/office-asset-mgmt/wiki/Architecture)
+- [模块说明](https://github.com/freeisme/office-asset-mgmt/wiki/Modules)
+- [本地开发](https://github.com/freeisme/office-asset-mgmt/wiki/Development)
+- [数据库与迁移](https://github.com/freeisme/office-asset-mgmt/wiki/Database-and-Migrations)
+- [测试规范](https://github.com/freeisme/office-asset-mgmt/wiki/Testing)
+- [部署与配置](https://github.com/freeisme/office-asset-mgmt/wiki/Deployment)
+- [版本更新与发布](https://github.com/freeisme/office-asset-mgmt/wiki/Release-and-Update)
+- [安全运维](https://github.com/freeisme/office-asset-mgmt/wiki/Security-and-Operations)
+- [故障排查](https://github.com/freeisme/office-asset-mgmt/wiki/Troubleshooting)
+
+代码仓库中的本文件保留完整开发参考；Wiki 页面用于按主题快速查阅。两处文档冲突时，
+以当前代码、数据库脚本和发布说明为准。
+
 ## 1. 项目定位
 
 ### 1.1 技术栈
@@ -69,6 +88,18 @@
 | 应用数据库服务名 | `db` |
 
 服务器 IP、端口和仓库名称可以写入运维文档，但密码和令牌不能写入 Git。
+
+当前 GitHub 到 Gitea 的发布链路：
+
+```text
+GitHub freeisme/office-asset-mgmt
+  -> Gitea 镜像 admin1/office-asset-mgmt（每 8 小时）
+  -> 设置页检查并选择版本
+  -> 更新控制服务手动部署
+```
+
+Gitea 镜像同步只更新仓库，不会自动部署服务器。更新服务读取私有仓库时，必须为目标
+仓库授权 `officeasset-deploy` 只读部署密钥。
 
 ## 2. 目录和模块职责
 

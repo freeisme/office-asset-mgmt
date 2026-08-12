@@ -38,9 +38,21 @@
 ├── requirements.txt                  # 说明：仅使用标准库
 ├── DEPLOY_UBUNTU.md                  # Ubuntu 原生部署文档
 ├── DOCKER_DEPLOY.md                  # Docker Compose 部署文档
+├── DEVELOPMENT_GUIDE.md               # 详细开发指南
 ├── GITHUB_RELEASE.md                 # GitHub 推送与版本发布说明
 └── LICENSE                           # 内部使用许可
 ```
+
+## 文档入口
+
+- [详细开发指南](DEVELOPMENT_GUIDE.md)
+- [GitHub Wiki](https://github.com/freeisme/office-asset-mgmt/wiki)
+- [Ubuntu 部署](DEPLOY_UBUNTU.md)
+- [Docker 部署](DOCKER_DEPLOY.md)
+- [安全审查](SECURITY_REVIEW.md)
+
+GitHub Wiki 按主题维护架构、模块、数据库迁移、测试、部署、发布、安全运维和故障排查
+文档。Wiki 与代码仓库分开维护，生产密码、令牌、私钥、备份和业务数据不得写入其中。
 
 ## Docker Compose 启动
 
@@ -108,6 +120,9 @@ http://127.0.0.1:8000/
 
 本目录可以推送到 GitHub，但 GitHub 仅执行源码校验，不会自动登录或更新服务器。
 具体推送、语义化版本标签和 Releases 流程见 [GITHUB_RELEASE.md](GITHUB_RELEASE.md)。
+
+GitHub 更新由内网 Gitea 拉取镜像同步到生产更新源，再由管理员在系统设置中手动选择
+已发布版本更新。镜像同步不会直接部署服务器。
 
 ## 授权
 
