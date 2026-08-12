@@ -164,6 +164,14 @@ function getSeedState() {
       inventorySearch: "",
       inventoryType: "",
       inventoryBrand: "",
+      flowSearch: "",
+      flowType: "",
+      flowAction: "",
+      flowCategory: "",
+      flowEmployee: "",
+      flowSourceTarget: "",
+      flowStartDate: "",
+      flowEndDate: "",
       auditSearch: "",
       auditAction: "",
       auditCategory: "",
@@ -1370,6 +1378,75 @@ function flowRecordImpactClass(log) {
   const impact = flowRecordStockImpact(log);
   if (impact === "不变") return "audit-action-assignment";
   return inventoryDirectionClass(log.direction);
+}
+
+function flowRecordFilterText(value) {
+  return String(value || "").trim().toLowerCase();
+}
+
+function flowRecordDate(log) {
+  return String(log?.occurredAt || "").replace("T", " ").slice(0, 10);
+}
+
+function flowRecordTypeOptions() {
+  return [...new Set(state.inventoryMovementLogs.map((log) => String(log.typeName || "").trim()).filter(Boolean))]
+    .sort((left, right) => left.localeCompare(right, "zh-CN"));
+}
+
+function flowRecordActionOptions() {
+  return [...new Set(state.inventoryMovementLogs.map((log) => flowRecordActionLabel(log)))]
+    .sort((left, right) => left.localeCompare(right, "zh-CN"));
+}
+
+function flowRecordCategoryOptions() {
+  return [...new Set(state.inventoryMovementLogs.map((log) => flowRecordCategory(log)))]
+    .sort((left, right) => left.localeCompare(right, "zh-CN"));
+}
+
+function hasFlowRecordFilters() {
+  return [
+    "flowSearch",
+    "flowType",
+    "flowAction",
+    "flowCategory",
+    "flowEmployee",
+    "flowSourceTarget",
+    "flowStartDate",
+    "flowEndDate",
+  ].some((key) => Boolean(String(state.filters[key] || "").trim()));
+}
+
+function getFilteredFlowRecords() {
+  const search = flowRecordFilterText(state.filters.flowSearch);
+  const type = String(state.filters.flowType || "");
+  const action = String(state.filters.flowAction || "");
+  const category = String(state.filters.flowCategory || "");
+  const employee = flowRecordFilterText(state.filters.flowEmployee);
+  const sourceTarget = flowRecordFilterText(state.filters.flowSourceTarget);
+  const startDate = String(state.filters.flowStartDate || "");
+  const endDate = String(state.filters.flowEndDate || "");
+
+  return [...state.inventoryMovementLogs]
+    .filter((log) => {
+      const logAction = flowRecordActionLabel(log);
+      const logCategory = flowRecordCategory(log);
+      const itemText = flowRecordFilterText([log.typeName, log.brandName, log.modelName, log.note].join(" "));
+      const relatedEmployeeText = flowRecordFilterText([log.relatedEmployeeName, log.relatedEmployeeNo].join(" "));
+      const sourceTargetText = flowRecordFilterText([log.sourceLabel, log.targetLabel].join(" "));
+      const recordDate = flowRecordDate(log);
+
+      return (
+        (!search || itemText.includes(search)) &&
+        (!type || String(log.typeName || "") === type) &&
+        (!action || logAction === action) &&
+        (!category || logCategory === category) &&
+        (!employee || relatedEmployeeText.includes(employee)) &&
+        (!sourceTarget || sourceTargetText.includes(sourceTarget)) &&
+        (!startDate || (recordDate && recordDate >= startDate)) &&
+        (!endDate || (recordDate && recordDate <= endDate))
+      );
+    })
+    .sort((left, right) => String(right.occurredAt || "").localeCompare(String(left.occurredAt || "")));
 }
 
 function upsertInventoryMovementLog(entry) {
@@ -4097,13 +4174,78 @@ function renderFlowControlRecordTable(logs) {
 }
 
 function renderFlowControlPage() {
-  const records = [...state.inventoryMovementLogs].sort((left, right) =>
-    String(right.occurredAt || "").localeCompare(String(left.occurredAt || "")),
-  );
+  const records = getFilteredFlowRecords();
+  const typeOptions = flowRecordTypeOptions();
+  const actionOptions = flowRecordActionOptions();
+  const categoryOptions = flowRecordCategoryOptions();
   return `
+    <div class="page-intro">
+      <div><h2>物资流转记录</h2><p>按物品、关联人员、流转类型、来源去向和时间区间查看自动登记的物资流转信息。</p></div>
+      <div class="toolbar-actions">
+        <button class="secondary-button" data-action="export-flow-records" ${records.length ? "" : "disabled"}>导出当前结果</button>
+      </div>
+    </div>
+    <div class="toolbar flow-record-toolbar">
+      <div class="toolbar-actions">
+        <label class="search-box"><span>⌕</span><input data-filter="flowSearch" value="${escapeHtml(
+          state.filters.flowSearch || "",
+        )}" placeholder="物品、品牌、型号或备注" /></label>
+        <label class="select-box"><select data-filter="flowType">
+          <option value="">全部物资类型</option>
+          ${typeOptions
+            .map(
+              (option) =>
+                `<option value="${escapeHtml(option)}" ${
+                  state.filters.flowType === option ? "selected" : ""
+                }>${escapeHtml(option)}</option>`,
+            )
+            .join("")}
+        </select></label>
+        <label class="select-box"><select data-filter="flowAction">
+          <option value="">全部业务类型</option>
+          ${actionOptions
+            .map(
+              (option) =>
+                `<option value="${escapeHtml(option)}" ${
+                  state.filters.flowAction === option ? "selected" : ""
+                }>${escapeHtml(option)}</option>`,
+            )
+            .join("")}
+        </select></label>
+        <label class="select-box"><select data-filter="flowCategory">
+          <option value="">全部业务分类</option>
+          ${categoryOptions
+            .map(
+              (option) =>
+                `<option value="${escapeHtml(option)}" ${
+                  state.filters.flowCategory === option ? "selected" : ""
+                }>${escapeHtml(option)}</option>`,
+            )
+            .join("")}
+        </select></label>
+        <label class="search-box flow-record-person-box"><span>人</span><input data-filter="flowEmployee" value="${escapeHtml(
+          state.filters.flowEmployee || "",
+        )}" placeholder="人员姓名或编号" /></label>
+        <label class="search-box flow-record-source-box"><span>向</span><input data-filter="flowSourceTarget" value="${escapeHtml(
+          state.filters.flowSourceTarget || "",
+        )}" placeholder="来源或去向" /></label>
+        <label class="select-box audit-date-box"><span>开始</span><input type="date" data-filter="flowStartDate" value="${escapeHtml(
+          state.filters.flowStartDate || "",
+        )}" /></label>
+        <label class="select-box audit-date-box"><span>结束</span><input type="date" data-filter="flowEndDate" value="${escapeHtml(
+          state.filters.flowEndDate || "",
+        )}" /></label>
+        ${
+          hasFlowRecordFilters()
+            ? '<button class="secondary-button" data-action="clear-flow-record-filters">清除筛选</button>'
+            : ""
+        }
+      </div>
+      <span class="secondary-text">显示 ${records.length} / ${state.inventoryMovementLogs.length} 条</span>
+    </div>
     <section class="section-block">
       <div class="section-heading">
-        <div><h2>物资流转记录表</h2><span>物资动作自动识别业务类型和业务分类，共 ${records.length} 条</span></div>
+        <div><h2>物资流转记录表</h2><span>物资动作自动识别业务类型和业务分类，备注可直接补充和保存。</span></div>
       </div>
       <div class="data-panel">${renderFlowControlRecordTable(records)}</div>
     </section>
@@ -6485,6 +6627,54 @@ function exportInventoryMovementLogs() {
   showToast(`已导出 ${logs.length} 条物资变动日志`);
 }
 
+function flowRecordExportRows(logs) {
+  return logs.map((log) => [
+    formatDateTime(log.occurredAt),
+    flowRecordActionLabel(log),
+    flowRecordCategory(log),
+    log.typeName || "",
+    log.brandName || "",
+    log.modelName || "",
+    log.quantity,
+    flowRecordStockImpact(log),
+    log.sourceLabel || "",
+    log.targetLabel || "",
+    log.relatedEmployeeNo || "",
+    log.relatedEmployeeName || "",
+    log.triggerAction || "",
+    log.note || "",
+  ]);
+}
+
+function exportFlowRecords() {
+  const logs = getFilteredFlowRecords();
+  if (!logs.length) return showToast("当前筛选条件下没有可导出的物资流转记录", true);
+
+  downloadExcel(`办公资产-物资流转记录-${exportDateStamp()}.xls`, [
+    {
+      name: "物资流转记录",
+      headers: [
+        "流转时间",
+        "业务类型",
+        "业务分类",
+        "物资类型",
+        "品牌",
+        "型号",
+        "数量",
+        "库存影响",
+        "调出方",
+        "接收方",
+        "人员编号",
+        "关联人员",
+        "触发动作",
+        "备注",
+      ],
+      rows: flowRecordExportRows(logs),
+    },
+  ]);
+  showToast(`已导出 ${logs.length} 条物资流转记录`);
+}
+
 function inventoryPurchaseLogExportRows(logs) {
   return [...logs]
     .sort((a, b) =>
@@ -6798,6 +6988,20 @@ document.addEventListener("click", (event) => {
     return;
   }
 
+  if (action === "clear-flow-record-filters") {
+    state.filters.flowSearch = "";
+    state.filters.flowType = "";
+    state.filters.flowAction = "";
+    state.filters.flowCategory = "";
+    state.filters.flowEmployee = "";
+    state.filters.flowSourceTarget = "";
+    state.filters.flowStartDate = "";
+    state.filters.flowEndDate = "";
+    persistState(false);
+    render();
+    return;
+  }
+
   if (action === "export-employees") {
     exportSelectedEmployees();
     return;
@@ -6820,6 +7024,11 @@ document.addEventListener("click", (event) => {
 
   if (action === "export-inventory-log") {
     exportInventoryMovementLogs();
+    return;
+  }
+
+  if (action === "export-flow-records") {
+    exportFlowRecords();
     return;
   }
 
@@ -7447,6 +7656,9 @@ document.addEventListener("input", (event) => {
       "auditSearch",
       "auditEmployee",
       "inventorySearch",
+      "flowSearch",
+      "flowEmployee",
+      "flowSourceTarget",
       "employees",
       "employeeAssetSearch",
     ].includes(filter.dataset.filter)
@@ -7460,6 +7672,10 @@ document.addEventListener("input", (event) => {
   persistState(false);
   if (filter.dataset.filter === "inventorySearch") {
     if (filter.value) expandVisibleInventoryNodes();
+    renderPreservingFilterInput(filter.dataset.filter);
+    return;
+  }
+  if (["flowSearch", "flowEmployee", "flowSourceTarget"].includes(filter.dataset.filter)) {
     renderPreservingFilterInput(filter.dataset.filter);
   }
 });

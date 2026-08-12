@@ -261,7 +261,7 @@ class DeploymentScriptTests(TestCase):
 
 
 class FlowRecordUiTests(TestCase):
-    def test_flow_page_is_record_table_only_with_classification_and_inline_notes(self):
+    def test_flow_page_has_filters_export_classification_and_inline_notes(self):
         app = (ROOT / "web" / "app.js").read_text(encoding="utf-8")
         index = (ROOT / "web" / "index.html").read_text(encoding="utf-8")
 
@@ -269,13 +269,20 @@ class FlowRecordUiTests(TestCase):
         self.assertIn("<span>物资流转记录</span>", index)
         self.assertIn("function renderFlowControlRecordTable(logs)", app)
         self.assertIn("function renderFlowRecordNoteEditor(log)", app)
+        self.assertIn("function getFilteredFlowRecords()", app)
+        self.assertIn("function exportFlowRecords()", app)
+        self.assertIn('data-action="export-flow-records"', app)
+        self.assertIn('data-action="clear-flow-record-filters"', app)
+        self.assertIn('data-filter="flowSearch"', app)
+        self.assertIn('data-filter="flowEmployee"', app)
+        self.assertIn('data-filter="flowStartDate"', app)
+        self.assertIn('data-filter="flowEndDate"', app)
         self.assertIn('data-form="inventory-log-note"', app)
         self.assertIn('  return: { label: "归还回收"', app)
         self.assertIn('category: "库存入库"', app)
         self.assertIn('category: "领用发放"', app)
         self.assertIn('category: "归还回收"', app)
         self.assertNotIn('data-form="flow-control"', app)
-        self.assertNotIn("clear-flow-control-filters", app)
         self.assertNotIn("登记物资调动", app)
 
 
