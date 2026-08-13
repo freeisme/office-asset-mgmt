@@ -12,6 +12,7 @@ import os
 import re
 import ssl
 import subprocess
+import sys
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -32,7 +33,8 @@ WEBHOOK_BIND = os.environ.get("WEBHOOK_BIND", "0.0.0.0")
 WEBHOOK_PORT = int(os.environ.get("WEBHOOK_PORT", "9000"))
 MAX_BODY_BYTES = int(os.environ.get("WEBHOOK_MAX_BODY_BYTES", "1048576"))
 VERSION_LIST_LIMIT = max(5, min(50, int(os.environ.get("DEPLOY_VERSION_LIST_LIMIT", "30"))))
-ALLOW_PRERELEASE = os.environ.get("DEPLOY_ALLOW_PRERELEASE", "").lower() in {"1", "true", "yes"}
+RELEASE_CHANNELS = {"release", "beta"}
+DEFAULT_RELEASE_CHANNEL = "beta"
 RELEASE_NOTES_MAX_CHARS = max(
     1000,
     min(20000, int(os.environ.get("DEPLOY_RELEASE_NOTES_MAX_CHARS", "10000"))),
@@ -49,6 +51,11 @@ DEPLOY_SCRIPT = Path(
         str(APP_DIR / "deploy" / "scripts" / "update_from_gitea.sh"),
     )
 ).resolve()
+REEXEC_AFTER_DEPLOY = os.environ.get("DEPLOY_REEXEC_AFTER_DEPLOY", "true").lower() in {
+    "1",
+    "true",
+    "yes",
+}
 TLS_CERT_FILE = os.environ.get("DEPLOY_TLS_CERT_FILE", "").strip()
 TLS_KEY_FILE = os.environ.get("DEPLOY_TLS_KEY_FILE", "").strip()
 ALLOW_INSECURE_HTTP = os.environ.get("DEPLOY_ALLOW_INSECURE_HTTP", "").lower() in {
@@ -141,6 +148,13 @@ def _normalize_repository_url(value: object | None) -> str:
     return repository_url
 
 
+def _normalize_release_channel(value: object | None) -> str:
+    channel = "" if value is None else str(value).strip().lower()
+    if channel not in RELEASE_CHANNELS:
+        raise ValueError("release channel must be release or beta")
+    return channel
+
+
 def _verify_signature(body: bytes, supplied_signature: str) -> bool:
     if not WEBHOOK_SECRET or not supplied_signature:
         return False
@@ -198,6 +212,15 @@ def _deployment_worker() -> None:
             LOG.exception("Deployment failed for commit %s", commit_sha)
         else:
             LOG.info("Deployment completed for commit %s", commit_sha)
+            if REEXEC_AFTER_DEPLOY:
+                try:
+                    LOG.info("Reloading deployment control service from the updated checkout")
+                    os.execv(
+                        sys.executable,
+                        [sys.executable, str(Path(__file__).resolve())],
+                    )
+                except Exception:
+                    LOG.exception("Unable to reload deployment control service")
 
 
 def _git_output(*args: str) -> str:
@@ -290,6 +313,7 @@ def _parse_semver_tag(tag_name: str) -> dict | None:
     return {
         "version": tag_name,
         "isPrerelease": bool(prerelease),
+        "isBeta": bool(prerelease) and prerelease[0].lower() == "beta",
         "_sortKey": (
             int(match.group("major")),
             int(match.group("minor")),
@@ -342,7 +366,12 @@ def _public_version(version: dict | None) -> dict | None:
     return {key: value for key, value in version.items() if not key.startswith("_")}
 
 
-def _available_versions(current_sha: str, branch_ref: str) -> tuple[list[dict], dict | None, dict | None]:
+def _available_versions(
+    current_sha: str,
+    branch_ref: str,
+    release_channel: str = DEFAULT_RELEASE_CHANNEL,
+) -> tuple[list[dict], dict | None, dict | None]:
+    release_channel = _normalize_release_channel(release_channel)
     output = _git_output(
         "tag",
         "--merged",
@@ -350,12 +379,10 @@ def _available_versions(current_sha: str, branch_ref: str) -> tuple[list[dict], 
         "--list",
         "v*",
     )
-    versions = []
+    all_versions = []
     for tag_name in output.splitlines():
         parsed = _parse_semver_tag(tag_name.strip())
         if not parsed:
-            continue
-        if parsed["isPrerelease"] and not ALLOW_PRERELEASE:
             continue
         if not _tag_is_annotated(tag_name):
             continue
@@ -366,7 +393,7 @@ def _available_versions(current_sha: str, branch_ref: str) -> tuple[list[dict], 
         if not commit_sha:
             continue
         authored_at, subject = _commit_details(commit_sha)
-        versions.append(
+        all_versions.append(
             {
                 **parsed,
                 "tag": tag_name,
@@ -375,15 +402,24 @@ def _available_versions(current_sha: str, branch_ref: str) -> tuple[list[dict], 
                 "subject": subject,
                 "authoredAt": authored_at,
                 "releaseNotes": release_notes,
+                "releaseChannel": release_channel,
             }
         )
 
-    versions.sort(key=lambda item: (item["_sortKey"], item["version"]), reverse=True)
+    all_versions.sort(key=lambda item: (item["_sortKey"], item["version"]), reverse=True)
+    versions = [
+        item
+        for item in all_versions
+        if (
+            (release_channel == "release" and not item["isPrerelease"])
+            or (release_channel == "beta" and item["isBeta"])
+        )
+    ]
     latest_version = versions[0] if versions else None
-    current_candidates = [item for item in versions if item["sha"] == current_sha]
+    current_candidates = [item for item in all_versions if item["sha"] == current_sha]
     if not current_candidates:
         current_candidates = [
-            item for item in versions if _is_ancestor(item["sha"], current_sha)
+            item for item in all_versions if _is_ancestor(item["sha"], current_sha)
         ]
     current_version = (
         max(current_candidates, key=lambda item: (item["_sortKey"], item["version"]))
@@ -402,7 +438,7 @@ def _available_versions(current_sha: str, branch_ref: str) -> tuple[list[dict], 
         )
 
     display_versions = versions[:VERSION_LIST_LIMIT]
-    if current_version and current_version not in display_versions:
+    if current_version and current_version in versions and current_version not in display_versions:
         display_versions.append(current_version)
         display_versions.sort(key=lambda item: (item["_sortKey"], item["version"]), reverse=True)
     public_versions = [_public_version(version) for version in display_versions]
@@ -455,13 +491,21 @@ def _snapshot_status(snapshot: dict) -> str:
     return "no_release_available"
 
 
-def _update_snapshot(repository_url: str = "") -> dict:
+def _update_snapshot(
+    repository_url: str = "",
+    release_channel: str = DEFAULT_RELEASE_CHANNEL,
+) -> dict:
     repository_url = _normalize_repository_url(repository_url)
+    release_channel = _normalize_release_channel(release_channel)
     with git_lock:
         branch_ref = _fetch_update_source(repository_url)
         current_sha = _current_sha()
         latest_sha_remote = _latest_sha(branch_ref)
-        versions, current_version, latest_version = _available_versions(current_sha, branch_ref)
+        versions, current_version, latest_version = _available_versions(
+            current_sha,
+            branch_ref,
+            release_channel,
+        )
     with state_lock:
         running = deployment_running
         pending = deployment_pending
@@ -469,6 +513,7 @@ def _update_snapshot(repository_url: str = "") -> dict:
         "ok": True,
         "repository": DEPLOY_REPO,
         "repositoryUrl": repository_url,
+        "releaseChannel": release_channel,
         "effectiveRepositoryUrl": repository_url or _origin_url(),
         "branch": DEPLOY_BRANCH,
         "currentSha": current_sha,
@@ -488,9 +533,14 @@ def _update_snapshot(repository_url: str = "") -> dict:
     }
 
 
-def _check_and_queue_update(target_sha: str = "", repository_url: str = "") -> dict:
+def _check_and_queue_update(
+    target_sha: str = "",
+    repository_url: str = "",
+    release_channel: str = DEFAULT_RELEASE_CHANNEL,
+) -> dict:
     repository_url = _normalize_repository_url(repository_url)
-    snapshot = _update_snapshot(repository_url)
+    release_channel = _normalize_release_channel(release_channel)
+    snapshot = _update_snapshot(repository_url, release_channel)
     target_sha = target_sha.strip().lower()
     if target_sha:
         target_version = next(
@@ -551,9 +601,13 @@ class WebhookHandler(BaseHTTPRequestHandler):
             try:
                 query = parse_qs(parsed_url.query, keep_blank_values=True)
                 repository_url = query.get("repositoryUrl", [""])[0]
-                snapshot = _update_snapshot(repository_url)
+                release_channel = query.get("releaseChannel", [DEFAULT_RELEASE_CHANNEL])[0]
+                snapshot = _update_snapshot(repository_url, release_channel)
             except InvalidRepositoryUrlError:
                 self._reply_json(400, {"ok": False, "error": "invalid_repository_url"})
+                return
+            except ValueError:
+                self._reply_json(400, {"ok": False, "error": "invalid_release_channel"})
                 return
             except Exception as exc:
                 LOG.exception("Unable to inspect update status")
@@ -590,14 +644,24 @@ class WebhookHandler(BaseHTTPRequestHandler):
             target_sha = str(payload.get("targetSha", "")).strip().lower()
             try:
                 repository_url = _normalize_repository_url(payload.get("repositoryUrl", ""))
+                release_channel = _normalize_release_channel(
+                    payload.get("releaseChannel", DEFAULT_RELEASE_CHANNEL)
+                )
             except InvalidRepositoryUrlError:
                 self._reply_json(400, {"ok": False, "error": "invalid_repository_url"})
+                return
+            except ValueError:
+                self._reply_json(400, {"ok": False, "error": "invalid_release_channel"})
                 return
             if not target_sha:
                 self._reply_json(400, {"ok": False, "error": "target_version_required"})
                 return
             try:
-                snapshot = _check_and_queue_update(target_sha, repository_url)
+                snapshot = _check_and_queue_update(
+                    target_sha,
+                    repository_url,
+                    release_channel,
+                )
             except InvalidTargetVersionError:
                 self._reply_json(400, {"ok": False, "error": "invalid_target_version"})
                 return

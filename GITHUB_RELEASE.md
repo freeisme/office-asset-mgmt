@@ -33,7 +33,8 @@ git push github main
 ## 发布版本
 
 每个可部署版本必须先在 `VERSION_NOTES.md` 增加对应的 SemVer 条目。通过校验后创建
-注释标签：
+注释标签。正式发行版使用 `vMAJOR.MINOR.PATCH`；未特别说明的 Beta 版本使用
+`vMAJOR.MINOR.PATCH-beta.N`：
 
 ```powershell
 git tag -a v1.1.0 -m "Release v1.1.0"
@@ -42,3 +43,6 @@ git push github v1.1.0
 
 随后可在 GitHub 的 Releases 页面选择该标签，补充版本说明和附件。GitHub Release 不会
 触发生产更新；生产环境仍由 Gitea 的管理员手动选择正式发布版本后更新。
+
+GitHub Releases 页面创建的轻量标签不满足更新服务的部署规则。必须先使用
+`git tag -a` 创建并推送注释标签，再在 Releases 页面选择该标签发布。

@@ -13,6 +13,11 @@ const API_BACKUPS_URL = "/api/backups";
 const API_UPDATE_CHECK_URL = "/api/updates/check";
 const API_UPDATE_APPLY_URL = "/api/updates/apply";
 const THEME_STORAGE_KEY = "office-asset-center-theme-v1";
+const UPDATE_RELEASE_CHANNELS = {
+  release: "发行版",
+  beta: "Beta 版",
+};
+const DEFAULT_UPDATE_RELEASE_CHANNEL = "beta";
 
 function applyTheme(theme) {
   const isDark = theme === "dark";
@@ -120,6 +125,7 @@ let pendingLeaveRecovery = null;
 let pendingDeviceRecovery = null;
 let filterSearchDrafts = {};
 let authState = { authenticated: false, user: null, bootstrapRequired: false };
+let lastRenderedPage = "";
 let settingsState = {
   settings: {},
   users: [],
@@ -130,6 +136,7 @@ let settingsState = {
   updateApplying: false,
   updateSelectedSha: "",
   updateRepositoryUrl: "",
+  updateReleaseChannel: DEFAULT_UPDATE_RELEASE_CHANNEL,
 };
 let authBootPromise = null;
 
@@ -680,6 +687,7 @@ function requestJson(url, options = {}) {
           updateApplying: false,
           updateSelectedSha: "",
           updateRepositoryUrl: "",
+          updateReleaseChannel: DEFAULT_UPDATE_RELEASE_CHANNEL,
         };
         authBootPromise = null;
         startAuth();
@@ -933,6 +941,7 @@ async function logout() {
     updateApplying: false,
     updateSelectedSha: "",
     updateRepositoryUrl: "",
+    updateReleaseChannel: DEFAULT_UPDATE_RELEASE_CHANNEL,
   };
   document.querySelector("#modalRoot").innerHTML = "";
   authBootPromise = null;
@@ -2507,7 +2516,12 @@ function render() {
     item.classList.toggle("is-active", item.dataset.page === state.page);
   });
   updateAuthenticatedChrome();
-  document.querySelector("#appContent").innerHTML = renderPage();
+  const appContent = document.querySelector("#appContent");
+  appContent.innerHTML = renderPage();
+  const pageChanged = state.page !== lastRenderedPage;
+  appContent.classList.toggle("page-enter", pageChanged);
+  if (pageChanged) void appContent.offsetWidth;
+  lastRenderedPage = state.page;
 }
 
 function isDeferredTextFilter(filterName) {
@@ -2661,6 +2675,10 @@ function updateStatusDetail(status) {
   return "点击按钮读取项目地址中已发布的语义化版本标签。";
 }
 
+function updateReleaseChannelLabel(channel) {
+  return UPDATE_RELEASE_CHANNELS[channel] || UPDATE_RELEASE_CHANNELS[DEFAULT_UPDATE_RELEASE_CHANNEL];
+}
+
 function currentUpdateRepositoryUrl() {
   return (
     document.querySelector("[data-update-repository-url]")?.value ||
@@ -2679,6 +2697,7 @@ function renderUpdatePanel(admin) {
   const checking = settingsState.updateChecking;
   const applying = settingsState.updateApplying;
   const repositoryUrl = settingsState.updateRepositoryUrl || status.repositoryUrl || "";
+  const releaseChannel = settingsState.updateReleaseChannel || status.releaseChannel || DEFAULT_UPDATE_RELEASE_CHANNEL;
   const deploymentBusy = ["queued", "running"].includes(status.status);
   const busy = checking || applying || deploymentBusy;
   const currentSha = status.currentShortSha || (status.currentSha ? String(status.currentSha).slice(0, 7) : "-");
@@ -2732,7 +2751,7 @@ function renderUpdatePanel(admin) {
     <div class="section-heading settings-panel-heading">
       <div><h2>版本更新</h2><span>从 GitHub 或 Gitea 读取已发布的语义化版本标签，只能选择版本号更高的版本更新应用。</span></div>
     </div>
-    <div class="update-target-field">
+    <div class="update-target-field update-source-field">
       <label for="updateRepositoryUrl">项目地址</label>
       <input id="updateRepositoryUrl" data-update-repository-url type="text" value="${escapeHtml(
         repositoryUrl,
@@ -2742,7 +2761,28 @@ function renderUpdatePanel(admin) {
       <div class="update-version-item"><span>当前版本</span><strong>${escapeHtml(currentVersion)}</strong></div>
       <div class="update-version-item"><span>来源最新发布版本</span><strong>${escapeHtml(latestVersion)}</strong></div>
     </div>
-    <div class="update-target-field">
+    <div class="update-channel-row">
+      <div class="update-target-field">
+        <label for="updateReleaseChannel">更新通道</label>
+        <select id="updateReleaseChannel" data-update-release-channel ${busy ? "disabled" : ""}>
+          ${Object.entries(UPDATE_RELEASE_CHANNELS)
+            .map(
+              ([value, label]) =>
+                `<option value="${value}" ${releaseChannel === value ? "selected" : ""}>${label}</option>`,
+            )
+            .join("")}
+        </select>
+      </div>
+      <div class="update-channel-description">
+        <strong>${escapeHtml(updateReleaseChannelLabel(releaseChannel))}</strong>
+        <span>${
+          releaseChannel === "release"
+            ? "仅检查稳定的 vMAJOR.MINOR.PATCH 正式发行版。"
+            : "检查 vMAJOR.MINOR.PATCH-beta.N 等预发布版本；未特别说明时默认使用此通道。"
+        }</span>
+      </div>
+    </div>
+    <div class="update-target-field update-version-select-field">
       <label for="updateTargetVersion">目标版本</label>
       <select id="updateTargetVersion" data-update-target ${busy ? "disabled" : ""}>
         ${versionOptions}
@@ -5585,18 +5625,24 @@ async function handleBackupScheduleSubmit(form) {
 async function handleUpdateCheck(button) {
   if (!isAdminUser()) return showToast("只有管理员可以检查版本更新", true);
   const repositoryUrl = currentUpdateRepositoryUrl();
+  const releaseChannel =
+    document.querySelector("[data-update-release-channel]")?.value ||
+    settingsState.updateReleaseChannel ||
+    DEFAULT_UPDATE_RELEASE_CHANNEL;
   settingsState.updateRepositoryUrl = repositoryUrl;
+  settingsState.updateReleaseChannel = releaseChannel;
   settingsState.updateChecking = true;
   if (button) button.disabled = true;
   render();
   try {
     const payload = await requestJson(API_UPDATE_CHECK_URL, {
       method: "POST",
-      body: JSON.stringify({ repositoryUrl }),
+      body: JSON.stringify({ repositoryUrl, releaseChannel }),
     });
     settingsState.updateStatus = payload;
     const hasRepositoryUrl = Object.prototype.hasOwnProperty.call(payload, "repositoryUrl");
     settingsState.updateRepositoryUrl = hasRepositoryUrl ? payload.repositoryUrl || "" : repositoryUrl;
+    settingsState.updateReleaseChannel = payload.releaseChannel || releaseChannel;
     settingsState.settings.update_repository_url = settingsState.updateRepositoryUrl;
     const versions = Array.isArray(payload.availableVersions) ? payload.availableVersions : [];
     settingsState.updateSelectedSha =
@@ -5605,9 +5651,15 @@ async function handleUpdateCheck(button) {
         : "";
     const status = payload.status || "";
     if (status === "up_to_date") {
-      showToast(`当前已是最新发布版本 ${payload.currentVersion || payload.currentShortSha || ""}`);
+      showToast(
+        `当前已是${updateReleaseChannelLabel(releaseChannel)}最新版本 ${
+          payload.currentVersion || payload.currentShortSha || ""
+        }`,
+      );
     } else if (status === "update_available") {
-      showToast(`发现可用发布版本 ${payload.latestVersion || ""}，请选择后手动更新`);
+      showToast(
+        `发现可用${updateReleaseChannelLabel(releaseChannel)} ${payload.latestVersion || ""}，请选择后手动更新`,
+      );
     } else if (status === "no_releases") {
       showToast("检查完成：项目地址中暂无已发布版本", true);
     } else if (status === "no_release_available") {
@@ -5626,8 +5678,14 @@ async function handleUpdateCheck(button) {
 async function handleApplySelectedUpdate() {
   if (!isAdminUser()) return showToast("只有管理员可以执行版本更新", true);
   const repositoryUrl = currentUpdateRepositoryUrl();
+  const releaseChannel =
+    document.querySelector("[data-update-release-channel]")?.value ||
+    settingsState.updateReleaseChannel ||
+    DEFAULT_UPDATE_RELEASE_CHANNEL;
   const checkedRepositoryUrl = settingsState.updateStatus?.repositoryUrl || "";
-  if (repositoryUrl !== checkedRepositoryUrl) {
+  const checkedReleaseChannel =
+    settingsState.updateStatus?.releaseChannel || DEFAULT_UPDATE_RELEASE_CHANNEL;
+  if (repositoryUrl !== checkedRepositoryUrl || releaseChannel !== checkedReleaseChannel) {
     return showToast("项目地址已变化，请先重新检查版本", true);
   }
   const targetSha =
@@ -5646,11 +5704,12 @@ async function handleApplySelectedUpdate() {
   try {
     const payload = await requestJson(API_UPDATE_APPLY_URL, {
       method: "POST",
-      body: JSON.stringify({ targetSha, repositoryUrl }),
+      body: JSON.stringify({ targetSha, repositoryUrl, releaseChannel }),
     });
     settingsState.updateStatus = payload;
     const hasRepositoryUrl = Object.prototype.hasOwnProperty.call(payload, "repositoryUrl");
     settingsState.updateRepositoryUrl = hasRepositoryUrl ? payload.repositoryUrl || "" : repositoryUrl;
+    settingsState.updateReleaseChannel = payload.releaseChannel || releaseChannel;
     settingsState.updateSelectedSha = payload.targetSha || targetSha;
     if (payload.status === "queued" || payload.status === "running") {
       showToast(`版本 ${payload.targetVersion || targetLabel} 已进入手动更新队列`);
@@ -7541,15 +7600,24 @@ document.addEventListener("submit", (event) => {
 });
 
 document.addEventListener("change", (event) => {
-  const updateRepositoryUrl = event.target.closest("[data-update-repository-url]");
-  if (updateRepositoryUrl) {
-    const nextUrl = updateRepositoryUrl.value.trim();
-    if (nextUrl !== settingsState.updateRepositoryUrl) {
-      settingsState.updateRepositoryUrl = nextUrl;
+  const updateReleaseChannel = event.target.closest("[data-update-release-channel]");
+  if (updateReleaseChannel) {
+    const nextChannel = updateReleaseChannel.value || DEFAULT_UPDATE_RELEASE_CHANNEL;
+    if (nextChannel !== settingsState.updateReleaseChannel) {
+      settingsState.updateReleaseChannel = nextChannel;
       settingsState.updateStatus = null;
       settingsState.updateSelectedSha = "";
       render();
     }
+    return;
+  }
+
+  const updateRepositoryUrl = event.target.closest("[data-update-repository-url]");
+  if (updateRepositoryUrl) {
+    const nextUrl = updateRepositoryUrl.value.trim();
+    settingsState.updateRepositoryUrl = nextUrl;
+    settingsState.updateStatus = null;
+    settingsState.updateSelectedSha = "";
     return;
   }
 

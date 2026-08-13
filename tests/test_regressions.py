@@ -153,6 +153,7 @@ class ReleaseSelectionTests(TestCase):
             versions, current, latest = deploy_webhook._available_versions(
                 current_sha,
                 "origin/main",
+                "release",
             )
 
         self.assertEqual(["v2.0.0", "v1.0.0"], [item["version"] for item in versions])
@@ -161,6 +162,63 @@ class ReleaseSelectionTests(TestCase):
         self.assertTrue(versions[0]["isSelectable"])
         self.assertFalse(versions[1]["isSelectable"])
         self.assertEqual("正式版本说明", versions[0]["releaseNotes"])
+
+    def test_release_channel_separates_stable_and_beta_versions(self):
+        current_sha = "a" * 40
+        stable_sha = "b" * 40
+        beta_sha = "c" * 40
+        tag_names = "\n".join(
+            ["v1.2.2", "v1.2.3-alpha.1", "v1.2.3-beta.1", "v1.2.3"]
+        )
+        tag_shas = {
+            "v1.2.2": current_sha,
+            "v1.2.3-alpha.1": "d" * 40,
+            "v1.2.3-beta.1": beta_sha,
+            "v1.2.3": stable_sha,
+        }
+
+        with (
+            mock.patch.object(deploy_webhook, "_git_output", return_value=tag_names),
+            mock.patch.object(deploy_webhook, "_tag_is_annotated", return_value=True),
+            mock.patch.object(deploy_webhook, "_release_notes_for_tag", return_value="版本说明"),
+            mock.patch.object(
+                deploy_webhook,
+                "_tag_commit_sha",
+                side_effect=lambda tag: tag_shas[tag],
+            ),
+            mock.patch.object(
+                deploy_webhook,
+                "_commit_details",
+                return_value=("2026-08-13T00:00:00+08:00", "release"),
+            ),
+            mock.patch.object(
+                deploy_webhook,
+                "_is_ancestor",
+                side_effect=lambda ancestor, descendant: ancestor == current_sha,
+            ),
+        ):
+            release_versions, _, release_latest = deploy_webhook._available_versions(
+                current_sha,
+                "origin/main",
+                "release",
+            )
+            beta_versions, _, beta_latest = deploy_webhook._available_versions(
+                current_sha,
+                "origin/main",
+                "beta",
+            )
+
+        self.assertEqual(["v1.2.3", "v1.2.2"], [item["version"] for item in release_versions])
+        self.assertEqual("v1.2.3", release_latest["version"])
+        self.assertEqual(["v1.2.3-beta.1"], [item["version"] for item in beta_versions])
+        self.assertEqual("v1.2.3-beta.1", beta_latest["version"])
+        self.assertTrue(beta_versions[0]["isSelectable"])
+
+    def test_invalid_release_channel_is_rejected(self):
+        with self.assertRaises(server.ApiError):
+            server.normalize_update_release_channel("nightly")
+        with self.assertRaises(ValueError):
+            deploy_webhook._normalize_release_channel("nightly")
 
     def test_repository_url_validation_accepts_github_and_internal_gitea(self):
         valid_urls = [
@@ -257,7 +315,27 @@ class DeploymentScriptTests(TestCase):
         headings = re.findall(r"^## (v\S+)$", notes, flags=re.MULTILINE)
 
         self.assertTrue(headings)
-        self.assertTrue(all(re.fullmatch(r"v\d+\.\d+\.\d+", item) for item in headings))
+        self.assertTrue(
+            all(
+                re.fullmatch(
+                    r"v\d+\.\d+\.\d+(?:-beta\.(?:0|[1-9]\d*))?",
+                    item,
+                )
+                for item in headings
+            )
+        )
+
+    def test_update_panel_has_release_channel_and_motion_support(self):
+        app = (ROOT / "web" / "app.js").read_text(encoding="utf-8")
+        styles = (ROOT / "web" / "styles.css").read_text(encoding="utf-8")
+
+        self.assertIn("DEFAULT_UPDATE_RELEASE_CHANNEL = \"beta\"", app)
+        self.assertIn('data-update-release-channel', app)
+        self.assertIn("releaseChannel", app)
+        self.assertIn("page-enter", app)
+        self.assertIn(".update-channel-row", styles)
+        self.assertIn("@keyframes page-content-enter", styles)
+        self.assertIn("prefers-reduced-motion", styles)
 
 
 class FlowRecordUiTests(TestCase):

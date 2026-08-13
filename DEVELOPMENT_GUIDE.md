@@ -795,6 +795,7 @@ ssh://git@192.168.253.25:2222/admin1/office-asset-management.git
 9. `docker compose up -d --remove-orphans`。
 10. 轮询 `/api/health`，失败时输出容器状态和日志。
 11. 构建、启动或健康检查失败时恢复之前的提交并重建旧 app 镜像。
+12. 成功后更新控制服务重新加载当前工作目录中的代码，以便新版本筛选规则立即生效。
 
 数据库迁移不在这一步自动执行。发布包含 SQL 迁移时，要先手动迁移，再发布依赖
 新结构的代码。
@@ -804,16 +805,16 @@ ssh://git@192.168.253.25:2222/admin1/office-asset-management.git
 调用链如下：
 
 ```text
-设置页填写项目地址并点击“检查版本”
+设置页选择“发行版”或“Beta 版”，填写项目地址并点击“检查版本”
   -> POST /api/updates/check
-  -> 后端校验 admin + CSRF + repositoryUrl
-  -> app 容器请求 host.docker.internal:9000/control/status?repositoryUrl=...
+  -> 后端校验 admin + CSRF + repositoryUrl + releaseChannel
+  -> app 容器请求 host.docker.internal:9000/control/status?repositoryUrl=...&releaseChannel=...
   -> 宿主机服务 fetch 指定 GitHub/Gitea 地址；留空时 fetch origin/main
   -> 返回已发布 SemVer 列表
 
 管理员选择版本号更高的已发布版本并点击“更新到所选版本”
   -> POST /api/updates/apply
-  -> 后端校验发布版本 SHA、admin + CSRF + repositoryUrl
+  -> 后端校验发布版本 SHA、admin + CSRF + repositoryUrl + releaseChannel
   -> app 容器请求 host.docker.internal:9000/control/update
   -> 宿主机服务重新 fetch 同一项目地址并校验目标标签属于该 main 历史且版本号高于当前版本
   -> 排队执行 update_from_gitea.sh
@@ -835,14 +836,17 @@ ssh://git@192.168.253.25:2222/admin1/office-asset-management.git
 部署服务还提供：
 
 - `GET /healthz`：服务存活检查。
-- `GET /control/status`：带控制令牌的版本状态查询，可带 `repositoryUrl` 查询参数。
+- `GET /control/status`：带控制令牌的版本状态查询，可带 `repositoryUrl` 和
+  `releaseChannel` 查询参数。
 - `POST /control/update`：带控制令牌并提交已发布版本对应的 `targetSha`，可同时提交
-  `repositoryUrl` 后排队更新。
+  `repositoryUrl` 和 `releaseChannel` 后排队更新。
 
 检查响应中的 `availableVersions` 只包含所选项目地址中已合并到 `main` 的
-SemVer 注释标签，并且标签对应提交必须包含匹配的 `VERSION_NOTES.md` 标题。默认排除
-预发布版本。每项包含 `version`、`tag`、`sha`、提交说明、发布时间、`releaseNotes`、
-`isCurrent`、`isLatest` 和 `isSelectable`。前端只允许选择 `isSelectable` 为真的版本。
+SemVer 注释标签，并且标签对应提交必须包含匹配的 `VERSION_NOTES.md` 标题。发行版通道
+仅显示稳定的 `vMAJOR.MINOR.PATCH` 标签；Beta 通道仅显示
+`vMAJOR.MINOR.PATCH-beta.N` 标签，默认使用 Beta 通道。每项包含 `version`、`tag`、
+`sha`、提交说明、发布时间、`releaseNotes`、`isCurrent`、`isLatest` 和
+`isSelectable`。前端只允许选择 `isSelectable` 为真的版本。
 
 `repositoryUrl` 支持 HTTPS、SSH 和内网 HTTP Git 地址，例如 GitHub HTTPS、Gitea HTTPS、
 `ssh://git@host:port/owner/repo.git` 或 `git@host:owner/repo.git`。HTTP 只允许内网、
@@ -862,8 +866,8 @@ SemVer 注释标签，并且标签对应提交必须包含匹配的 `VERSION_NOT
 3. 是否包含数据库迁移。
 4. 更新前备份要求、配置变更和回滚注意事项。
 
-发布版本必须使用未占用的注释标签，格式为 `vMAJOR.MINOR.PATCH`，必要时可以使用
-符合 SemVer 的预发布后缀，例如 `v1.2.3-rc.1`。管理员选择版本前，应先阅读
+发行版本必须使用未占用的注释标签，格式为 `vMAJOR.MINOR.PATCH`；未特别说明的 Beta
+版本使用 `vMAJOR.MINOR.PATCH-beta.N`。管理员选择版本前，应先阅读
 `VERSION_NOTES.md` 中对应条目。数据库迁移不由
 更新脚本自动执行，涉及结构变更时必须先完成评审和备份。
 

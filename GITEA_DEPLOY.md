@@ -233,15 +233,15 @@ The certificate SAN must match the hostname used by the app container, such as
 `host.docker.internal`; the `--resolve` option above keeps TLS hostname validation while
 testing from the host.
 
-Administrators use **Settings > 版本更新** to check published SemVer tags, select a
-higher version, and confirm the update. The project URL field may be left empty to use
-the deployment checkout's `origin`, or filled with a GitHub/Gitea Git URL. The
-deployment service verifies that the selected tag is annotated, belongs to the selected
-repository's `main` history, has a matching `VERSION_NOTES.md` entry, and is newer than
-the current release before building and restarting Docker. Pre-release tags are excluded
-unless `DEPLOY_ALLOW_PRERELEASE=true` is explicitly configured. HTTP repository URLs are
-accepted only for internal, local or private-network hosts and must not contain
-credentials or tokens.
+Administrators use **Settings > 版本更新** to choose either **发行版** or **Beta 版**,
+then check published SemVer tags, select a higher version, and confirm the update.
+发行版仅显示稳定的 `vMAJOR.MINOR.PATCH` 标签；Beta 版仅显示
+`vMAJOR.MINOR.PATCH-beta.N` 等预发布标签，未特别说明时默认 Beta 版。项目地址字段
+可留空以使用部署工作目录的 `origin`，也可以填写 GitHub/Gitea Git URL。更新控制服务在
+成功部署后会重新加载当前工作目录中的新代码，以加载所选版本中的版本筛选逻辑。服务验证
+所选标签为注释标签、属于目标仓库 `main` 历史、包含匹配的 `VERSION_NOTES.md` 条目，并且
+版本号高于当前版本。HTTP 项目地址只接受内网、本机或私有网络主机，且不能包含账号、密码或
+令牌。
 
 Each release must add a corresponding entry to `VERSION_NOTES.md`, including database
 migrations, backup requirements, configuration changes, and rollback notes.

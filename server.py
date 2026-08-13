@@ -649,7 +649,22 @@ def settings_payload() -> dict:
     return value if isinstance(value, dict) else {}
 
 
-def request_update_service(target_sha: str = "", repository_url: str = "") -> dict:
+UPDATE_RELEASE_CHANNELS = {"release", "beta"}
+DEFAULT_UPDATE_RELEASE_CHANNEL = "beta"
+
+
+def normalize_update_release_channel(value: object | None) -> str:
+    channel = "" if value is None else str(value).strip().lower()
+    if channel not in UPDATE_RELEASE_CHANNELS:
+        raise ApiError("更新通道必须是 release 或 beta。")
+    return channel
+
+
+def request_update_service(
+    target_sha: str = "",
+    repository_url: str = "",
+    release_channel: str = DEFAULT_UPDATE_RELEASE_CHANNEL,
+) -> dict:
     if not UPDATE_SERVICE_URL or not UPDATE_CONTROL_TOKEN:
         raise ApiError("服务器更新服务尚未配置，请联系系统管理员。")
 
@@ -660,16 +675,23 @@ def request_update_service(target_sha: str = "", repository_url: str = "") -> di
         raise ApiError("更新服务必须使用 HTTPS；仅可在隔离的本地开发环境显式允许 HTTP。")
 
     repository_url = normalize_update_repository_url(repository_url)
+    release_channel = normalize_update_release_channel(release_channel)
     endpoint = "/control/update" if target_sha else "/control/status"
     method = "POST" if target_sha else "GET"
     data = (
-        json.dumps({"targetSha": target_sha, "repositoryUrl": repository_url}).encode("utf-8")
+        json.dumps(
+            {
+                "targetSha": target_sha,
+                "repositoryUrl": repository_url,
+                "releaseChannel": release_channel,
+            }
+        ).encode("utf-8")
         if target_sha
         else None
     )
     request_url = f"{UPDATE_SERVICE_URL}{endpoint}"
-    if repository_url and not target_sha:
-        request_url = f"{request_url}?{urlencode({'repositoryUrl': repository_url})}"
+    if not target_sha:
+        request_url = f"{request_url}?{urlencode({'repositoryUrl': repository_url, 'releaseChannel': release_channel})}"
     request = Request(
         request_url,
         data=data,
@@ -4856,7 +4878,13 @@ class AppHandler(SimpleHTTPRequestHandler):
             require_csrf(self, context)
             payload = self.read_json(allow_empty=True)
             repository_url = normalize_update_repository_url(payload.get("repositoryUrl", ""))
-            update_payload = request_update_service(repository_url=repository_url)
+            release_channel = normalize_update_release_channel(
+                payload.get("releaseChannel", DEFAULT_UPDATE_RELEASE_CHANNEL)
+            )
+            update_payload = request_update_service(
+                repository_url=repository_url,
+                release_channel=release_channel,
+            )
             if "repositoryUrl" in payload:
                 run_mysql(
                     f"""
@@ -4878,7 +4906,7 @@ class AppHandler(SimpleHTTPRequestHandler):
                 "system_update_checked",
                 "",
                 "system_update",
-                f"检查可用版本：{repository_url or '服务器默认 origin'}",
+                f"检查可用版本（{release_channel}）：{repository_url or '服务器默认 origin'}",
             )
             self.send_json(update_payload)
             return
@@ -4892,7 +4920,14 @@ class AppHandler(SimpleHTTPRequestHandler):
             if not re.fullmatch(r"[0-9a-f]{40}", target_sha):
                 raise ApiError("请选择有效的版本。")
             repository_url = normalize_update_repository_url(payload.get("repositoryUrl", ""))
-            update_payload = request_update_service(target_sha, repository_url)
+            release_channel = normalize_update_release_channel(
+                payload.get("releaseChannel", DEFAULT_UPDATE_RELEASE_CHANNEL)
+            )
+            update_payload = request_update_service(
+                target_sha,
+                repository_url,
+                release_channel,
+            )
             status = text_value(update_payload.get("status"))
             target_version = text_value(update_payload.get("targetVersion")) or target_sha[:7]
             write_auth_audit(
@@ -4900,7 +4935,7 @@ class AppHandler(SimpleHTTPRequestHandler):
                 "system_update_queued" if status == "queued" else "system_update_checked",
                 "",
                 "system_update",
-                f"手动选择发布版本 {target_version}（{target_sha[:7]}），来源：{repository_url or '服务器默认 origin'}",
+                f"手动选择{release_channel}版本 {target_version}（{target_sha[:7]}），来源：{repository_url or '服务器默认 origin'}",
             )
             response_status = HTTPStatus.ACCEPTED if status == "queued" else HTTPStatus.OK
             self.send_json(update_payload, status=response_status)
