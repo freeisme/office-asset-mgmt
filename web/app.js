@@ -102,13 +102,23 @@ const deviceTypeLabels = {
   mini_pc: "迷你主机",
 };
 
+const deferredTextFilterNames = new Set([
+  "employees",
+  "employeeAssetSearch",
+  "inventorySearch",
+  "flowSearch",
+  "flowEmployee",
+  "flowSourceTarget",
+  "auditSearch",
+  "auditEmployee",
+]);
+
 let state = loadInitialState();
 let remoteSyncQueue = Promise.resolve();
-let auditFilterRefreshTimer = 0;
 let pendingDeviceSave = null;
 let pendingLeaveRecovery = null;
 let pendingDeviceRecovery = null;
-let employeeSearchDrafts = {};
+let filterSearchDrafts = {};
 let authState = { authenticated: false, user: null, bootstrapRequired: false };
 let settingsState = {
   settings: {},
@@ -937,7 +947,7 @@ function applyRemoteState(payload) {
   if (!state.expandedOrgIds.length) {
     state.expandedOrgIds = state.orgs.map((org) => org.id);
   }
-  syncEmployeeSearchDraftsFromFilters();
+  syncFilterSearchDraftsFromFilters();
 }
 
 function buildAuditLogsUrl(limit = 5000) {
@@ -968,18 +978,6 @@ async function refreshAuditLogs(options = {}) {
   state.auditLogTotal = Math.max(0, Number(payload.total || state.auditLogs.length));
   if (!options.silent) render();
   return payload;
-}
-
-function queueAuditLogRefresh() {
-  window.clearTimeout(auditFilterRefreshTimer);
-  auditFilterRefreshTimer = window.setTimeout(() => {
-    refreshAuditLogs({ silent: true })
-      .then(() => render())
-      .catch((error) => {
-        console.error("Unable to load audit logs", error);
-        showToast(`日志加载失败：${error.message}`, true);
-      });
-  }, 220);
 }
 
 function persistState(syncRemote = false) {
@@ -2512,40 +2510,49 @@ function render() {
   document.querySelector("#appContent").innerHTML = renderPage();
 }
 
-function renderPreservingFilterInput(filterName) {
-  const active = document.activeElement;
-  const shouldRestore = active?.matches?.(`[data-filter="${CSS.escape(filterName)}"]`);
-  const start = shouldRestore && typeof active.selectionStart === "number" ? active.selectionStart : null;
-  const end = shouldRestore && typeof active.selectionEnd === "number" ? active.selectionEnd : null;
-  render();
-  if (!shouldRestore) return;
-  const next = document.querySelector(`[data-filter="${CSS.escape(filterName)}"]`);
-  if (!next) return;
-  next.focus();
-  if (start !== null && typeof next.setSelectionRange === "function") {
-    next.setSelectionRange(start, end ?? start);
-  }
+function isDeferredTextFilter(filterName) {
+  return deferredTextFilterNames.has(String(filterName || ""));
 }
 
-function employeeSearchDraftValue(filterName) {
-  if (!Object.prototype.hasOwnProperty.call(employeeSearchDrafts, filterName)) {
-    employeeSearchDrafts[filterName] = state.filters[filterName] || "";
+function filterSearchDraftValue(filterName) {
+  if (!Object.prototype.hasOwnProperty.call(filterSearchDrafts, filterName)) {
+    filterSearchDrafts[filterName] = state.filters[filterName] || "";
   }
-  return employeeSearchDrafts[filterName] || "";
+  return filterSearchDrafts[filterName] || "";
 }
 
-function syncEmployeeSearchDraftsFromFilters() {
-  employeeSearchDrafts = {
-    employees: state.filters.employees || "",
-    employeeAssetSearch: state.filters.employeeAssetSearch || "",
-  };
+function syncFilterSearchDraftsFromFilters() {
+  filterSearchDrafts = Object.fromEntries(
+    [...deferredTextFilterNames].map((filterName) => [filterName, state.filters[filterName] || ""]),
+  );
+}
+
+function applyDeferredTextFilters(filterNames) {
+  filterNames.forEach((filterName) => {
+    state.filters[filterName] = filterSearchDraftValue(filterName);
+  });
+  persistState(false);
 }
 
 function applyEmployeeSearchFilters() {
-  state.filters.employees = employeeSearchDraftValue("employees");
-  state.filters.employeeAssetSearch = employeeSearchDraftValue("employeeAssetSearch");
-  persistState(false);
+  applyDeferredTextFilters(["employees", "employeeAssetSearch"]);
   render();
+}
+
+function applyInventorySearchFilter() {
+  applyDeferredTextFilters(["inventorySearch"]);
+  if (state.filters.inventorySearch) expandVisibleInventoryNodes();
+  render();
+}
+
+function applyFlowRecordFilters() {
+  applyDeferredTextFilters(["flowSearch", "flowEmployee", "flowSourceTarget"]);
+  render();
+}
+
+function applyAuditFilters() {
+  applyDeferredTextFilters(["auditSearch", "auditEmployee"]);
+  return refreshAuditLogs();
 }
 
 function renderPage() {
@@ -3117,10 +3124,10 @@ function renderAuditPage() {
           state.filters.auditEndDate || "",
         )}" /></label>
         <label class="search-box audit-employee-box"><span>人</span><input data-filter="auditEmployee" value="${escapeHtml(
-          state.filters.auditEmployee || "",
+          filterSearchDraftValue("auditEmployee"),
         )}" placeholder="人员编号或姓名" /></label>
         <label class="search-box"><span>⌕</span><input data-filter="auditSearch" value="${escapeHtml(
-          state.filters.auditSearch || "",
+          filterSearchDraftValue("auditSearch"),
         )}" placeholder="搜索人员、设备或操作内容..." /></label>
         <label class="select-box"><span>操作类别</span><select data-filter="auditCategory">
           <option value="">全部类别</option>
@@ -3558,10 +3565,10 @@ function renderEmployeesPage() {
     <div class="toolbar">
       <div class="toolbar-actions">
         <label class="search-box"><span>⌕</span><input data-filter="employees" value="${escapeHtml(
-          employeeSearchDraftValue("employees"),
+          filterSearchDraftValue("employees"),
         )}" placeholder="搜索姓名、工号、部门或组织..." /></label>
         <label class="search-box employee-asset-search"><span>IT</span><input data-filter="employeeAssetSearch" value="${escapeHtml(
-          employeeSearchDraftValue("employeeAssetSearch"),
+          filterSearchDraftValue("employeeAssetSearch"),
         )}" placeholder="搜索 IT 物资品牌或型号..." /></label>
         <button class="secondary-button" data-action="apply-employee-search">搜索</button>
         <label class="select-box"><select data-filter="employeeStatus">
@@ -3853,8 +3860,9 @@ function renderInventoryPageLegacy() {
     <div class="toolbar">
       <div class="toolbar-actions">
         <label class="search-box"><span>⌕</span><input data-filter="inventorySearch" value="${escapeHtml(
-          state.filters.inventorySearch || "",
+          filterSearchDraftValue("inventorySearch"),
         )}" placeholder="搜索类型、品牌或型号..." /></label>
+        <button class="secondary-button" data-action="apply-inventory-search">查询</button>
         <label class="select-box"><select data-filter="inventoryType">
           ${inventoryTypeFilterOptions()
             .map(
@@ -4057,8 +4065,9 @@ function renderInventoryPage() {
     <div class="toolbar">
       <div class="toolbar-actions">
         <label class="search-box"><span>⌕</span><input data-filter="inventorySearch" value="${escapeHtml(
-          state.filters.inventorySearch || "",
+          filterSearchDraftValue("inventorySearch"),
         )}" placeholder="搜索类型、品牌或型号..." /></label>
+        <button class="secondary-button" data-action="apply-inventory-search">查询</button>
         <label class="select-box"><select data-filter="inventoryType">
           ${inventoryTypeFilterOptions()
             .map(
@@ -4188,7 +4197,7 @@ function renderFlowControlPage() {
     <div class="toolbar flow-record-toolbar">
       <div class="toolbar-actions">
         <label class="search-box"><span>⌕</span><input data-filter="flowSearch" value="${escapeHtml(
-          state.filters.flowSearch || "",
+          filterSearchDraftValue("flowSearch"),
         )}" placeholder="物品、品牌、型号或备注" /></label>
         <label class="select-box"><select data-filter="flowType">
           <option value="">全部物资类型</option>
@@ -4224,10 +4233,10 @@ function renderFlowControlPage() {
             .join("")}
         </select></label>
         <label class="search-box flow-record-person-box"><span>人</span><input data-filter="flowEmployee" value="${escapeHtml(
-          state.filters.flowEmployee || "",
+          filterSearchDraftValue("flowEmployee"),
         )}" placeholder="人员姓名或编号" /></label>
         <label class="search-box flow-record-source-box"><span>向</span><input data-filter="flowSourceTarget" value="${escapeHtml(
-          state.filters.flowSourceTarget || "",
+          filterSearchDraftValue("flowSourceTarget"),
         )}" placeholder="来源或去向" /></label>
         <label class="select-box audit-date-box"><span>开始</span><input type="date" data-filter="flowStartDate" value="${escapeHtml(
           state.filters.flowStartDate || "",
@@ -4235,6 +4244,7 @@ function renderFlowControlPage() {
         <label class="select-box audit-date-box"><span>结束</span><input type="date" data-filter="flowEndDate" value="${escapeHtml(
           state.filters.flowEndDate || "",
         )}" /></label>
+        <button class="secondary-button" data-action="apply-flow-record-filters">查询</button>
         ${
           hasFlowRecordFilters()
             ? '<button class="secondary-button" data-action="clear-flow-record-filters">清除筛选</button>'
@@ -6968,7 +6978,7 @@ document.addEventListener("click", (event) => {
     state.filters.employeeStatus = "";
     state.filters.employeeOrg = "";
     state.filters.employeeDevice = "";
-    syncEmployeeSearchDraftsFromFilters();
+    syncFilterSearchDraftsFromFilters();
     persistState(false);
     render();
     return;
@@ -6983,8 +6993,14 @@ document.addEventListener("click", (event) => {
     state.filters.inventorySearch = "";
     state.filters.inventoryType = "";
     state.filters.inventoryBrand = "";
+    syncFilterSearchDraftsFromFilters();
     persistState(false);
     render();
+    return;
+  }
+
+  if (action === "apply-inventory-search") {
+    applyInventorySearchFilter();
     return;
   }
 
@@ -6997,8 +7013,14 @@ document.addEventListener("click", (event) => {
     state.filters.flowSourceTarget = "";
     state.filters.flowStartDate = "";
     state.filters.flowEndDate = "";
+    syncFilterSearchDraftsFromFilters();
     persistState(false);
     render();
+    return;
+  }
+
+  if (action === "apply-flow-record-filters") {
+    applyFlowRecordFilters();
     return;
   }
 
@@ -7043,7 +7065,7 @@ document.addEventListener("click", (event) => {
   }
 
   if (action === "apply-audit-filters") {
-    refreshAuditLogs()
+    applyAuditFilters()
       .then(() => showToast("已应用日志筛选"))
       .catch((error) => {
         console.error("Unable to apply audit filters", error);
@@ -7587,15 +7609,20 @@ document.addEventListener("change", (event) => {
   }
   const filter = event.target.closest("[data-filter]");
   if (!filter) return;
-  state.filters[filter.dataset.filter] = filter.value;
-  if (filter.dataset.filter === "inventoryType") {
+  const filterName = filter.dataset.filter;
+  if (isDeferredTextFilter(filterName)) {
+    filterSearchDrafts[filterName] = filter.value;
+    return;
+  }
+  state.filters[filterName] = filter.value;
+  if (filterName === "inventoryType") {
     const selectedBrand = getInventoryBrand(state.filters.inventoryBrand || "");
     if (selectedBrand && selectedBrand.typeId !== filter.value) {
       state.filters.inventoryBrand = "";
     }
     expandVisibleInventoryNodes();
   }
-  if (filter.dataset.filter === "inventoryBrand") {
+  if (filterName === "inventoryBrand") {
     const brand = getInventoryBrand(filter.value);
     if (brand) {
       state.filters.inventoryType = brand.typeId;
@@ -7604,8 +7631,13 @@ document.addEventListener("change", (event) => {
     expandVisibleInventoryNodes();
   }
   persistState(false);
-  if (String(filter.dataset.filter).startsWith("audit")) {
-    queueAuditLogRefresh();
+  if (String(filterName).startsWith("audit")) {
+    refreshAuditLogs({ silent: true })
+      .then(() => render())
+      .catch((error) => {
+        console.error("Unable to refresh audit logs", error);
+        showToast(`日志加载失败：${error.message}`, true);
+      });
     return;
   }
   render();
@@ -7651,41 +7683,43 @@ document.addEventListener("input", (event) => {
 document.addEventListener("input", (event) => {
   const filter = event.target.closest("[data-filter]");
   if (!filter) return;
-  if (
-    ![
-      "auditSearch",
-      "auditEmployee",
-      "inventorySearch",
-      "flowSearch",
-      "flowEmployee",
-      "flowSourceTarget",
-      "employees",
-      "employeeAssetSearch",
-    ].includes(filter.dataset.filter)
-  )
-    return;
-  if (["employees", "employeeAssetSearch"].includes(filter.dataset.filter)) {
-    employeeSearchDrafts[filter.dataset.filter] = filter.value;
-    return;
-  }
-  state.filters[filter.dataset.filter] = filter.value;
-  persistState(false);
-  if (filter.dataset.filter === "inventorySearch") {
-    if (filter.value) expandVisibleInventoryNodes();
-    renderPreservingFilterInput(filter.dataset.filter);
-    return;
-  }
-  if (["flowSearch", "flowEmployee", "flowSourceTarget"].includes(filter.dataset.filter)) {
-    renderPreservingFilterInput(filter.dataset.filter);
-  }
+  const filterName = filter.dataset.filter;
+  if (!isDeferredTextFilter(filterName)) return;
+  filterSearchDrafts[filterName] = filter.value;
 });
 
 document.addEventListener("keydown", (event) => {
-  const employeeSearchFilter = event.target.closest('[data-filter="employees"], [data-filter="employeeAssetSearch"]');
-  if (employeeSearchFilter && event.key === "Enter") {
+  const textFilter = event.target.closest("[data-filter]");
+  if (!textFilter || event.key !== "Enter") {
+    if (event.key === "Escape" && document.querySelector("#modalRoot").innerHTML) closeModal();
+    return;
+  }
+  const filterName = textFilter.dataset.filter;
+  if (["employees", "employeeAssetSearch"].includes(filterName)) {
     event.preventDefault();
-    employeeSearchDrafts[employeeSearchFilter.dataset.filter] = employeeSearchFilter.value;
+    filterSearchDrafts[filterName] = textFilter.value;
     applyEmployeeSearchFilters();
+    return;
+  }
+  if (filterName === "inventorySearch") {
+    event.preventDefault();
+    filterSearchDrafts[filterName] = textFilter.value;
+    applyInventorySearchFilter();
+    return;
+  }
+  if (["flowSearch", "flowEmployee", "flowSourceTarget"].includes(filterName)) {
+    event.preventDefault();
+    filterSearchDrafts[filterName] = textFilter.value;
+    applyFlowRecordFilters();
+    return;
+  }
+  if (["auditSearch", "auditEmployee"].includes(filterName)) {
+    event.preventDefault();
+    filterSearchDrafts[filterName] = textFilter.value;
+    applyAuditFilters().catch((error) => {
+      console.error("Unable to apply audit filters", error);
+      showToast(`日志筛选失败：${error.message}`, true);
+    });
     return;
   }
   if (event.key === "Escape" && document.querySelector("#modalRoot").innerHTML) closeModal();
