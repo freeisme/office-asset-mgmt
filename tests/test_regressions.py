@@ -285,6 +285,29 @@ class FlowRecordUiTests(TestCase):
         self.assertNotIn('data-form="flow-control"', app)
         self.assertNotIn("登记物资调动", app)
 
+    def test_text_filters_use_drafts_until_explicitly_applied(self):
+        app = (ROOT / "web" / "app.js").read_text(encoding="utf-8")
+        active_inventory_renderer = app.split("function renderInventoryPage() {", 1)[1].split(
+            "\nfunction renderFlowRecordNoteEditor",
+            1,
+        )[0]
+
+        self.assertIn("const deferredTextFilterNames = new Set([", app)
+        self.assertIn("function filterSearchDraftValue(filterName)", app)
+        self.assertIn("function applyDeferredTextFilters(filterNames)", app)
+        self.assertIn("function applyInventorySearchFilter()", app)
+        self.assertIn("function applyFlowRecordFilters()", app)
+        self.assertIn("function applyAuditFilters()", app)
+        self.assertIn('data-action="apply-inventory-search"', app)
+        self.assertIn('data-action="apply-flow-record-filters"', app)
+        self.assertIn('filterSearchDraftValue("inventorySearch")', active_inventory_renderer)
+        self.assertIn('data-action="apply-inventory-search"', active_inventory_renderer)
+        self.assertIn('filterSearchDrafts[filterName] = filter.value;', app)
+        self.assertIn('if (String(filterName).startsWith("audit")) {', app)
+        self.assertIn("refreshAuditLogs({ silent: true })", app)
+        self.assertNotIn("renderPreservingFilterInput", app)
+        self.assertNotIn("queueAuditLogRefresh", app)
+
 
 if __name__ == "__main__":
     import unittest
