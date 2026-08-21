@@ -4,7 +4,7 @@ set -euo pipefail
 : "${MYSQL_DATABASE:?MYSQL_DATABASE must be set}"
 : "${MYSQL_ROOT_PASSWORD:?MYSQL_ROOT_PASSWORD must be set}"
 
-SEED_DIR="${SEED_DIR:-/seed/database}"
+SEED_DIR="${SEED_DIR:-/seed/bootstrap}"
 MYSQL_BIN="${MYSQL_BIN:-mysql}"
 
 mysql_args=(

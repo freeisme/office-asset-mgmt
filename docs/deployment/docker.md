@@ -40,7 +40,7 @@ docker compose logs --tail=200 migrate
 docker compose logs --tail=200 app
 ```
 
-空数据卷会由 `deploy/docker/init_database.sh` 初始化历史结构和参考数据，同时登记 `legacy-20260813`。之后 `migrate` 应用 `migrations/` 中的全部未登记版本。
+空数据卷会由 `deploy/docker/init_database.sh` 初始化 `database/bootstrap/` 中的历史结构和参考数据，同时登记 `legacy-20260813`。之后 `migrate` 应用 `database/migrations/` 中的全部未登记版本。
 
 验证：
 
@@ -54,7 +54,7 @@ docker compose exec db sh -c 'MYSQL_PWD="$MYSQL_PASSWORD" mysql -u"$MYSQL_USER" 
 ## 3. 已有数据卷升级
 
 1. 先创建并验证数据库备份。
-2. 拉取已验证版本并查看 `VERSION_NOTES.md`、`MIGRATIONS.md`。
+2. 拉取已验证版本并查看 [版本说明](../../VERSION_NOTES.md) 和[数据库迁移说明](../development/migrations.md)。
 3. 构建并启动：
 
 ```bash
@@ -64,11 +64,11 @@ docker compose up -d
 docker compose ps
 ```
 
-如果已有库没有 `schema_migration`，`migrate` 会停止。这是保护机制，不会重放 `database/01_schema.sql`。确认数据库已达到历史基线后，显式登记一次：
+如果已有库没有 `schema_migration`，`migrate` 会停止。这是保护机制，不会重放 `database/bootstrap/01_schema.sql`。确认数据库已达到历史基线后，显式登记一次：
 
 ```bash
 docker compose run --rm --entrypoint python migrate \
-  migration_runner.py --database office_asset_mgmt --mark-baseline legacy-20260813
+  tools/migration_runner.py --database office_asset_mgmt --mark-baseline legacy-20260813
 docker compose up -d
 ```
 

@@ -21,7 +21,7 @@ secrets/
 *.csv
 *.json
 
-DEPLOY_UBUNTU.md
-GITHUB_AUTO_DEPLOY.md
+docs/
 deploy/
-database/
+database/bootstrap/
+database/manual/

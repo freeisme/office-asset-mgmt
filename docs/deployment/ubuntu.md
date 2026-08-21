@@ -2,7 +2,7 @@
 
 本文档适用于将本项目部署到 Ubuntu 局域网服务器，并通过 Nginx 提供访问。
 
-> v2.0.0 迁移要求：`database/01_schema.sql` 只用于空库。已有业务库升级前先备份，并使用 `migration_runner.py` 执行已登记基线之后的增量迁移；不要对生产库重放历史初始化 SQL。
+> v2.0.0 迁移要求：`database/bootstrap/01_schema.sql` 只用于空库。已有业务库升级前先备份，并使用 `tools/migration_runner.py` 执行已登记基线之后的增量迁移；不要对生产库重放历史初始化 SQL。
 
 ## 1. 部署架构
 
@@ -142,7 +142,7 @@ sudo -u officeasset env \
   DB_HOST=127.0.0.1 DB_PORT=3306 DB_USER=office_asset_app \
   DB_NAME=office_asset_mgmt DB_PASSWORD='<从安全环境文件读取>' \
   MYSQL_BIN=/usr/bin/mysql \
-  python3 migration_runner.py --database office_asset_mgmt --mark-baseline legacy-20260813
+  python3 tools/migration_runner.py --database office_asset_mgmt --mark-baseline legacy-20260813
 ```
 
 ## 5. 配置服务环境变量
@@ -301,7 +301,7 @@ sudo -u officeasset env \
   DB_HOST=127.0.0.1 DB_PORT=3306 DB_USER=office_asset_app \
   DB_NAME=office_asset_mgmt DB_PASSWORD='<从安全环境文件读取>' \
   MYSQL_BIN=/usr/bin/mysql \
-  python3 migration_runner.py --database office_asset_mgmt --verify
+  python3 tools/migration_runner.py --database office_asset_mgmt --verify
 ```
 
 如果已有库没有 `schema_migration`，不要自动补表后直接升级。完成备份并确认历史基线后，显式加上 `--mark-baseline legacy-20260813` 执行一次。

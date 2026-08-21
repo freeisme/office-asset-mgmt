@@ -8,8 +8,8 @@ RUN apt-get update \
 
 COPY server.py ./
 COPY office_asset ./office_asset
-COPY migrations ./migrations
-COPY migration_runner.py ./
+COPY database/migrations ./database/migrations
+COPY tools/migration_runner.py ./tools/migration_runner.py
 COPY web ./web
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
