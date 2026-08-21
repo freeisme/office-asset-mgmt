@@ -24,6 +24,11 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import parse_qs, urlencode, urlparse
 from urllib.request import Request, urlopen
 
+from office_asset.api_router import ApiDependencies, DomainApiRouter
+from office_asset.jobs import finish_job_execution, job_run_key, run_periodic_job, start_job_execution
+from office_asset.permissions import PermissionService
+from office_asset.sql import SqlGateway, parse_bool
+
 
 ROOT_DIR = Path(__file__).resolve().parent
 WEB_DIR = ROOT_DIR / "web"
@@ -39,7 +44,7 @@ DB_NAME = os.environ.get("DB_NAME", "office_asset_mgmt")
 DB_USER = os.environ.get("DB_USER", "root")
 DB_PASSWORD = os.environ.get("DB_PASSWORD", "")
 SERVER_HOST = os.environ.get("SERVER_HOST", "127.0.0.1")
-SERVER_PORT = int(os.environ.get("SERVER_PORT", "8000"))
+SERVER_PORT = int(os.environ.get("SERVER_PORT", "8011"))
 BACKUP_DIR = Path(os.environ.get("BACKUP_DIR", str(ROOT_DIR / "backups"))).expanduser().resolve()
 UPDATE_SERVICE_URL = os.environ.get("UPDATE_SERVICE_URL", "https://host.docker.internal:9000").rstrip("/")
 UPDATE_CONTROL_TOKEN = os.environ.get("UPDATE_CONTROL_TOKEN", "").strip()
@@ -245,6 +250,17 @@ def normalize_update_repository_url(value: object | None) -> str:
     return repository_url
 
 
+UPDATE_RELEASE_CHANNELS = {"release", "beta"}
+DEFAULT_UPDATE_RELEASE_CHANNEL = "beta"
+
+
+def normalize_update_release_channel(value: object | None) -> str:
+    channel = "" if value is None else str(value).strip().lower()
+    if channel not in UPDATE_RELEASE_CHANNELS:
+        raise ApiError("更新通道必须是 release 或 beta。")
+    return channel
+
+
 class RateLimitError(ApiError):
     def __init__(self, message: str, retry_after: int) -> None:
         super().__init__(message)
@@ -278,11 +294,25 @@ def encode_token(value: str) -> str:
     return hashlib.sha256(value.encode("utf-8")).hexdigest()
 
 
-def password_hash(password: str) -> str:
+def validate_password(value: object | None, *, allow_empty: bool = False) -> str:
+    password = "" if value is None else str(value)
+    if allow_empty and not password:
+        return ""
+    if not password:
+        raise ApiError("密码不能为空。")
+    if password != password.strip():
+        raise ApiError("密码首尾不能包含空格。")
+    if any(ord(char) < 32 or ord(char) == 127 for char in password):
+        raise ApiError("密码不能包含控制字符。")
     if len(password) < PASSWORD_MIN_LENGTH:
         raise ApiError(f"密码长度不能少于 {PASSWORD_MIN_LENGTH} 位。")
     if len(password) > PASSWORD_MAX_LENGTH:
         raise ApiError(f"密码长度不能超过 {PASSWORD_MAX_LENGTH} 位。")
+    return password
+
+
+def password_hash(password: str) -> str:
+    password = validate_password(password)
     salt = secrets.token_bytes(16)
     derived = hashlib.scrypt(
         password.encode("utf-8"),
@@ -377,18 +407,66 @@ def clear_login_rate_limit(handler: SimpleHTTPRequestHandler, username: str) -> 
 
 
 def auth_user_public(user: dict) -> dict:
+    employee = user.get("employee") if isinstance(user.get("employee"), dict) else {}
     return {
         "id": text_value(user.get("id") or user.get("userId")),
         "username": text_value(user.get("username")),
         "displayName": text_value(user.get("displayName") or user.get("display_name")),
         "role": text_value(user.get("role")) or "operator",
-        "isActive": bool(user.get("isActive", user.get("is_active", True))),
+        "roleCode": text_value(user.get("roleCode") or user.get("role")) or "operator",
+        "isSuperAdmin": parse_bool(user.get("isSuperAdmin"), False),
+        "isActive": parse_bool(user.get("isActive", user.get("is_active", True)), True),
         "lastLoginAt": text_value(user.get("lastLoginAt") or user.get("last_login_at")),
+        "employeeId": text_value(user.get("employeeId") or user.get("employee_id") or employee.get("employeeId")),
+        "employeeNo": text_value(user.get("employeeNo") or user.get("employee_no") or employee.get("employeeNo")),
+        "employeeName": text_value(user.get("employeeName") or user.get("employee_name") or employee.get("employeeName")),
+        "department": text_value(user.get("department") or employee.get("department")),
+        "positionName": text_value(user.get("positionName") or user.get("position_name") or employee.get("positionName")),
+        "orgId": text_value(user.get("orgId") or user.get("org_id") or employee.get("orgId")),
+        "orgName": text_value(user.get("orgName") or user.get("org_name") or employee.get("orgName")),
+        "email": text_value(user.get("email") or employee.get("email")),
+        "mobile": text_value(user.get("mobile") or employee.get("mobile")),
     }
 
 
 def auth_user_count() -> int:
     return sql_int(run_mysql("SELECT COUNT(*) FROM user_account;", database=DB_NAME).strip(), 0)
+
+
+def validate_employee_binding(value: object | None, current_user_id: str = "") -> int:
+    employee_id = sql_int(value, 0)
+    if employee_id <= 0:
+        return 0
+    employee_exists = sql_int(
+        run_mysql(
+            f"""
+            SELECT COUNT(*)
+            FROM employee
+            WHERE employee_id = {employee_id}
+              AND is_active = 1
+              AND employment_status <> 'left';
+            """,
+            database=DB_NAME,
+        ).strip(),
+        0,
+    )
+    if employee_exists != 1:
+        raise ApiError("绑定人员不存在、已停用或已离职。")
+    assigned = sql_int(
+        run_mysql(
+            f"""
+            SELECT COUNT(*)
+            FROM user_account
+            WHERE employee_id = {employee_id}
+              AND user_id <> {sql_quote(current_user_id or '0')};
+            """,
+            database=DB_NAME,
+        ).strip(),
+        0,
+    )
+    if assigned:
+        raise ConflictError("该人员已绑定其他账号。")
+    return employee_id
 
 
 def create_first_admin(username: str, display_name: str, stored_hash: str) -> dict:
@@ -398,8 +476,8 @@ def create_first_admin(username: str, display_name: str, stored_hash: str) -> di
         INSERT INTO auth_bootstrap_guard (guard_id)
         VALUES (1)
         ON DUPLICATE KEY UPDATE guard_id = VALUES(guard_id);
-        INSERT INTO user_account (username, display_name, password_hash, user_role)
-        SELECT {sql_quote(username)}, {sql_quote(display_name)}, {sql_quote(stored_hash)}, 'admin'
+        INSERT INTO user_account (username, display_name, password_hash, user_role, role_code)
+        SELECT {sql_quote(username)}, {sql_quote(display_name)}, {sql_quote(stored_hash)}, 'admin', 'admin'
         WHERE NOT EXISTS (SELECT 1 FROM user_account LIMIT 1);
         SELECT ROW_COUNT();
         COMMIT;
@@ -438,12 +516,30 @@ def find_user_by_username(username: str) -> dict | None:
           'username', username,
           'displayName', display_name,
           'passwordHash', password_hash,
-          'role', user_role,
-          'isActive', is_active,
-          'failedAttempts', failed_attempts,
-          'locked', IF(locked_until IS NOT NULL AND locked_until > NOW(), TRUE, FALSE)
+          'role', COALESCE(role_code, user_role),
+          'roleCode', COALESCE(role_code, user_role),
+          'isSuperAdmin', EXISTS(
+            SELECT 1 FROM auth_role role_row
+            WHERE role_row.role_code = COALESCE(user_account.role_code, user_account.user_role)
+              AND role_row.is_active = 1
+              AND role_row.is_super_admin = 1
+          ),
+          'isActive', user_account.is_active,
+          'failedAttempts', user_account.failed_attempts,
+          'locked', IF(user_account.locked_until IS NOT NULL AND user_account.locked_until > NOW(), TRUE, FALSE)
+          ,'employeeId', COALESCE(CAST(user_account.employee_id AS CHAR), '')
+          ,'employeeNo', COALESCE(employee.employee_no, '')
+          ,'employeeName', COALESCE(employee.employee_name, '')
+          ,'department', COALESCE(employee.department, '')
+          ,'positionName', COALESCE(employee.position_name, '')
+          ,'orgId', COALESCE(CAST(employee.org_unit_id AS CHAR), '')
+          ,'orgName', COALESCE(org.org_name, '')
+          ,'email', COALESCE(employee.email, '')
+          ,'mobile', COALESCE(employee.mobile, '')
         )
         FROM user_account
+        LEFT JOIN employee ON employee.employee_id = user_account.employee_id
+        LEFT JOIN org_unit org ON org.org_unit_id = employee.org_unit_id
         WHERE username = {sql_quote(username)}
         LIMIT 1
         """,
@@ -461,11 +557,29 @@ def find_user_by_id(user_id: str) -> dict | None:
           'username', username,
           'displayName', display_name,
           'passwordHash', password_hash,
-          'role', user_role,
-          'isActive', is_active,
-          'lastLoginAt', COALESCE(DATE_FORMAT(last_login_at, '%Y-%m-%d %H:%i:%s'), '')
+          'role', COALESCE(role_code, user_role),
+          'roleCode', COALESCE(role_code, user_role),
+          'isSuperAdmin', EXISTS(
+            SELECT 1 FROM auth_role role_row
+            WHERE role_row.role_code = COALESCE(user_account.role_code, user_account.user_role)
+              AND role_row.is_active = 1
+              AND role_row.is_super_admin = 1
+          ),
+          'isActive', user_account.is_active,
+          'lastLoginAt', COALESCE(DATE_FORMAT(user_account.last_login_at, '%Y-%m-%d %H:%i:%s'), '')
+          ,'employeeId', COALESCE(CAST(user_account.employee_id AS CHAR), '')
+          ,'employeeNo', COALESCE(employee.employee_no, '')
+          ,'employeeName', COALESCE(employee.employee_name, '')
+          ,'department', COALESCE(employee.department, '')
+          ,'positionName', COALESCE(employee.position_name, '')
+          ,'orgId', COALESCE(CAST(employee.org_unit_id AS CHAR), '')
+          ,'orgName', COALESCE(org.org_name, '')
+          ,'email', COALESCE(employee.email, '')
+          ,'mobile', COALESCE(employee.mobile, '')
         )
         FROM user_account
+        LEFT JOIN employee ON employee.employee_id = user_account.employee_id
+        LEFT JOIN org_unit org ON org.org_unit_id = employee.org_unit_id
         WHERE user_id = {sql_quote(user_id)}
         LIMIT 1
         """,
@@ -480,14 +594,45 @@ def list_users() -> list[dict]:
           'id', CAST(user_id AS CHAR),
           'username', username,
           'displayName', display_name,
-          'role', user_role,
+          'role', role_code,
+          'roleCode', role_code,
+          'isSuperAdmin', is_super_admin,
           'isActive', is_active,
           'lastLoginAt', COALESCE(DATE_FORMAT(last_login_at, '%Y-%m-%d %H:%i:%s'), ''),
           'createdAt', DATE_FORMAT(created_at, '%Y-%m-%d %H:%i:%s')
+          ,'employeeId', COALESCE(CAST(ordered_users.employee_id AS CHAR), '')
+          ,'employeeNo', COALESCE(ordered_users.employee_no, '')
+          ,'employeeName', COALESCE(ordered_users.employee_name, '')
+          ,'department', COALESCE(ordered_users.department, '')
+          ,'positionName', COALESCE(ordered_users.position_name, '')
+          ,'orgId', COALESCE(CAST(ordered_users.org_id AS CHAR), '')
+          ,'orgName', COALESCE(ordered_users.org_name, '')
         )), JSON_ARRAY())
         FROM (
-          SELECT user_id, username, display_name, user_role, is_active, last_login_at, created_at
+          SELECT
+            user_account.user_id,
+            user_account.username,
+            user_account.display_name,
+            COALESCE(user_account.role_code, user_account.user_role) AS role_code,
+            EXISTS(
+              SELECT 1 FROM auth_role role_row
+              WHERE role_row.role_code = COALESCE(user_account.role_code, user_account.user_role)
+                AND role_row.is_active = 1
+                AND role_row.is_super_admin = 1
+            ) AS is_super_admin,
+            user_account.is_active,
+            user_account.last_login_at,
+            user_account.created_at
+            ,user_account.employee_id
+            ,employee.employee_no
+            ,employee.employee_name
+            ,employee.department
+            ,employee.position_name
+            ,employee.org_unit_id AS org_id
+            ,org_unit.org_name AS org_name
           FROM user_account
+          LEFT JOIN employee ON employee.employee_id = user_account.employee_id
+          LEFT JOIN org_unit ON org_unit.org_unit_id = employee.org_unit_id
           ORDER BY is_active DESC, username
         ) AS ordered_users
         """,
@@ -560,12 +705,32 @@ def current_auth_context(handler: SimpleHTTPRequestHandler) -> dict | None:
           'id', CAST(user.user_id AS CHAR),
           'username', user.username,
           'displayName', user.display_name,
-          'role', user.user_role,
+          'role', COALESCE(user.role_code, user.user_role),
+          'roleCode', COALESCE(user.role_code, user.user_role),
+          'isSuperAdmin', EXISTS(
+            SELECT 1 FROM auth_role role_row
+            WHERE role_row.role_code = COALESCE(user.role_code, user.user_role)
+              AND role_row.is_active = 1
+              AND role_row.is_super_admin = 1
+          ),
           'isActive', user.is_active,
-          'csrfHash', session.csrf_token_hash
+          'csrfHash', session.csrf_token_hash,
+          'employee', JSON_OBJECT(
+            'employeeId', COALESCE(CAST(employee.employee_id AS CHAR), ''),
+            'employeeNo', COALESCE(employee.employee_no, ''),
+            'employeeName', COALESCE(employee.employee_name, ''),
+            'department', COALESCE(employee.department, ''),
+            'positionName', COALESCE(employee.position_name, ''),
+            'orgId', COALESCE(CAST(employee.org_unit_id AS CHAR), ''),
+            'orgName', COALESCE(org.org_name, ''),
+            'email', COALESCE(employee.email, ''),
+            'mobile', COALESCE(employee.mobile, '')
+          )
         )
         FROM auth_session session
         JOIN user_account user ON user.user_id = session.user_id
+        LEFT JOIN employee ON employee.employee_id = user.employee_id
+        LEFT JOIN org_unit org ON org.org_unit_id = employee.org_unit_id
         WHERE session.session_token_hash = {sql_quote(encode_token(token))}
           AND session.revoked_at IS NULL
           AND session.expires_at > NOW()
@@ -586,6 +751,10 @@ def require_auth(handler: SimpleHTTPRequestHandler) -> dict:
 def require_role(context: dict, *roles: str) -> None:
     if text_value(context.get("role")) not in roles:
         raise ForbiddenError("当前账号没有执行此操作的权限。")
+
+
+def legacy_role_value(role_code: str) -> str:
+    return role_code if role_code in {"admin", "operator", "viewer"} else "viewer"
 
 
 def require_csrf(handler: SimpleHTTPRequestHandler, context: dict) -> None:
@@ -647,17 +816,6 @@ def settings_payload() -> dict:
         {},
     )
     return value if isinstance(value, dict) else {}
-
-
-UPDATE_RELEASE_CHANNELS = {"release", "beta"}
-DEFAULT_UPDATE_RELEASE_CHANNEL = "beta"
-
-
-def normalize_update_release_channel(value: object | None) -> str:
-    channel = "" if value is None else str(value).strip().lower()
-    if channel not in UPDATE_RELEASE_CHANNELS:
-        raise ApiError("更新通道必须是 release 或 beta。")
-    return channel
 
 
 def request_update_service(
@@ -1013,6 +1171,8 @@ def run_mysql(sql: str, *, database: str | None = None) -> str:
     if completed.returncode != 0:
         message = completed.stderr.strip() or completed.stdout.strip() or "Unknown MySQL error"
         print(f"MySQL command failed: {message[:512]}")
+        if "Duplicate entry" in message:
+            raise ConflictError("数据唯一标识已存在，请检查重复的名称、编码或编号。")
         raise InternalServerError("数据库操作失败。")
     return completed.stdout.strip()
 
@@ -1377,27 +1537,46 @@ def run_scheduled_database_backup(now: datetime | None = None) -> dict | None:
 
 
 def database_backup_scheduler_loop() -> None:
-    next_retry_at = 0.0
-    while True:
+    def is_due(current_time: datetime) -> bool:
+        settings = settings_payload()
+        if not backup_setting_enabled(settings.get("backup_enabled", "0")):
+            return False
+        scheduled_time = validate_backup_time(settings.get("backup_time", "02:00"))
+        scheduled_hour, scheduled_minute = (int(part) for part in scheduled_time.split(":"))
+        return (current_time.hour, current_time.minute) >= (scheduled_hour, scheduled_minute)
+
+    def execute(current_time: datetime) -> None:
+        run_key = job_run_key("database_backup", current_time)
+        start_job_execution(DOMAIN_DB, "database_backup", run_key)
         try:
-            settings = settings_payload()
-            current_time = datetime.now()
-            scheduled_time = validate_backup_time(settings.get("backup_time", "02:00"))
-            scheduled_hour, scheduled_minute = (int(part) for part in scheduled_time.split(":"))
-            if (
-                backup_setting_enabled(settings.get("backup_enabled", "0"))
-                and (current_time.hour, current_time.minute) >= (scheduled_hour, scheduled_minute)
-                and time.monotonic() >= next_retry_at
-            ):
-                try:
-                    run_scheduled_database_backup(current_time)
-                    next_retry_at = 0.0
-                except Exception:
-                    next_retry_at = time.monotonic() + BACKUP_SCHEDULER_RETRY_SECONDS
-                    raise
-        except Exception as exc:  # pragma: no cover - scheduler must keep serving requests
-            print(f"Database backup scheduler error: {exc}")
-        time.sleep(BACKUP_SCHEDULER_POLL_SECONDS)
+            record = run_scheduled_database_backup(current_time)
+            finish_job_execution(
+                DOMAIN_DB,
+                "database_backup",
+                run_key,
+                True,
+                {
+                    "outcome": "created" if record else "already_completed",
+                    "backupId": text_value(record.get("id")) if record else "",
+                },
+            )
+        except Exception as exc:
+            finish_job_execution(
+                DOMAIN_DB,
+                "database_backup",
+                run_key,
+                False,
+                error_message=str(exc),
+            )
+            raise
+
+    run_periodic_job(
+        poll_seconds=BACKUP_SCHEDULER_POLL_SECONDS,
+        retry_seconds=BACKUP_SCHEDULER_RETRY_SECONDS,
+        is_due=is_due,
+        execute=execute,
+        report_error=lambda exc: print(f"Database backup scheduler error: {exc}"),
+    )
 
 
 def run_mysql_json_queries(*queries: str) -> list[object]:
@@ -1831,71 +2010,7 @@ def normalize_payload(payload: dict) -> dict:
     }
 
 
-ORG_CODE_OVERRIDES = {
-    "K+": "KPLUS",
-    "苏州诺思": "SZNS",
-    "南通科德": "NTKD",
-    "产品部": "CP",
-    "流程IT与质量部": "ITQ",
-    "稽核审计与持续改善组": "JHSJ",
-    "稽核审计与改善组": "JHSJ",
-    "财务部": "CW",
-    "人事行政部": "RSXZ",
-    "研发中心": "YF",
-    "光敏树脂部": "GMSZ",
-    "工程技术部": "GCJS",
-    "供应链管理部": "GYLG",
-    "营销中心": "YX",
-    "苏州工厂": "SZGC",
-    "PMC": "PMC",
-    "仓库": "CK",
-    "其他": "QT",
-    "包装": "BZ",
-    "品质部": "PZ",
-    "公共设备": "GG",
-    "仓储物流部": "CCWL",
-    "成品包装课": "CPBZ",
-    "生产部": "SC",
-    "设备部": "SB",
-    "行政部": "XZ",
-    "仓储部": "CC",
-    "品质": "PZ",
-    "技术部": "JS",
-    "计划与控制部": "JHKZ",
-    "采购部": "CG",
-    "基础材料生产部": "JCSC",
-    "材料成型及包装部": "CLXJBZ",
-    "树脂生产课": "SZSC",
-    "高性能材料成型课": "GXXCX",
-    "光敏树脂组": "GMSZ",
-    "创新组": "CX",
-    "医用材料组": "YYCL",
-    "实验室": "SY",
-    "工艺组": "GY",
-    "材料开发组": "CLKF",
-    "测试应用组": "CSYY",
-    "颜色开发组": "YSKF",
-    "Amazon": "AMZ",
-    "品牌设计组": "PPSJ",
-    "国内业务部": "GN",
-    "国内大客户": "GNDKH",
-    "国内电商": "GDS",
-    "新媒体运营组": "XMTY",
-    "海外业务部": "HW",
-    "海外大客户": "HWDKH",
-    "NPI项目组": "NPI",
-    "包装部": "BZ",
-    "流程管理组": "LCGL",
-    "IT部": "IT",
-    "品质管理部": "PZGL",
-    "基础材料成型课": "JCCX",
-    "生产一班": "SCYB",
-    "生产二班": "SCEB",
-    "Kexcelled": "KEX",
-    "justMaker": "JM",
-    "包装8组": "BZ8",
-    "包装二组": "BZE",
-}
+ORG_CODE_OVERRIDES: dict[str, str] = {}
 
 ORG_INITIALS = {
     "产": "C", "品": "P", "流": "L", "程": "C", "质": "Z", "量": "L", "稽": "J", "核": "H", "审": "S",
@@ -1952,7 +2067,7 @@ def employee_prefix_for_org(org_id: object | None, orgs_by_id: dict[str, dict]) 
         path.append(text_value(current.get("code")) or generated_org_code(current.get("name")))
         current = orgs_by_id.get(text_value(current.get("parentId")))
     path.reverse()
-    if path and path[0] == "KPLUS":
+    if len(path) > 1:
         path.pop(0)
     return "-".join(path) or "ORG"
 
@@ -3777,6 +3892,135 @@ def build_state_payload() -> dict:
     }
 
 
+def permission_map(context: dict) -> dict[str, dict]:
+    result: dict[str, dict] = {}
+    for item in PERMISSIONS.permissions(context):
+        if text_value(item.get("actionCode")) == "view":
+            result[text_value(item.get("moduleCode"))] = item
+    return result
+
+
+def scoped_org_ids_for_state(context: dict) -> set[str]:
+    user_id = sql_int(context.get("id"), 0)
+    if user_id <= 0:
+        return set()
+    scopes = json_query_one(
+        f"""
+        SELECT COALESCE(JSON_ARRAYAGG(JSON_OBJECT(
+          'orgId', org_unit_id,
+          'includeDescendants', include_descendants
+        )), JSON_ARRAY())
+        FROM user_org_scope
+        WHERE user_id = {user_id}
+        """,
+        [],
+    )
+    if not scopes:
+        return set()
+    org_rows = json_query_one(
+        """
+        SELECT COALESCE(JSON_ARRAYAGG(JSON_OBJECT(
+          'id', org_unit_id,
+          'parentId', COALESCE(parent_org_unit_id, 0)
+        )), JSON_ARRAY())
+        FROM org_unit
+        WHERE is_active = 1
+        """,
+        [],
+    )
+    children: dict[int, list[int]] = {}
+    for row in org_rows or []:
+        children.setdefault(sql_int(row.get("parentId"), 0), []).append(sql_int(row.get("id"), 0))
+    allowed: set[str] = set()
+    for scope in scopes or []:
+        root = sql_int(scope.get("orgId"), 0)
+        if root <= 0:
+            continue
+        allowed.add(str(root))
+        if not bool(scope.get("includeDescendants")):
+            continue
+        pending = list(children.get(root, []))
+        while pending:
+            current = pending.pop()
+            if str(current) in allowed:
+                continue
+            allowed.add(str(current))
+            pending.extend(children.get(current, []))
+    return allowed
+
+
+def filter_state_payload(payload: dict, context: dict) -> dict:
+    result = dict(payload)
+    permissions = permission_map(context)
+
+    def can_view(module_code: str) -> bool:
+        return bool((permissions.get(module_code) or {}).get("canView"))
+
+    def scope_for(module_code: str) -> str:
+        return text_value((permissions.get(module_code) or {}).get("dataScope")) or "none"
+
+    restricted_modules = {
+        module_code
+        for module_code in ("it_assets", "employees", "organizations")
+        if scope_for(module_code) in {"organization", "own"}
+    }
+    allowed_orgs = scoped_org_ids_for_state(context) if restricted_modules else set()
+
+    def filter_org_records(records: list[dict], module_code: str) -> list[dict]:
+        scope = scope_for(module_code)
+        if scope == "all":
+            return records
+        if scope == "organization":
+            return [item for item in records if text_value(item.get("orgId")) in allowed_orgs]
+        if scope == "own":
+            employee_id = text_value((context.get("employee") or {}).get("employeeId"))
+            if not employee_id:
+                return []
+            if module_code == "it_assets":
+                return [item for item in records if text_value(item.get("userId")) == employee_id]
+            if module_code == "employees":
+                return [item for item in records if text_value(item.get("id")) == employee_id]
+        # Assets have no submitter or assignee field, and unbound accounts must
+        # not receive records through a permissive fallback.
+        return []
+
+    if can_view("organizations"):
+        org_scope = scope_for("organizations")
+        if org_scope == "organization":
+            result["orgs"] = [
+                item for item in result.get("orgs") or [] if text_value(item.get("id")) in allowed_orgs
+            ]
+        elif org_scope == "own":
+            result["orgs"] = []
+    else:
+        result["orgs"] = []
+
+    if can_view("employees"):
+        result["employees"] = filter_org_records(list(result.get("employees") or []), "employees")
+        result["leftEmployees"] = filter_org_records(
+            list(result.get("leftEmployees") or []), "employees"
+        )
+    else:
+        result["employees"] = []
+        result["leftEmployees"] = []
+
+    if can_view("it_assets"):
+        result["computers"] = filter_org_records(list(result.get("computers") or []), "it_assets")
+    else:
+        result["computers"] = []
+
+    if not (can_view("inventory_catalog") or can_view("inventory_operations")):
+        result["nonAssetTypes"] = []
+        result["inventoryBrands"] = []
+        result["inventoryModels"] = []
+    if not can_view("inventory_operations"):
+        result["inventoryMovementLogs"] = []
+        result["inventoryPurchaseLogs"] = []
+    if not can_view("audit_logs"):
+        result["auditLogs"] = []
+    return result
+
+
 def build_sync_sql(
     payload: dict,
     audit_entries: list[dict] | None = None,
@@ -4494,6 +4738,44 @@ def sync_state(payload: dict, actor: str = "web") -> dict:
     return build_state_payload()
 
 
+def domain_execute(sql: str) -> str:
+    return run_mysql(sql, database=DB_NAME)
+
+
+DOMAIN_DB = SqlGateway(
+    execute=domain_execute,
+    query_json=json_query_one,
+    quote=sql_quote,
+    text=text_value,
+    integer=sql_int,
+)
+
+
+PERMISSIONS = PermissionService(
+    db=DOMAIN_DB,
+    api_error=ApiError,
+    forbidden_error=ForbiddenError,
+)
+
+
+def require_permission(context: dict, module_code: str, action_code: str) -> None:
+    PERMISSIONS.require(context, module_code, action_code)
+
+
+DOMAIN_ROUTER = DomainApiRouter(
+    ApiDependencies(
+        db=DOMAIN_DB,
+        api_error=ApiError,
+        conflict_error=ConflictError,
+        forbidden_error=ForbiddenError,
+        require_auth=require_auth,
+        require_role=require_role,
+        require_permission=require_permission,
+        require_csrf=require_csrf,
+    )
+)
+
+
 class AppHandler(SimpleHTTPRequestHandler):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, directory=str(WEB_DIR), **kwargs)
@@ -4560,6 +4842,8 @@ class AppHandler(SimpleHTTPRequestHandler):
     def handle_api(self) -> None:
         parsed = urlparse(self.path)
         params = parse_qs(parsed.query, keep_blank_values=True)
+        if DOMAIN_ROUTER.dispatch(self, parsed, params):
+            return
         if parsed.path == "/api/health" and self.command == "GET":
             try:
                 probe = sql_int(run_mysql("SELECT 1;", database=DB_NAME).strip(), 0)
@@ -4573,13 +4857,22 @@ class AppHandler(SimpleHTTPRequestHandler):
                         "'non_asset_type', 'it_inventory_brand', 'it_inventory_model', "
                         "'inventory_movement_log', 'inventory_purchase_log', 'computer_assignment_history', "
                         "'left_employee_archive', 'audit_log', 'app_state_revision', "
-                        "'user_account', 'auth_session', 'system_setting', 'database_backup'"
+                        "'user_account', 'auth_session', 'system_setting', 'database_backup', "
+                        "'schema_migration', 'user_org_scope', 'asset_relation', 'api_idempotency_key', "
+                        "'inventory_allocation_history', 'asset_status_history', 'sync_source', 'sync_run', "
+                        "'sync_staging_record', 'sync_entity_mapping', 'data_quality_issue', 'job_execution', "
+                        "'itil_ticket', 'itil_ticket_history', 'auth_module', 'auth_role', "
+                        "'auth_permission', 'auth_role_permission', 'auth_user_permission', "
+                        "'service_form', 'service_form_field', 'service_ticket_extension', "
+                        "'itil_change', 'itil_problem', 'knowledge_article', 'sla_policy', "
+                        "'service_workflow', 'service_workflow_step', 'service_approval', "
+                        "'service_approval_decision', 'service_notification', 'service_form_permission'"
                         ");",
                         database=DB_NAME,
                     ).strip(),
                     0,
                 )
-                required_table_count = 19
+                required_table_count = 51
                 healthy = probe == 1 and table_count == required_table_count
                 self.send_json(
                     {
@@ -4623,8 +4916,8 @@ class AppHandler(SimpleHTTPRequestHandler):
             payload = self.read_json()
             username = validate_username(payload.get("username"))
             display_name = text_value(payload.get("displayName")) or username
-            password = text_value(payload.get("password"))
-            confirm_password = text_value(payload.get("confirmPassword"))
+            password = validate_password(payload.get("password"))
+            confirm_password = validate_password(payload.get("confirmPassword"))
             if password != confirm_password:
                 raise ApiError("两次输入的密码不一致。")
             stored_hash = password_hash(password)
@@ -4699,8 +4992,8 @@ class AppHandler(SimpleHTTPRequestHandler):
             require_csrf(self, context)
             payload = self.read_json()
             current_password = text_value(payload.get("currentPassword"))
-            new_password = text_value(payload.get("newPassword"))
-            confirm_password = text_value(payload.get("confirmPassword"))
+            new_password = validate_password(payload.get("newPassword"))
+            confirm_password = validate_password(payload.get("confirmPassword"))
             user = find_user_by_id(text_value(context.get("id")))
             if not user or not verify_password(current_password, text_value(user.get("passwordHash"))):
                 raise UnauthorizedError("当前密码不正确。")
@@ -4723,29 +5016,132 @@ class AppHandler(SimpleHTTPRequestHandler):
             self.send_json({"ok": True})
             return
 
+        if parsed.path == "/api/auth/permissions" and self.command == "GET":
+            context = require_auth(self)
+            self.send_json(
+                {
+                    "isSuperAdmin": PERMISSIONS.is_super_admin(context),
+                    "permissions": PERMISSIONS.permissions(context),
+                }
+            )
+            return
+
+        if parsed.path == "/api/access-control" and self.command == "GET":
+            context = require_auth(self)
+            require_permission(context, "role_management", "view")
+            self.send_json(
+                {
+                    **PERMISSIONS.catalog(),
+                    "roles": PERMISSIONS.list_roles(),
+                    "users": list_users(),
+                }
+            )
+            return
+
+        if parsed.path == "/api/roles" and self.command == "POST":
+            context = require_auth(self)
+            require_permission(context, "role_management", "create")
+            require_csrf(self, context)
+            self.send_json({"role": PERMISSIONS.create_role(self.read_json(), context)}, status=HTTPStatus.CREATED)
+            return
+
+        role_match = re.fullmatch(r"/api/roles/(\d+)", parsed.path)
+        if role_match and self.command == "PUT":
+            context = require_auth(self)
+            require_permission(context, "role_management", "update")
+            require_csrf(self, context)
+            self.send_json({"role": PERMISSIONS.update_role(role_match.group(1), self.read_json(), context)})
+            return
+
+        role_permission_match = re.fullmatch(r"/api/roles/(\d+)/permissions", parsed.path)
+        if role_permission_match and self.command == "GET":
+            context = require_auth(self)
+            require_permission(context, "role_management", "view")
+            self.send_json({"permissions": PERMISSIONS.role_permissions(role_permission_match.group(1))})
+            return
+
+        if role_permission_match and self.command == "PUT":
+            context = require_auth(self)
+            require_permission(context, "role_management", "update")
+            require_csrf(self, context)
+            entries = self.read_json().get("permissions")
+            if not isinstance(entries, list):
+                raise ApiError("permissions must be an array.")
+            self.send_json(
+                {
+                    "permissions": PERMISSIONS.replace_role_permissions(
+                        role_permission_match.group(1),
+                        entries,
+                        context,
+                    )
+                }
+            )
+            return
+
+        user_permission_match = re.fullmatch(r"/api/users/(\d+)/permissions", parsed.path)
+        if user_permission_match and self.command == "GET":
+            context = require_auth(self)
+            require_permission(context, "role_management", "view")
+            self.send_json({"permissions": PERMISSIONS.user_permissions(user_permission_match.group(1))})
+            return
+
+        if user_permission_match and self.command == "PUT":
+            context = require_auth(self)
+            require_permission(context, "role_management", "update")
+            require_csrf(self, context)
+            entries = self.read_json().get("permissions")
+            if not isinstance(entries, list):
+                raise ApiError("permissions must be an array.")
+            self.send_json(
+                {
+                    "permissions": PERMISSIONS.replace_user_permissions(
+                        user_permission_match.group(1),
+                        entries,
+                        context,
+                    )
+                }
+            )
+            return
+
         if parsed.path == "/api/users" and self.command == "GET":
             context = require_auth(self)
-            require_role(context, "admin")
+            require_permission(context, "user_management", "view")
             self.send_json({"users": list_users()})
             return
 
         if parsed.path == "/api/users" and self.command == "POST":
             context = require_auth(self)
-            require_role(context, "admin")
+            require_permission(context, "user_management", "create")
             require_csrf(self, context)
             payload = self.read_json()
             username = validate_username(payload.get("username"))
             display_name = text_value(payload.get("displayName")) or username
-            role = text_value(payload.get("role")) or "operator"
-            if role not in {"admin", "operator", "viewer"}:
+            role = text_value(payload.get("roleCode") or payload.get("role")) or "operator"
+            role_id = PERMISSIONS.db.scalar(
+                f"SELECT role_id FROM auth_role WHERE role_code = {sql_quote(role)};"
+            )
+            role_record = PERMISSIONS.role(role_id)
+            if not role_record:
+                raise ApiError("Role does not exist.")
+            if bool(role_record.get("isSuperAdmin")) and not PERMISSIONS.is_super_admin(context):
+                raise ForbiddenError("Only a super administrator can assign a super administrator role.")
+            if False:
                 raise ApiError("账号角色无效。")
-            password = text_value(payload.get("password"))
+            password = validate_password(payload.get("password"))
+            employee_id = validate_employee_binding(payload.get("employeeId"))
+            if not bool(role_record.get("isSuperAdmin")) and not employee_id:
+                raise ApiError("普通账号必须绑定组织架构中的人员。")
             if find_user_by_username(username):
                 raise ConflictError("账号已经存在。")
             run_mysql(
                 f"""
-                INSERT INTO user_account (username, display_name, password_hash, user_role, is_active)
-                VALUES ({sql_quote(username)}, {sql_quote(display_name)}, {sql_quote(password_hash(password))}, {sql_quote(role)}, 1);
+                INSERT INTO user_account (
+                  username, display_name, password_hash, user_role, role_code, employee_id, is_active
+                )
+                VALUES (
+                  {sql_quote(username)}, {sql_quote(display_name)}, {sql_quote(password_hash(password))},
+                  {sql_quote(legacy_role_value(role))}, {sql_quote(role)}, {employee_id or 'NULL'}, 1
+                );
                 """,
                 database=DB_NAME,
             )
@@ -4756,7 +5152,7 @@ class AppHandler(SimpleHTTPRequestHandler):
 
         if parsed.path.startswith("/api/users/") and self.command == "PUT":
             context = require_auth(self)
-            require_role(context, "admin")
+            require_permission(context, "user_management", "update")
             require_csrf(self, context)
             user_id = parsed.path.rsplit("/", 1)[-1]
             target = find_user_by_id(user_id)
@@ -4765,21 +5161,40 @@ class AppHandler(SimpleHTTPRequestHandler):
                 return
             payload = self.read_json()
             display_name = text_value(payload.get("displayName")) or text_value(target.get("displayName")) or text_value(target.get("username"))
-            role = text_value(payload.get("role")) or text_value(target.get("role")) or "operator"
-            if role not in {"admin", "operator", "viewer"}:
+            role = text_value(payload.get("roleCode") or payload.get("role")) or text_value(target.get("role")) or "operator"
+            role_id = PERMISSIONS.db.scalar(
+                f"SELECT role_id FROM auth_role WHERE role_code = {sql_quote(role)};"
+            )
+            role_record = PERMISSIONS.role(role_id)
+            if not role_record:
+                raise ApiError("Role does not exist.")
+            if bool(role_record.get("isSuperAdmin")) and not PERMISSIONS.is_super_admin(context):
+                raise ForbiddenError("Only a super administrator can assign a super administrator role.")
+            if False:
                 raise ApiError("账号角色无效。")
-            active = 1 if bool(payload.get("isActive", target.get("isActive", True))) else 0
-            if user_id == text_value(context.get("id")) and (not active or role != "admin"):
+            active = 1 if parse_bool(
+                payload.get("isActive"),
+                parse_bool(target.get("isActive", True), True),
+            ) else 0
+            employee_id = validate_employee_binding(
+                payload.get("employeeId", target.get("employeeId")),
+                user_id,
+            )
+            if not bool(role_record.get("isSuperAdmin")) and not employee_id:
+                raise ApiError("普通账号必须绑定组织架构中的人员。")
+            if user_id == text_value(context.get("id")) and (not active or not bool(role_record.get("isSuperAdmin"))):
                 raise ApiError("不能停用或降级当前登录的管理员账号。")
             password_clause = ""
-            password = text_value(payload.get("password"))
+            password = validate_password(payload.get("password"), allow_empty=True)
             if password:
                 password_clause = f", password_hash = {sql_quote(password_hash(password))}, failed_attempts = 0, locked_until = NULL"
             run_mysql(
                 f"""
                 UPDATE user_account
                 SET display_name = {sql_quote(display_name)},
-                    user_role = {sql_quote(role)},
+                    user_role = {sql_quote(legacy_role_value(role))},
+                    role_code = {sql_quote(role)},
+                    employee_id = {employee_id or 'NULL'},
                     is_active = {active}{password_clause}
                 WHERE user_id = {sql_quote(user_id)};
                 """,
@@ -4795,12 +5210,13 @@ class AppHandler(SimpleHTTPRequestHandler):
 
         if parsed.path == "/api/settings" and self.command == "GET":
             context = require_auth(self)
+            require_permission(context, "system_settings", "view")
             self.send_json({"settings": settings_payload()})
             return
 
         if parsed.path == "/api/settings" and self.command == "PUT":
             context = require_auth(self)
-            require_role(context, "admin")
+            require_permission(context, "system_settings", "update")
             require_csrf(self, context)
             payload = self.read_json()
             settings = payload.get("settings") or {}
@@ -4874,7 +5290,7 @@ class AppHandler(SimpleHTTPRequestHandler):
 
         if parsed.path == "/api/updates/check" and self.command == "POST":
             context = require_auth(self)
-            require_role(context, "admin")
+            require_permission(context, "system_updates", "update")
             require_csrf(self, context)
             payload = self.read_json(allow_empty=True)
             repository_url = normalize_update_repository_url(payload.get("repositoryUrl", ""))
@@ -4906,14 +5322,14 @@ class AppHandler(SimpleHTTPRequestHandler):
                 "system_update_checked",
                 "",
                 "system_update",
-                f"检查可用版本（{release_channel}）：{repository_url or '服务器默认 origin'}",
+                f"检查 {release_channel} 通道可用版本：{repository_url or '服务器默认 origin'}",
             )
             self.send_json(update_payload)
             return
 
         if parsed.path == "/api/updates/apply" and self.command == "POST":
             context = require_auth(self)
-            require_role(context, "admin")
+            require_permission(context, "system_updates", "update")
             require_csrf(self, context)
             payload = self.read_json()
             target_sha = text_value(payload.get("targetSha")).lower()
@@ -4935,7 +5351,7 @@ class AppHandler(SimpleHTTPRequestHandler):
                 "system_update_queued" if status == "queued" else "system_update_checked",
                 "",
                 "system_update",
-                f"手动选择{release_channel}版本 {target_version}（{target_sha[:7]}），来源：{repository_url or '服务器默认 origin'}",
+                f"手动选择 {release_channel} 版本 {target_version}（{target_sha[:7]}），来源：{repository_url or '服务器默认 origin'}",
             )
             response_status = HTTPStatus.ACCEPTED if status == "queued" else HTTPStatus.OK
             self.send_json(update_payload, status=response_status)
@@ -4943,13 +5359,13 @@ class AppHandler(SimpleHTTPRequestHandler):
 
         if parsed.path == "/api/backups" and self.command == "GET":
             context = require_auth(self)
-            require_role(context, "admin")
+            require_permission(context, "backups", "view")
             self.send_json({"backups": list_database_backups()})
             return
 
         if parsed.path == "/api/backups" and self.command == "POST":
             context = require_auth(self)
-            require_role(context, "admin")
+            require_permission(context, "backups", "create")
             require_csrf(self, context)
             self.read_json(allow_empty=True)
             record = create_database_backup("manual", context)
@@ -4970,7 +5386,7 @@ class AppHandler(SimpleHTTPRequestHandler):
         backup_download_match = re.fullmatch(r"/api/backups/(\d+)/download", parsed.path)
         if backup_download_match and self.command == "POST":
             context = require_auth(self)
-            require_role(context, "admin")
+            require_permission(context, "backups", "export")
             require_csrf(self, context)
             payload = self.read_json()
             current_user = find_user_by_id(text_value(context.get("id")))
@@ -5000,25 +5416,26 @@ class AppHandler(SimpleHTTPRequestHandler):
             self.send_file(file_path, text_value(record.get("fileName")))
             return
 
+        if parsed.path == "/api/state" and self.command != "GET":
+            self.send_json(
+                {
+                    "error": "状态快照接口只支持读取，请使用资源接口和命令接口。",
+                    "code": "STATE_WRITE_RETIRED",
+                },
+                status=HTTPStatus.METHOD_NOT_ALLOWED,
+            )
+            return
+
         if parsed.path == "/api/state" and self.command == "GET":
-            require_auth(self)
+            context = require_auth(self)
             with DB_LOCK:
-                payload = build_state_payload()
+                payload = filter_state_payload(build_state_payload(), context)
             self.send_json(payload)
             return
 
-        if parsed.path == "/api/state" and self.command == "PUT":
-            context = require_auth(self)
-            require_role(context, "admin", "operator")
-            require_csrf(self, context)
-            payload = self.read_json()
-            with DB_LOCK:
-                saved = sync_state(payload, text_value(context.get("username")))
-            self.send_json(saved)
-            return
-
         if parsed.path == "/api/audit-logs" and self.command == "GET":
-            require_auth(self)
+            context = require_auth(self)
+            require_permission(context, "audit_logs", "view")
             with DB_LOCK:
                 payload = query_audit_logs(params)
             self.send_json(payload)
@@ -5152,7 +5569,7 @@ class AppHandler(SimpleHTTPRequestHandler):
     def end_headers(self) -> None:
         origin = self.headers.get("Origin", "")
         parsed_path = urlparse(self.path).path
-        if origin in {"http://127.0.0.1:8000", "http://localhost:8000"}:
+        if origin in {"http://127.0.0.1:8011", "http://localhost:8011"}:
             self.send_header("Access-Control-Allow-Origin", origin)
             self.send_header("Vary", "Origin")
         self.send_header("Content-Security-Policy", SECURITY_CSP)
@@ -5174,7 +5591,7 @@ class AppHandler(SimpleHTTPRequestHandler):
             self.send_header("Pragma", "no-cache")
             self.send_header("Expires", "0")
         self.send_header("Access-Control-Allow-Headers", "Content-Type, X-CSRF-Token")
-        self.send_header("Access-Control-Allow-Methods", "GET, POST, PUT, OPTIONS")
+        self.send_header("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
         super().end_headers()
 
     def do_OPTIONS(self) -> None:

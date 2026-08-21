@@ -48,7 +48,28 @@ for sql_file in "${sql_files[@]}"; do
     exit 1
   fi
   echo "Applying ${sql_file}"
-  "${MYSQL_BIN}" "${mysql_args[@]}" < "${SEED_DIR}/${sql_file}"
+  sed -E '/^[[:space:]]*USE[[:space:]]+[^;]+;[[:space:]]*$/Id' \
+    "${SEED_DIR}/${sql_file}" | "${MYSQL_BIN}" "${mysql_args[@]}"
 done
+
+echo "Recording legacy migration baseline"
+"${MYSQL_BIN}" "${mysql_args[@]}" -e "
+  CREATE TABLE IF NOT EXISTS schema_migration (
+    version VARCHAR(128) NOT NULL,
+    checksum_sha256 CHAR(64) NOT NULL,
+    description VARCHAR(255) NOT NULL DEFAULT '',
+    applied_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    applied_by VARCHAR(128) NOT NULL DEFAULT '',
+    PRIMARY KEY (version)
+  ) ENGINE=InnoDB;
+  INSERT INTO schema_migration (version, checksum_sha256, description, applied_by)
+  VALUES (
+    'legacy-20260813',
+    SHA2('legacy-20260813', 256),
+    'Historical schema baseline recorded by Docker initialization',
+    'docker-init'
+  )
+  ON DUPLICATE KEY UPDATE version = VALUES(version);
+"
 
 echo "Database initialization completed: ${MYSQL_DATABASE}"

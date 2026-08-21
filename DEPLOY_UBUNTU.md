@@ -2,6 +2,8 @@
 
 本文档适用于将本项目部署到 Ubuntu 局域网服务器，并通过 Nginx 提供访问。
 
+> v2.0.0 迁移要求：`database/01_schema.sql` 只用于空库。已有业务库升级前先备份，并使用 `migration_runner.py` 执行已登记基线之后的增量迁移；不要对生产库重放历史初始化 SQL。
+
 ## 1. 部署架构
 
 ```text
@@ -131,6 +133,17 @@ sudo env \
 顺序中。`02_seed_reference_data.sql` 只包含通用物资类型，不包含组织架构、人员、
 办公终端或库存业务数据。组织架构请在系统中按实际情况创建或通过独立的内部初始化
 脚本导入。
+
+空库初始化完成后，登记历史基线并应用增量迁移：
+
+```bash
+cd /opt/office-asset-mgmt
+sudo -u officeasset env \
+  DB_HOST=127.0.0.1 DB_PORT=3306 DB_USER=office_asset_app \
+  DB_NAME=office_asset_mgmt DB_PASSWORD='<从安全环境文件读取>' \
+  MYSQL_BIN=/usr/bin/mysql \
+  python3 migration_runner.py --database office_asset_mgmt --mark-baseline legacy-20260813
+```
 
 ## 5. 配置服务环境变量
 
@@ -279,6 +292,19 @@ sudo systemctl status office-asset-mgmt
 ```
 
 如果数据库结构有变化，先备份数据库，再按版本说明执行对应 SQL。
+
+v2.0.0 及以后使用迁移执行器校验并执行增量迁移：
+
+```bash
+cd /opt/office-asset-mgmt
+sudo -u officeasset env \
+  DB_HOST=127.0.0.1 DB_PORT=3306 DB_USER=office_asset_app \
+  DB_NAME=office_asset_mgmt DB_PASSWORD='<从安全环境文件读取>' \
+  MYSQL_BIN=/usr/bin/mysql \
+  python3 migration_runner.py --database office_asset_mgmt --verify
+```
+
+如果已有库没有 `schema_migration`，不要自动补表后直接升级。完成备份并确认历史基线后，显式加上 `--mark-baseline legacy-20260813` 执行一次。
 
 恢复文本 SQL 时，先停止服务并确认目标数据库名，再启用 MySQL 二进制模式：
 

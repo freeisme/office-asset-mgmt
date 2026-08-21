@@ -7,11 +7,27 @@ const API_AUTH_BOOTSTRAP_STATUS_URL = "/api/auth/bootstrap-status";
 const API_AUTH_BOOTSTRAP_URL = "/api/auth/bootstrap";
 const API_AUTH_LOGOUT_URL = "/api/auth/logout";
 const API_AUTH_CHANGE_PASSWORD_URL = "/api/auth/change-password";
+const API_AUTH_PERMISSIONS_URL = "/api/auth/permissions";
 const API_USERS_URL = "/api/users";
+const API_ACCESS_CONTROL_URL = "/api/access-control";
+const API_ROLES_URL = "/api/roles";
 const API_SETTINGS_URL = "/api/settings";
 const API_BACKUPS_URL = "/api/backups";
 const API_UPDATE_CHECK_URL = "/api/updates/check";
 const API_UPDATE_APPLY_URL = "/api/updates/apply";
+const API_RESOURCES_URL = "/api/resources";
+const API_TICKETS_URL = "/api/tickets";
+const API_SERVICE_FORMS_URL = "/api/service/forms";
+const API_SERVICE_FORM_PERMISSIONS_URL = "/permissions";
+const API_CHANGES_URL = "/api/changes";
+const API_PROBLEMS_URL = "/api/problems";
+const API_KNOWLEDGE_URL = "/api/knowledge";
+const API_SLA_POLICIES_URL = "/api/sla/policies";
+const API_APPROVALS_URL = "/api/approvals";
+const API_WORKFLOWS_URL = "/api/approval-workflows";
+const API_NOTIFICATIONS_URL = "/api/notifications";
+const API_SYNC_RUNS_URL = "/api/sync-runs";
+const API_QUALITY_ISSUES_URL = "/api/data-quality/issues";
 const THEME_STORAGE_KEY = "office-asset-center-theme-v1";
 const UPDATE_RELEASE_CHANNELS = {
   release: "发行版",
@@ -77,6 +93,22 @@ const pageMeta = {
     title: "操作日志",
     description: "记录设备状态变更和人员 IT 物资领用变化。",
   },
+  tickets: {
+    title: "工单",
+    description: "统一受理故障、服务请求、变更和问题，记录处理过程并保留审批历史。",
+  },
+  serviceManagement: {
+    title: "服务管理",
+    description: "管理工单、变更、问题、知识库、SLA、审批和消息通知。",
+  },
+  formDesigner: {
+    title: "表单设计",
+    description: "配置业务字段、流程、列表和表单权限。",
+  },
+  governance: {
+    title: "Sync and Quality",
+    description: "Stage external data for validation before applying it, and review asset data quality.",
+  },
   settings: {
     title: "设置",
     description: "管理系统参数、账号和个人登录安全。",
@@ -96,9 +128,19 @@ const statusLabels = {
 
 const roleLabels = {
   admin: "管理员",
+  super_admin: "超级管理员",
   operator: "操作员",
   viewer: "只读用户",
+  user: "普通用户",
 };
+
+const roleCategoryLabels = {
+  admin: "管理员",
+  ordinary: "普通用户",
+  custom: "自定义角色",
+};
+
+const roleCategoryOptions = Object.entries(roleCategoryLabels).map(([value, label]) => ({ value, label }));
 
 const deviceTypeLabels = {
   laptop: "笔记本",
@@ -125,31 +167,140 @@ let pendingLeaveRecovery = null;
 let pendingDeviceRecovery = null;
 let filterSearchDrafts = {};
 let authState = { authenticated: false, user: null, bootstrapRequired: false };
-let lastRenderedPage = "";
+let ticketFormDraft = { forms: [], selectedCode: "" };
+let serviceRecordFormDrafts = {
+  change: { forms: [], selectedCode: "" },
+  problem: { forms: [], selectedCode: "" },
+};
+let formDesignerState = {
+  formId: "",
+  form: null,
+  selectedFieldKey: "",
+  selectedWorkflowStepIndex: -1,
+  activePanel: "form",
+  permissions: [],
+  loading: false,
+  dirty: false,
+};
 let settingsState = {
   settings: {},
   users: [],
   backups: [],
   loaded: false,
+  view: "system",
   updateStatus: null,
   updateChecking: false,
   updateApplying: false,
   updateSelectedSha: "",
   updateRepositoryUrl: "",
   updateReleaseChannel: DEFAULT_UPDATE_RELEASE_CHANNEL,
+  accessControl: {
+    modules: [],
+    roles: [],
+    users: [],
+    targetType: "role",
+    targetId: "",
+    permissions: [],
+    loading: false,
+  },
 };
 let authBootPromise = null;
+let operationsState = {
+  tickets: [],
+  syncRuns: [],
+  qualityIssues: [],
+  ticketLoading: false,
+  governanceLoading: false,
+  service: {
+    view: "tickets",
+    loading: false,
+    changes: [],
+    problems: [],
+    articles: [],
+    forms: [],
+    policies: [],
+    approvals: [],
+    workflows: [],
+    workflowUsers: [],
+    workflowRoles: [],
+    notifications: [],
+  },
+};
 
 function authRoleLabel(role) {
   return roleLabels[role] || role || "未知角色";
 }
 
+function unreadNotificationCount() {
+  return (serviceState().notifications || []).filter((item) => !item.isRead).length;
+}
+
 function isAdminUser() {
-  return authState.user?.role === "admin";
+  return Boolean(authState.user?.isSuperAdmin);
 }
 
 function canWriteState() {
-  return ["admin", "operator"].includes(authState.user?.role);
+  return [
+    "it_assets",
+    "employees",
+    "organizations",
+    "inventory_catalog",
+    "inventory_operations",
+  ].some((moduleCode) => hasPermission(moduleCode, "create") || hasPermission(moduleCode, "update"));
+}
+
+function hasPermission(moduleCode, action = "view") {
+  if (authState.user?.isSuperAdmin) return true;
+  const permission = (authState.permissions || []).find(
+    (item) => item.moduleCode === moduleCode && item.actionCode === action,
+  );
+  return Boolean(permission?.[`can${action.charAt(0).toUpperCase()}${action.slice(1)}`]);
+}
+
+const serviceViewModules = {
+  tickets: "tickets",
+  changes: "changes",
+  problems: "problems",
+  knowledge: "knowledge",
+  forms: "forms",
+  policies: "sla",
+  approvals: "approvals",
+  notifications: "notifications",
+};
+
+function canViewServiceView(view) {
+  return hasPermission(serviceViewModules[view] || "", "view");
+}
+
+function availableServiceViews() {
+  return Object.keys(serviceViewModules).filter(canViewServiceView);
+}
+
+function normalizeServiceView() {
+  const service = serviceState();
+  if (!canViewServiceView(service.view)) {
+    service.view = availableServiceViews()[0] || "tickets";
+  }
+  return service.view;
+}
+
+function canViewPage(page) {
+  if (page === "serviceManagement") return availableServiceViews().length > 0;
+  const modules = {
+    dashboard: "dashboard",
+    computers: "it_assets",
+    employees: "employees",
+    leftEmployees: "employees",
+    inventory: "inventory_catalog",
+    flowControl: "inventory_operations",
+    dictionary: "organizations",
+    audit: "audit_logs",
+    tickets: "tickets",
+    formDesigner: "forms",
+    governance: "sync",
+    settings: "system_settings",
+  };
+  return hasPermission(modules[page] || "dashboard", "view");
 }
 
 function createId(prefix) {
@@ -161,9 +312,7 @@ function createId(prefix) {
 
 function getSeedState() {
   const orgs = [
-    { id: "1", code: "KPLUS", name: "K+", parentId: "", sortOrder: 10 },
-    { id: "2", code: "SZNS", name: "苏州诺思", parentId: "1", sortOrder: 10 },
-    { id: "3", code: "NTKD", name: "南通科德", parentId: "1", sortOrder: 20 },
+    { id: "1", code: "HQ", name: "总部", parentId: "", sortOrder: 10 },
   ];
 
   return {
@@ -181,14 +330,6 @@ function getSeedState() {
       inventorySearch: "",
       inventoryType: "",
       inventoryBrand: "",
-      flowSearch: "",
-      flowType: "",
-      flowAction: "",
-      flowCategory: "",
-      flowEmployee: "",
-      flowSourceTarget: "",
-      flowStartDate: "",
-      flowEndDate: "",
       auditSearch: "",
       auditAction: "",
       auditCategory: "",
@@ -495,71 +636,7 @@ function normalizeOrgs(orgs) {
   }));
 }
 
-const orgCodeOverrides = {
-  "产品部": "CP",
-  "流程IT与质量部": "ITQ",
-  "稽核审计与持续改善组": "JHSJ",
-  "稽核审计与改善组": "JHSJ",
-  "财务部": "CW",
-  "人事行政部": "RSXZ",
-  "研发中心": "YF",
-  "光敏树脂部": "GMSZ",
-  "工程技术部": "GCJS",
-  "供应链管理部": "GYLG",
-  "计划与控制部": "JHKZ",
-  "营销中心": "YX",
-  "苏州工厂": "SZGC",
-  "南通科德": "NTKD",
-  "苏州诺思": "SZNS",
-  "K+": "KPLUS",
-  "PMC": "PMC",
-  "仓库": "CK",
-  "其他": "QT",
-  "包装": "BZ",
-  "品质部": "PZ",
-  "公共设备": "GG",
-  "仓储物流部": "CCWL",
-  "成品包装课": "CPBZ",
-  "生产部": "SC",
-  "设备部": "SB",
-  "行政部": "XZ",
-  "仓储部": "CC",
-  "品质": "PZ",
-  "技术部": "JS",
-  "采购部": "CG",
-  "基础材料生产部": "JCSC",
-  "材料成型及包装部": "CLXJBZ",
-  "树脂生产课": "SZSC",
-  "高性能材料成型课": "GXXCX",
-  "光敏树脂组": "GMSZ",
-  "创新组": "CX",
-  "医用材料组": "YYCL",
-  "实验室": "SY",
-  "工艺组": "GY",
-  "材料开发组": "CLKF",
-  "测试应用组": "CSYY",
-  "颜色开发组": "YSKF",
-  "Amazon": "AMZ",
-  "品牌设计组": "PPSJ",
-  "国内业务部": "GN",
-  "国内大客户": "GNDKH",
-  "国内电商": "GDS",
-  "新媒体运营组": "XMTY",
-  "海外业务部": "HW",
-  "海外大客户": "HWDKH",
-  "NPI项目组": "NPI",
-  "包装部": "BZ",
-  "流程管理组": "LCGL",
-  "IT部": "IT",
-  "品质管理部": "PZGL",
-  "基础材料成型课": "JCCX",
-  "生产一班": "SCYB",
-  "生产二班": "SCEB",
-  "Kexcelled": "KEX",
-  "justMaker": "JM",
-  "包装8组": "BZ8",
-  "包装二组": "BZE",
-};
+const orgCodeOverrides = {};
 
 const chineseInitialFallbacks = {
   产: "C", 人: "R", 事: "S", 行: "X", 政: "Z", 研: "Y", 发: "F", 光: "G", 敏: "M", 树: "S",
@@ -613,7 +690,7 @@ function employeeNumberPrefix(orgId) {
     current = current.parentId ? getOrg(current.parentId) : null;
   }
   const codes = path.filter(Boolean);
-  if (codes[0] === "KPLUS") codes.shift();
+  if (codes.length > 1) codes.shift();
   return codes.join("-") || "ORG";
 }
 
@@ -682,12 +759,22 @@ function requestJson(url, options = {}) {
           users: [],
           backups: [],
           loaded: false,
+          view: "system",
           updateStatus: null,
           updateChecking: false,
           updateApplying: false,
           updateSelectedSha: "",
           updateRepositoryUrl: "",
           updateReleaseChannel: DEFAULT_UPDATE_RELEASE_CHANNEL,
+          accessControl: {
+            modules: [],
+            roles: [],
+            users: [],
+            targetType: "role",
+            targetId: "",
+            permissions: [],
+            loading: false,
+          },
         };
         authBootPromise = null;
         startAuth();
@@ -696,6 +783,57 @@ function requestJson(url, options = {}) {
     }
     return payload;
   });
+}
+
+function newIdempotencyKey(operation) {
+  const suffix =
+    window.crypto && typeof window.crypto.randomUUID === "function"
+      ? window.crypto.randomUUID()
+      : `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+  return `${operation}-${suffix}`;
+}
+
+function saveResource(resourceType, resourceId, payload) {
+  const suffix = resourceId ? `/${encodeURIComponent(resourceId)}` : "";
+  return requestJson(`${API_RESOURCES_URL}/${encodeURIComponent(resourceType)}${suffix}`, {
+    method: resourceId ? "PUT" : "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
+function runCommand(url, payload, operation) {
+  return requestJson(url, {
+    method: "POST",
+    headers: { "Idempotency-Key": newIdempotencyKey(operation) },
+    body: JSON.stringify(payload),
+  });
+}
+
+async function reloadDomainState() {
+  await hydrateStateFromServer({ toast: false });
+}
+
+async function activeAllocations() {
+  const payload = await requestJson("/api/inventory/allocations?status=active");
+  return Array.isArray(payload.allocations) ? payload.allocations : [];
+}
+
+async function returnUsageAllocations(employeeId, allocationType, usageRecordId, notes = "") {
+  const allocations = await activeAllocations();
+  const matches = allocations.filter(
+    (item) =>
+      item.employeeId === String(employeeId) &&
+      item.allocationType === allocationType &&
+      item.usageRecordId === String(usageRecordId),
+  );
+  for (const allocation of matches) {
+    await runCommand(
+      `/api/inventory/allocations/${encodeURIComponent(allocation.id)}/return`,
+      { notes },
+      "inventory-return",
+    );
+  }
+  return matches.length;
 }
 
 async function requestDownload(url, body = {}) {
@@ -835,6 +973,27 @@ function updateAuthenticatedChrome() {
   if (brandName) brandName.textContent = settingsState.settings.app_name || "办公资产";
   if (brandSubtitle) brandSubtitle.textContent = "管理中台";
   appShell.classList.toggle("is-read-only", !canWriteState());
+  const quickTicket = document.querySelector('[data-action="quick-create-ticket"]');
+  if (quickTicket) quickTicket.hidden = !hasPermission("tickets", "create");
+  const notificationButton = document.querySelector('[data-action="open-notifications"]');
+  if (notificationButton) notificationButton.hidden = !hasPermission("notifications", "view");
+  const notificationCount = document.querySelector("[data-notification-count]");
+  const unreadCount = unreadNotificationCount();
+  if (notificationCount) {
+    notificationCount.textContent = unreadCount > 99 ? "99+" : String(unreadCount);
+    notificationCount.hidden = unreadCount < 1;
+  }
+}
+
+async function refreshNotificationSummary() {
+  if (!authState.authenticated || !hasPermission("notifications", "view")) return;
+  try {
+    const payload = await requestJson(API_NOTIFICATIONS_URL);
+    serviceState().notifications = Array.isArray(payload.notifications) ? payload.notifications : [];
+    updateAuthenticatedChrome();
+  } catch (error) {
+    console.error("Unable to load notification summary", error);
+  }
 }
 
 async function loadSettingsState(options = {}) {
@@ -843,10 +1002,15 @@ async function loadSettingsState(options = {}) {
   if (options.users && isAdminUser()) {
     const usersPayload = await requestJson(API_USERS_URL);
     settingsState.users = Array.isArray(usersPayload.users) ? usersPayload.users : [];
+    await loadAccessControl();
   }
   if (isAdminUser()) {
     const backupsPayload = await requestJson(API_BACKUPS_URL);
     settingsState.backups = Array.isArray(backupsPayload.backups) ? backupsPayload.backups : [];
+  } else {
+    settingsState.backups = [];
+  }
+  if (hasPermission("system_updates", "update")) {
     settingsState.updateRepositoryUrl = Object.prototype.hasOwnProperty.call(
       settingsState.settings,
       "update_repository_url",
@@ -854,7 +1018,6 @@ async function loadSettingsState(options = {}) {
       ? settingsState.settings.update_repository_url || ""
       : settingsState.updateRepositoryUrl || "";
   } else {
-    settingsState.backups = [];
     settingsState.updateRepositoryUrl = "";
   }
   settingsState.loaded = true;
@@ -862,12 +1025,55 @@ async function loadSettingsState(options = {}) {
   return settingsState;
 }
 
+async function loadAccessControl() {
+  if (!isAdminUser()) return;
+  const access = accessControlState();
+  access.loading = true;
+  const payload = await requestJson(API_ACCESS_CONTROL_URL);
+  access.modules = Array.isArray(payload.modules) ? payload.modules : [];
+  access.roles = Array.isArray(payload.roles) ? payload.roles : [];
+  access.users = Array.isArray(payload.users) ? payload.users : [];
+  access.roles.forEach((role) => {
+    if (role.code) roleLabels[role.code] = role.name || role.code;
+  });
+  if (!access.targetId) {
+    access.targetId =
+      access.targetType === "role"
+        ? String(access.roles[0]?.id || "")
+        : String(access.users[0]?.id || "");
+  }
+  access.loading = false;
+  await loadAccessControlTarget();
+}
+
+async function loadAccessControlTarget() {
+  const access = accessControlState();
+  if (!access.targetId) {
+    access.permissions = [];
+    return;
+  }
+  const endpoint =
+    access.targetType === "role"
+      ? `${API_ROLES_URL}/${encodeURIComponent(access.targetId)}/permissions`
+      : `${API_USERS_URL}/${encodeURIComponent(access.targetId)}/permissions`;
+  const payload = await requestJson(endpoint);
+  access.permissions = Array.isArray(payload.permissions) ? payload.permissions : [];
+}
+
 async function enterAuthenticatedSession(payload) {
   authState = {
     authenticated: true,
     user: payload.user || null,
     bootstrapRequired: false,
+    permissions: [],
   };
+  try {
+    const permissionPayload = await requestJson(API_AUTH_PERMISSIONS_URL);
+    authState.permissions = Array.isArray(permissionPayload.permissions) ? permissionPayload.permissions : [];
+    if (authState.user) authState.user.isSuperAdmin = Boolean(permissionPayload.isSuperAdmin);
+  } catch (error) {
+    console.error("Unable to load permissions", error);
+  }
   updateAuthenticatedChrome();
   try {
     await loadSettingsState({ users: isAdminUser() });
@@ -875,6 +1081,7 @@ async function enterAuthenticatedSession(payload) {
     console.error("Unable to load authenticated settings", error);
   }
   await hydrateStateFromServer({ toast: false });
+  refreshNotificationSummary();
   render();
 }
 
@@ -936,12 +1143,22 @@ async function logout() {
     users: [],
     backups: [],
     loaded: false,
+    view: "system",
     updateStatus: null,
     updateChecking: false,
     updateApplying: false,
     updateSelectedSha: "",
     updateRepositoryUrl: "",
     updateReleaseChannel: DEFAULT_UPDATE_RELEASE_CHANNEL,
+    accessControl: {
+      modules: [],
+      roles: [],
+      users: [],
+      targetType: "role",
+      targetId: "",
+      permissions: [],
+      loading: false,
+    },
   };
   document.querySelector("#modalRoot").innerHTML = "";
   authBootPromise = null;
@@ -991,32 +1208,9 @@ async function refreshAuditLogs(options = {}) {
 
 function persistState(syncRemote = false) {
   window.localStorage.setItem(UI_STORAGE_KEY, JSON.stringify(extractUiState(state)));
-  if (!syncRemote) return remoteSyncQueue;
-
-  remoteSyncQueue = remoteSyncQueue
-    .catch(() => undefined)
-    .then(async () => {
-      normalizeComputersAgainstEmployees();
-      const payload = await requestJson(API_STATE_URL, {
-        method: "PUT",
-        body: JSON.stringify(extractDataState(state)),
-      });
-      applyRemoteState(payload);
-      state.auditLogTotal = state.auditLogs.length;
-      await refreshAuditLogs({ silent: true });
-      window.localStorage.setItem(UI_STORAGE_KEY, JSON.stringify(extractUiState(state)));
-      render();
-    })
-    .catch((error) => {
-      console.error("Unable to sync state to database", error);
-      if (error.status === 409 || error.code === "STATE_CONFLICT") {
-        showToast("数据库数据已被其他页面更新，请刷新后再保存", true);
-        hydrateStateFromServer({ toast: false });
-        return;
-      }
-      showToast(`数据库同步失败：${error.message}`, true);
-    });
-
+  if (syncRemote) {
+    console.warn("Snapshot writes are retired. Use a resource or command API for business changes.");
+  }
   return remoteSyncQueue;
 }
 
@@ -1025,7 +1219,6 @@ async function hydrateStateFromServer(options = {}) {
     const payload = await requestJson(API_STATE_URL);
     applyRemoteState(payload);
     state.auditLogTotal = state.auditLogs.length;
-    await refreshAuditLogs({ silent: true });
     window.localStorage.setItem(UI_STORAGE_KEY, JSON.stringify(extractUiState(state)));
     render();
     if (options.toast) showToast("已从数据库加载最新数据");
@@ -1375,6 +1568,27 @@ function flowRecordCategory(log) {
   return flowRecordDefinition(log, log?.direction).category;
 }
 
+function flowRecordActionClass(log) {
+  const action = String(log?.triggerAction || "");
+  if (["assignment", "delete_type", "delete_inventory_model"].includes(action)) return "audit-action-outbound";
+  if (
+    [
+      "return",
+      "return_adjustment",
+      "employee_device_recovery",
+      "leave_recovery",
+      "employee_delete_recovery",
+      "delete_monitor",
+      "delete_nonasset",
+    ].includes(action)
+  ) {
+    return "audit-action-return";
+  }
+  if (["manual_adjustment", "computer_inventory_adjustment"].includes(action)) return "audit-action-adjustment";
+  if (["import", "manual_create"].includes(action)) return "audit-action-inbound";
+  return log?.direction === "decrease" ? "audit-action-outbound" : "audit-action-inbound";
+}
+
 function flowRecordStockImpact(log) {
   const definition = flowRecordDefinition(log, log?.direction);
   if (definition.stockDelta === 0) return "不变";
@@ -1383,7 +1597,7 @@ function flowRecordStockImpact(log) {
 
 function flowRecordImpactClass(log) {
   const impact = flowRecordStockImpact(log);
-  if (impact === "不变") return "audit-action-assignment";
+  if (impact === "不变") return "audit-action-adjustment";
   return inventoryDirectionClass(log.direction);
 }
 
@@ -1396,18 +1610,21 @@ function flowRecordDate(log) {
 }
 
 function flowRecordTypeOptions() {
-  return [...new Set(state.inventoryMovementLogs.map((log) => String(log.typeName || "").trim()).filter(Boolean))]
-    .sort((left, right) => left.localeCompare(right, "zh-CN"));
+  return [...new Set(state.inventoryMovementLogs.map((log) => String(log.typeName || "").trim()).filter(Boolean))].sort(
+    (left, right) => left.localeCompare(right, "zh-CN"),
+  );
 }
 
 function flowRecordActionOptions() {
-  return [...new Set(state.inventoryMovementLogs.map((log) => flowRecordActionLabel(log)))]
-    .sort((left, right) => left.localeCompare(right, "zh-CN"));
+  return [...new Set(state.inventoryMovementLogs.map((log) => flowRecordActionLabel(log)))].sort((left, right) =>
+    left.localeCompare(right, "zh-CN"),
+  );
 }
 
 function flowRecordCategoryOptions() {
-  return [...new Set(state.inventoryMovementLogs.map((log) => flowRecordCategory(log)))]
-    .sort((left, right) => left.localeCompare(right, "zh-CN"));
+  return [...new Set(state.inventoryMovementLogs.map((log) => flowRecordCategory(log)))].sort((left, right) =>
+    left.localeCompare(right, "zh-CN"),
+  );
 }
 
 function hasFlowRecordFilters() {
@@ -1435,18 +1652,15 @@ function getFilteredFlowRecords() {
 
   return [...state.inventoryMovementLogs]
     .filter((log) => {
-      const logAction = flowRecordActionLabel(log);
-      const logCategory = flowRecordCategory(log);
       const itemText = flowRecordFilterText([log.typeName, log.brandName, log.modelName, log.note].join(" "));
       const relatedEmployeeText = flowRecordFilterText([log.relatedEmployeeName, log.relatedEmployeeNo].join(" "));
       const sourceTargetText = flowRecordFilterText([log.sourceLabel, log.targetLabel].join(" "));
       const recordDate = flowRecordDate(log);
-
       return (
         (!search || itemText.includes(search)) &&
         (!type || String(log.typeName || "") === type) &&
-        (!action || logAction === action) &&
-        (!category || logCategory === category) &&
+        (!action || flowRecordActionLabel(log) === action) &&
+        (!category || flowRecordCategory(log) === category) &&
         (!employee || relatedEmployeeText.includes(employee)) &&
         (!sourceTarget || sourceTargetText.includes(sourceTarget)) &&
         (!startDate || (recordDate && recordDate >= startDate)) &&
@@ -2381,7 +2595,7 @@ function openDeviceRecoveryConfirm(employeeId, kind) {
   );
 }
 
-function confirmDeviceRecovery() {
+async function confirmDeviceRecovery() {
   const pending = pendingDeviceRecovery;
   pendingDeviceRecovery = null;
   if (!pending) return;
@@ -2391,28 +2605,27 @@ function confirmDeviceRecovery() {
     render();
     return;
   }
-  pending.devices.forEach((device) =>
-    returnDeviceToInventory(device, {
-      sourceLabel: employeeLogLabel(employee.employeeNo, employee.name),
-      targetLabel: "IT物资库存",
-      note: device.category === "monitor" ? "人员显示屏回收入库" : "人员非资产设备回收入库",
-      relatedEmployeeNo: employee.employeeNo || "",
-      relatedEmployeeName: employee.name || "",
-      triggerAction: "employee_device_recovery",
-    }),
-  );
-  if (pending.kind === "monitor") {
-    const removedIds = new Set(pending.devices.map((device) => device.sourceId));
-    employee.monitors = (employee.monitors || []).filter((monitor) => !removedIds.has(monitor.id));
-  } else {
-    const removedIds = new Set(pending.devices.map((device) => device.sourceId));
-    employee.nonAssetItems = getNonAssetItems(employee).filter((item) => !removedIds.has(item.id));
-    syncNonAssetAggregate(employee);
+  try {
+    for (const device of pending.devices) {
+      const returned = await returnUsageAllocations(
+        employee.id,
+        pending.kind === "monitor" ? "monitor" : "non_asset",
+        device.sourceId,
+        device.category === "monitor" ? "Employee monitor recovery" : "Employee device recovery",
+      );
+      if (!returned) {
+        throw new Error("This usage record has no tracked allocation. Reconcile it before returning.");
+      }
+    }
+    await reloadDomainState();
+  } catch (error) {
+    showToast(`物资回收失败：${error.message}`, true);
+    pendingDeviceRecovery = pending;
+    openDeviceRecoveryConfirm(pending.employeeId, pending.kind);
+    return;
   }
-  persistState(true);
   closeModal();
   openDeviceManager(employee.id);
-  render();
   showToast(`已回收 ${pending.devices.length} 条物资并入库`);
 }
 
@@ -2508,20 +2721,23 @@ function render() {
     renderAuthScreen();
     return;
   }
+  if (!canViewPage(state.page)) {
+    const fallback = [...document.querySelectorAll(".nav-item")]
+      .map((item) => item.dataset.page)
+      .find((page) => canViewPage(page));
+    state.page = fallback || "dashboard";
+  }
   const meta = pageMeta[state.page] || pageMeta.dashboard;
   const appName = settingsState.settings.app_name || "办公资产管理系统";
   document.title = `${meta.title} · ${appName}`;
   document.querySelector("#pageTitle").textContent = meta.title;
+  ensureServiceNavigation();
   document.querySelectorAll(".nav-item").forEach((item) => {
+    item.hidden = !canViewPage(item.dataset.page || "");
     item.classList.toggle("is-active", item.dataset.page === state.page);
   });
   updateAuthenticatedChrome();
-  const appContent = document.querySelector("#appContent");
-  appContent.innerHTML = renderPage();
-  const pageChanged = state.page !== lastRenderedPage;
-  appContent.classList.toggle("page-enter", pageChanged);
-  if (pageChanged) void appContent.offsetWidth;
-  lastRenderedPage = state.page;
+  document.querySelector("#appContent").innerHTML = `<div class="page-enter">${renderPage()}</div>`;
 }
 
 function isDeferredTextFilter(filterName) {
@@ -2577,6 +2793,10 @@ function renderPage() {
   if (state.page === "flowControl") return renderFlowControlPage();
   if (state.page === "dictionary") return renderDictionaryPage();
   if (state.page === "audit") return renderAuditPage();
+  if (state.page === "tickets") return renderTicketsPage();
+  if (state.page === "serviceManagement") return renderServiceManagementPage();
+  if (state.page === "formDesigner") return renderServiceFormDesignerPage();
+  if (state.page === "governance") return renderGovernancePage();
   if (state.page === "settings") return renderSettingsPage();
   return renderDashboardPage();
 }
@@ -2587,13 +2807,14 @@ function renderSettingsUserTable() {
     return '<div class="empty-state">暂无账号记录</div>';
   }
   return `<div class="table-wrap"><table class="settings-users-table">
-    <thead><tr><th>账号</th><th>显示名称</th><th>角色</th><th>状态</th><th>最后登录</th><th>创建时间</th><th>操作</th></tr></thead>
+    <thead><tr><th>账号</th><th>显示名称</th><th>绑定人员</th><th>角色</th><th>状态</th><th>最后登录</th><th>创建时间</th><th>操作</th></tr></thead>
     <tbody>${users
       .map((user) => {
         const isCurrent = String(user.id) === String(authState.user?.id);
         return `<tr>
           <td><strong>${escapeHtml(user.username)}</strong>${isCurrent ? '<span class="current-account-mark">当前账号</span>' : ""}</td>
           <td>${escapeHtml(user.displayName || "—")}</td>
+          <td>${escapeHtml(user.employeeName ? `${user.employeeName} · ${user.department || user.orgName || ""}` : "未绑定")}</td>
           <td><span class="role-pill role-${escapeHtml(user.role)}">${escapeHtml(authRoleLabel(user.role))}</span></td>
           <td>${user.isActive ? '<span class="status-pill status-active">启用</span>' : '<span class="status-pill status-inactive">停用</span>'}</td>
           <td>${escapeHtml(formatDateTime(user.lastLoginAt || ""))}</td>
@@ -2603,6 +2824,215 @@ function renderSettingsUserTable() {
       })
       .join("")}</tbody>
   </table></div>`;
+}
+
+const permissionActions = [
+  ["view", "查看"],
+  ["create", "新增"],
+  ["update", "修改"],
+  ["delete", "删除"],
+  ["approve", "审批"],
+  ["export", "导出"],
+];
+
+function accessControlState() {
+  if (!settingsState.accessControl) {
+    settingsState.accessControl = {
+      modules: [],
+      roles: [],
+      users: [],
+      targetType: "role",
+      targetId: "",
+      permissions: [],
+      loading: false,
+    };
+  }
+  return settingsState.accessControl;
+}
+
+function permissionFlag(action) {
+  return `can${action.charAt(0).toUpperCase()}${action.slice(1)}`;
+}
+
+function permissionMatrixRows() {
+  const access = accessControlState();
+  const byKey = new Map(
+    (access.permissions || []).map((item) => [`${item.moduleCode}:${item.actionCode}`, item]),
+  );
+  return (access.modules || []).map((module) => {
+    const scope =
+      (access.permissions || []).find((item) => item.moduleCode === module.code)?.dataScope || "none";
+    return {
+      module,
+      scope,
+      actions: Object.fromEntries(
+        permissionActions.map(([action]) => [
+          action,
+          Boolean(byKey.get(`${module.code}:${action}`)?.[permissionFlag(action)]),
+        ]),
+      ),
+    };
+  });
+}
+
+function renderPermissionGrid() {
+  const access = accessControlState();
+  if (!access.targetId) {
+    return '<div class="empty-state">请选择角色或用户配置权限。</div>';
+  }
+  const rows = permissionMatrixRows();
+  return `<form data-form="access-permissions" data-target-type="${escapeHtml(
+    access.targetType,
+  )}" data-target-id="${escapeHtml(access.targetId)}">
+    <div class="table-wrap">
+      <table class="settings-users-table permission-matrix">
+        <thead><tr><th>模块</th>${permissionActions
+          .map(([, label]) => `<th>${label}</th>`)
+          .join("")}<th>数据范围</th></tr></thead>
+        <tbody>${rows
+          .map(
+            (row) => `<tr>
+              <td><strong>${escapeHtml(row.module.name || row.module.code)}</strong><small>${escapeHtml(
+                row.module.code,
+              )}</small></td>
+              ${permissionActions
+                .map(
+                  ([action]) =>
+                    `<td><input type="checkbox" data-permission="${escapeHtml(
+                      `${row.module.code}:${action}`,
+                    )}" ${row.actions[action] ? "checked" : ""} /></td>`,
+                )
+                .join("")}
+              <td><select data-permission-scope="${escapeHtml(row.module.code)}">
+        ${["all", "organization", "own", "submitted", "assigned", "none"]
+          .map(
+            (scope) =>
+                      `<option value="${scope}" ${scope === row.scope ? "selected" : ""}>${{
+                        all: "全部数据",
+                        organization: "所属部门及下属部门",
+                        own: "本人数据",
+                        submitted: "本人提交",
+                        assigned: "本人负责",
+                        none: "无数据",
+                      }[scope]}</option>`,
+                  )
+                  .join("")}
+              </select></td>
+            </tr>`,
+          )
+          .join("")}</tbody>
+      </table>
+    </div>
+    <div class="modal-footer settings-form-footer">
+      <button class="primary-button" type="submit">保存权限</button>
+    </div>
+  </form>`;
+}
+
+function renderRoleCreationPermissionGrid() {
+  const access = accessControlState();
+  const modules = access.modules || [];
+  if (!modules.length) {
+    return '<div class="empty-state">正在读取权限模块...</div>';
+  }
+  return `<div class="table-wrap">
+    <table class="settings-users-table permission-matrix role-create-permission-matrix">
+      <thead><tr><th>模块</th>${permissionActions
+        .map(([, label]) => `<th>${label}</th>`)
+        .join("")}<th>数据范围</th></tr></thead>
+      <tbody>${modules
+        .map(
+          (module) => `<tr>
+            <td><strong>${escapeHtml(module.name || module.code)}</strong><small>${escapeHtml(module.code)}</small></td>
+            ${permissionActions
+              .map(
+                ([action]) =>
+                  `<td><input type="checkbox" data-role-permission="${escapeHtml(
+                    `${module.code}:${action}`,
+                  )}" /></td>`,
+              )
+              .join("")}
+            <td><select data-role-permission-scope="${escapeHtml(module.code)}">
+              ${[
+                ["all", "全部数据"],
+                ["organization", "所属部门及下属部门"],
+                ["own", "本人数据"],
+                ["submitted", "本人提交"],
+                ["assigned", "本人负责"],
+                ["none", "无数据"],
+              ]
+                .map(([value, label]) => `<option value="${value}" ${value === "none" ? "selected" : ""}>${label}</option>`)
+                .join("")}
+            </select></td>
+          </tr>`,
+        )
+        .join("")}</tbody>
+    </table>
+  </div>`;
+}
+
+function renderAccessControlPanel() {
+  if (!isAdminUser()) {
+    return '<section class="data-panel settings-readonly-note"><strong>角色与权限</strong><span>只有超级管理员可以配置角色、模块权限和数据范围。</span></section>';
+  }
+  const access = accessControlState();
+  const selectedRole = access.targetType === "role" ? String(access.targetId || "") : "";
+  const selectedUser = access.targetType === "user" ? String(access.targetId || "") : "";
+  return `<div class="settings-access-layout">
+    <section class="data-panel settings-panel">
+      <div class="section-heading settings-panel-heading">
+        <div><h2>权限配置</h2><span>按角色或用户配置模块可见性、操作权限和数据范围。</span></div>
+      </div>
+      <div class="form-grid">
+        <div class="form-field"><label>配置对象</label><select data-access-target-type>
+          <option value="role" ${access.targetType === "role" ? "selected" : ""}>角色</option>
+          <option value="user" ${access.targetType === "user" ? "selected" : ""}>用户覆盖</option>
+        </select></div>
+        <div class="form-field"><label>目标对象</label><select data-access-target-id>
+          ${
+            access.targetType === "role"
+              ? (access.roles || [])
+                  .map(
+                    (role) =>
+                      `<option value="${escapeHtml(role.id)}" ${
+                        String(role.id) === selectedRole ? "selected" : ""
+                      }>${escapeHtml(`${role.name || role.code} · ${role.categoryName || roleCategoryLabels[role.category] || "自定义角色"}`)}</option>`,
+                  )
+                  .join("")
+              : (access.users || [])
+                  .map(
+                    (user) =>
+                      `<option value="${escapeHtml(user.id)}" ${
+                        String(user.id) === selectedUser ? "selected" : ""
+                      }>${escapeHtml(user.displayName || user.username)}</option>`,
+                  )
+                  .join("")
+          }
+        </select></div>
+      </div>
+      ${renderPermissionGrid()}
+    </section>
+    <section class="data-panel settings-panel">
+      <div class="section-heading settings-panel-heading">
+        <div><h2>创建角色</h2><span>创建时确定角色类别、模块权限、操作权限和数据范围。</span></div>
+      </div>
+      <form data-form="role-create" class="settings-form">
+        <div class="form-grid">
+          ${inputField("角色编码", "code", "", true, "使用小写字母、数字、点、下划线或连字符")}
+          ${inputField("角色名称", "name", "", true, "例如：部门资产管理员")}
+          ${selectField("角色类别", "category", "custom", roleCategoryOptions, true)}
+          <label class="form-field role-super-admin-toggle"><span>超级管理员</span><input type="checkbox" name="isSuperAdmin" /></label>
+        </div>
+        <div class="role-create-permissions">
+          <div class="section-heading settings-panel-heading">
+            <div><h3>初始权限</h3><span>未勾选的模块和操作默认不可用。</span></div>
+          </div>
+          ${renderRoleCreationPermissionGrid()}
+        </div>
+        <div class="modal-footer settings-form-footer"><button class="primary-button" type="submit">创建角色</button></div>
+      </form>
+    </section>
+  </div>`;
 }
 
 function formatFileSize(value) {
@@ -2687,17 +3117,18 @@ function currentUpdateRepositoryUrl() {
   ).trim();
 }
 
-function renderUpdatePanel(admin) {
-  if (!admin) {
+function renderUpdatePanel(canUpdate) {
+  if (!canUpdate) {
     return `<section class="data-panel settings-panel settings-readonly-note">
-      <strong>版本更新</strong><span>只有管理员可以检查并执行项目版本更新。</span>
+      <strong>版本更新</strong><span>当前账号没有系统更新权限。</span>
     </section>`;
   }
   const status = settingsState.updateStatus || {};
   const checking = settingsState.updateChecking;
   const applying = settingsState.updateApplying;
   const repositoryUrl = settingsState.updateRepositoryUrl || status.repositoryUrl || "";
-  const releaseChannel = settingsState.updateReleaseChannel || status.releaseChannel || DEFAULT_UPDATE_RELEASE_CHANNEL;
+  const releaseChannel =
+    settingsState.updateReleaseChannel || status.releaseChannel || DEFAULT_UPDATE_RELEASE_CHANNEL;
   const deploymentBusy = ["queued", "running"].includes(status.status);
   const busy = checking || applying || deploymentBusy;
   const currentSha = status.currentShortSha || (status.currentSha ? String(status.currentSha).slice(0, 7) : "-");
@@ -2751,15 +3182,11 @@ function renderUpdatePanel(admin) {
     <div class="section-heading settings-panel-heading">
       <div><h2>版本更新</h2><span>从 GitHub 或 Gitea 读取已发布的语义化版本标签，只能选择版本号更高的版本更新应用。</span></div>
     </div>
-    <div class="update-target-field update-source-field">
+    <div class="update-target-field">
       <label for="updateRepositoryUrl">项目地址</label>
       <input id="updateRepositoryUrl" data-update-repository-url type="text" value="${escapeHtml(
         repositoryUrl,
       )}" placeholder="留空使用服务器默认 origin，或填写 GitHub/Gitea 仓库地址" ${busy ? "disabled" : ""} />
-    </div>
-    <div class="update-version-grid">
-      <div class="update-version-item"><span>当前版本</span><strong>${escapeHtml(currentVersion)}</strong></div>
-      <div class="update-version-item"><span>来源最新发布版本</span><strong>${escapeHtml(latestVersion)}</strong></div>
     </div>
     <div class="update-channel-row">
       <div class="update-target-field">
@@ -2778,11 +3205,15 @@ function renderUpdatePanel(admin) {
         <span>${
           releaseChannel === "release"
             ? "仅检查稳定的 vMAJOR.MINOR.PATCH 正式发行版。"
-            : "检查 vMAJOR.MINOR.PATCH-beta.N 等预发布版本；未特别说明时默认使用此通道。"
+            : "检查 vMAJOR.MINOR.PATCH-beta.N 等预发布版本；默认使用此通道。"
         }</span>
       </div>
     </div>
-    <div class="update-target-field update-version-select-field">
+    <div class="update-version-grid">
+      <div class="update-version-item"><span>当前版本</span><strong>${escapeHtml(currentVersion)}</strong></div>
+      <div class="update-version-item"><span>来源最新发布版本</span><strong>${escapeHtml(latestVersion)}</strong></div>
+    </div>
+    <div class="update-target-field">
       <label for="updateTargetVersion">目标版本</label>
       <select id="updateTargetVersion" data-update-target ${busy ? "disabled" : ""}>
         ${versionOptions}
@@ -2820,11 +3251,26 @@ function renderSettingsPage() {
   }
   const settings = settingsState.settings || {};
   const admin = isAdminUser();
-  return `
-    <div class="page-intro">
-      <div><h2>系统设置</h2><p>维护系统显示参数、登录安全和账号信息。</p></div>
-    </div>
-    <div class="settings-grid">
+  const canUpdate = hasPermission("system_updates", "update");
+  const tabs = [
+    ["system", "系统参数"],
+    ["security", "安全与密码"],
+    ...(admin
+      ? [
+          ["backup", "数据库备份"],
+          ["accounts", "账号管理"],
+          ["access", "角色与权限"],
+        ]
+      : []),
+    ...(canUpdate ? [["updates", "系统更新"]] : []),
+  ];
+  if (!tabs.some(([view]) => view === settingsState.view)) {
+    settingsState.view = "system";
+  }
+  const activeView = settingsState.view;
+  let content = "";
+  if (activeView === "system") {
+    content = `<div class="settings-grid">
       <section class="data-panel settings-panel">
         <div class="section-heading settings-panel-heading">
           <div><h2>系统参数</h2><span>${admin ? "管理员可以修改系统级设置。" : "当前账号只能查看系统级设置。"}</span></div>
@@ -2838,7 +3284,9 @@ function renderSettingsPage() {
           <div class="modal-footer settings-form-footer">${admin ? '<button class="primary-button" type="submit">保存系统设置</button>' : '<span class="secondary-text">只有管理员可以保存系统设置</span>'}</div>
         </form>
       </section>
-
+    </div>`;
+  } else if (activeView === "security") {
+    content = `<div class="settings-grid">
       <section class="data-panel settings-panel">
         <div class="section-heading settings-panel-heading">
           <div><h2>修改我的密码</h2><span>密码至少 8 位，修改后当前会话仍保持有效，其他会话会退出登录。</span></div>
@@ -2852,71 +3300,69 @@ function renderSettingsPage() {
           <div class="modal-footer settings-form-footer"><button class="primary-button" type="submit">保存新密码</button></div>
         </form>
       </section>
-      ${renderUpdatePanel(admin)}
-    </div>
-
-    ${
-      admin
-        ? `<section class="section-block">
-            <div class="section-heading">
-              <div><h2>数据库备份</h2><span>备份文件仅保存在服务器的非公开目录；下载前需要重新验证当前登录账号密码。</span></div>
-              <div class="toolbar-actions">
-                <button type="button" class="primary-button" data-action="create-database-backup">立即备份</button>
+    </div>`;
+  } else if (activeView === "backup") {
+    content = `<section class="section-block">
+      <div class="section-heading">
+        <div><h2>数据库备份</h2><span>备份文件仅保存在服务器的非公开目录；下载前需要重新验证当前登录账号密码。</span></div>
+        <div class="toolbar-actions"><button type="button" class="primary-button" data-action="create-database-backup">立即备份</button></div>
+      </div>
+      <div class="settings-grid">
+        <section class="data-panel settings-panel">
+          <div class="section-heading settings-panel-heading">
+            <div><h2>自动备份计划</h2><span>服务运行期间每天在指定时间执行一次备份。</span></div>
+          </div>
+          <form data-form="backup-schedule" class="settings-form">
+            <div class="form-grid">
+              <div class="form-field backup-toggle-field">
+                <label class="backup-toggle-label"><input type="checkbox" name="backup_enabled" ${
+                  ["1", "true", "yes", "on"].includes(String(settings.backup_enabled || "").toLowerCase())
+                    ? "checked"
+                    : ""
+                } /><span>启用每日自动备份</span></label>
+                <p class="form-hint">服务重启后会继续按当前设置执行。</p>
               </div>
+              ${inputField("每日备份时间", "backup_time", settings.backup_time || "02:00", true, "", "time")}
+              ${inputField("保留天数", "backup_retention_days", settings.backup_retention_days || "30", true, "0 表示不自动清理", "number", "0", 'max="3650"')}
             </div>
-            <div class="settings-grid">
-              <section class="data-panel settings-panel">
-                <div class="section-heading settings-panel-heading">
-                  <div><h2>自动备份计划</h2><span>服务运行期间每天在指定时间执行一次备份。</span></div>
-                </div>
-                <form data-form="backup-schedule" class="settings-form">
-                  <div class="form-grid">
-                    <div class="form-field backup-toggle-field">
-                      <label class="backup-toggle-label"><input type="checkbox" name="backup_enabled" ${
-                        ["1", "true", "yes", "on"].includes(String(settings.backup_enabled || "").toLowerCase())
-                          ? "checked"
-                          : ""
-                      } /><span>启用每日自动备份</span></label>
-                      <p class="form-hint">服务重启后会继续按当前设置执行。</p>
-                    </div>
-                    ${inputField("每日备份时间", "backup_time", settings.backup_time || "02:00", true, "", "time")}
-                    ${inputField(
-                      "保留天数",
-                      "backup_retention_days",
-                      settings.backup_retention_days || "30",
-                      true,
-                      "0 表示不自动清理",
-                      "number",
-                      "0",
-                      'max="3650"',
-                    )}
-                  </div>
-                  <div class="modal-footer settings-form-footer"><button class="primary-button" type="submit">保存备份计划</button></div>
-                </form>
-              </section>
-              <section class="data-panel settings-panel">
-                <div class="section-heading settings-panel-heading">
-                  <div><h2>备份说明</h2><span>手动备份会立即创建一个压缩的 SQL 文件。</span></div>
-                </div>
-                <div class="settings-readonly-note"><strong>下载保护</strong><span>下载任意备份时，系统会要求再次输入当前管理员账号的登录密码。备份文件不会暴露在网页静态目录中。</span></div>
-              </section>
-            </div>
-            <section class="data-panel settings-backup-list">${renderDatabaseBackupTable()}</section>
-          </section>`
-        : `<section class="section-block"><section class="data-panel settings-readonly-note"><strong>数据库备份</strong><span>只有管理员可以创建、配置、查看和下载数据库备份。</span></section></section>`
-    }
-
-    ${
-      admin
-        ? `<section class="section-block">
-            <div class="section-heading">
-              <div><h2>账号管理</h2><span>管理员、操作员和只读用户拥有不同的数据操作范围。</span></div>
-              <div class="toolbar-actions"><button class="primary-button" data-action="open-settings-user">＋ 新增账号</button></div>
-            </div>
-            <section class="data-panel">${renderSettingsUserTable()}</section>
-          </section>`
-        : `<section class="section-block"><section class="data-panel settings-readonly-note"><strong>账号管理</strong><span>只有管理员可以新增、修改或停用账号。</span></section></section>`
-    }`;
+            <div class="modal-footer settings-form-footer"><button class="primary-button" type="submit">保存备份计划</button></div>
+          </form>
+        </section>
+        <section class="data-panel settings-panel">
+          <div class="section-heading settings-panel-heading">
+            <div><h2>备份说明</h2><span>手动备份会立即创建一个压缩的 SQL 文件。</span></div>
+          </div>
+          <div class="settings-readonly-note"><strong>下载保护</strong><span>下载任意备份时，系统会要求再次输入当前管理员账号的登录密码。备份文件不会暴露在网页静态目录中。</span></div>
+        </section>
+      </div>
+      <section class="data-panel settings-backup-list">${renderDatabaseBackupTable()}</section>
+    </section>`;
+  } else if (activeView === "accounts") {
+    content = `<section class="section-block">
+      <div class="section-heading">
+        <div><h2>账号管理</h2><span>创建账号时填写登录账号和显示名称，再分配角色。</span></div>
+        <div class="toolbar-actions"><button class="primary-button" data-action="open-settings-user">＋ 新增账号</button></div>
+      </div>
+      <section class="data-panel">${renderSettingsUserTable()}</section>
+    </section>`;
+  } else if (activeView === "access") {
+    content = renderAccessControlPanel();
+  } else if (activeView === "updates") {
+    content = `<div class="settings-grid">${renderUpdatePanel(canUpdate)}</div>`;
+  }
+  return `
+    <div class="page-intro">
+      <div><h2>系统设置</h2><p>维护系统显示参数、登录安全和账号信息。</p></div>
+    </div>
+    <nav class="settings-tabs" aria-label="设置分区">
+      ${tabs
+        .map(
+          ([view, label]) =>
+            `<button type="button" class="settings-tab ${activeView === view ? "is-active" : ""}" data-action="settings-view" data-view="${view}">${label}</button>`,
+        )
+        .join("")}
+    </nav>
+    <div class="settings-view-content">${content}</div>`;
 }
 
 function openSettingsUserModal(id = "") {
@@ -2932,13 +3378,25 @@ function openSettingsUserModal(id = "") {
     isActive: true,
   };
   const isEditing = Boolean(user.id);
+  const roleOptions = (settingsState.accessControl?.roles || [])
+    .filter((role) => role.isActive !== false)
+    .map((role) => ({ value: role.code, label: role.name || role.code }));
+  const employeeOptions = [{ value: "", label: "仅超级管理员可不绑定人员" }].concat(
+    (state.employees || [])
+      .filter((employee) => employee.status !== "left")
+      .map((employee) => ({
+        value: employee.id,
+        label: `${employee.name} · ${employee.department || orgName(employee.orgId) || "未分配部门"} (${employee.employeeNo || ""})`,
+      })),
+  );
   openModal(
     `${modalHeader(isEditing ? "编辑账号" : "新增账号", "账号用于登录系统，密码不会显示在页面或日志中。")}
       <form data-form="user-account" data-id="${escapeHtml(user.id)}">
         <div class="form-grid">
           ${inputField("登录账号", "username", user.username, !isEditing, "3-64 位字母、数字、点、下划线或短横线", "text", "", isEditing ? "readonly" : 'autocomplete="username"')}
           ${inputField("显示名称", "displayName", user.displayName, true, "例如：张三")}
-          ${selectField("角色", "role", user.role, Object.entries(roleLabels).map(([value, label]) => ({ value, label })), true)}
+          ${selectField("角色", "role", user.role, roleOptions.length ? roleOptions : Object.entries(roleLabels).map(([value, label]) => ({ value, label })), true)}
+          ${selectField("绑定人员（普通账号必填）", "employeeId", user.employeeId || "", employeeOptions, false)}
           ${selectField("账号状态", "isActive", user.isActive ? "1" : "0", [
             { value: "1", label: "启用" },
             { value: "0", label: "停用" },
@@ -3254,9 +3712,9 @@ function renderAuditTable(logs) {
 
 function dashboardComputerStatusSummary() {
   const definitions = [
-    { key: "in_use", label: statusLabels.in_use, color: "#111111" },
-    { key: "idle", label: statusLabels.idle, color: "#777777" },
-    { key: "repair", label: statusLabels.repair, color: "#e30613" },
+    { key: "in_use", label: statusLabels.in_use, color: "#7367f0" },
+    { key: "idle", label: statusLabels.idle, color: "#00cfe8" },
+    { key: "repair", label: statusLabels.repair, color: "#ff9f43" },
   ];
   const total = state.computers.length;
   const segments = definitions.map((item) => ({
@@ -3272,13 +3730,15 @@ function dashboardComputerStatusSummary() {
 
 function renderDashboardComputerStatusChart() {
   const { total, segments } = dashboardComputerStatusSummary();
+  const inUse = segments.find((item) => item.key === "in_use")?.count || 0;
+  const rate = total ? Math.round((inUse / total) * 100) : 0;
   return `
     <div class="dashboard-status-layout">
-      <div class="dashboard-status-number">
-        <strong>${total}</strong>
-        <span>办公终端总数</span>
+      <div class="dashboard-status-orbit" style="--progress:${rate}">
+        <div><strong>${rate}%</strong><span>在用率</span></div>
       </div>
       <div class="dashboard-status-summary">
+        <div class="dashboard-status-title"><strong>终端运行状态</strong><span>${total} 台办公终端</span></div>
         <ul class="dashboard-status-legend">
           ${segments
             .map(
@@ -3356,6 +3816,7 @@ function renderDashboardOrgTree() {
 function renderDashboardPage() {
   const computerCount = state.computers.length;
   const inUseCount = state.computers.filter((computer) => computer.status === "in_use").length;
+  const idleCount = state.computers.filter((computer) => computer.status === "idle").length;
   const activeEmployees = state.employees.filter((employee) => employee.status === "active").length;
   const nonAssetCount = state.employees.reduce(
     (sum, employee) =>
@@ -3366,93 +3827,53 @@ function renderDashboardPage() {
     .sort((a, b) => (b.registeredDate || "").localeCompare(a.registeredDate || ""))
     .slice(0, 5);
   const attentionComputers = state.computers.filter((computer) => ["repair", "lost", "retired"].includes(computer.status));
+  const tickets = operationsState.tickets || [];
+  const service = serviceState();
+  const queueItems = [
+    ["待处理工单", tickets.filter((item) => !["closed", "resolved", "cancelled"].includes(item.status)).length, "tickets", "▣"],
+    ["待审批事项", (service.approvals || []).filter((item) => item.status === "pending").length, "serviceManagement", "✓"],
+    ["进行中变更", (service.changes || []).length, "serviceManagement", "↗"],
+    ["问题记录", (service.problems || []).length, "serviceManagement", "?"],
+  ];
 
   return `
-    <div class="page-intro">
-      <div>
-        <h2>今天的资产脉搏</h2>
-        <p>${formatDate(new Date().toISOString().slice(0, 10))} · 数据已同步至 MySQL</p>
-      </div>
-      <div class="toolbar-actions">
-        <button class="secondary-button" data-action="navigate" data-page="employees">查看组织树</button>
-        <button class="primary-button" data-action="open-computer">＋ 新增办公终端</button>
-      </div>
-    </div>
+    <section class="dashboard-welcome">
+      <div class="dashboard-welcome-copy"><span class="eyebrow">ASSET OPERATIONS</span><h2>资产运营工作台</h2><p>${formatDate(new Date().toISOString().slice(0, 10))}，资产数据已连接到 MySQL，可从这里处理日常资产和服务事项。</p><div class="dashboard-welcome-actions">${hasPermission("it_assets", "create") ? '<button class="primary-button" data-action="open-computer"><span>＋</span>新建资产</button>' : ""}${hasPermission("tickets", "create") ? '<button class="secondary-button" data-action="quick-create-ticket">创建工单</button>' : ""}</div></div>
+      <div class="dashboard-welcome-visual" aria-hidden="true"><span class="dashboard-visual-card dashboard-visual-card-a">▣</span><span class="dashboard-visual-card dashboard-visual-card-b">✓</span><span class="dashboard-visual-pulse"></span></div>
+    </section>
 
-    <div class="stats-grid">
-      <div class="stat-card">
+    <div class="stats-grid dashboard-metrics">
+      <div class="stat-card metric-card metric-card-primary">
         <div class="stat-label"><span>办公终端资产</span><span class="stat-mark">▣</span></div>
         <div class="stat-value">${computerCount}</div>
-        <div class="stat-foot">${inUseCount} 台当前在用</div>
+        <div class="stat-foot"><span class="metric-trend is-positive">↑ ${computerCount ? Math.round((inUseCount / computerCount) * 100) : 0}%</span>${inUseCount} 台当前在用</div>
       </div>
-      <div class="stat-card">
+      <div class="stat-card metric-card">
         <div class="stat-label"><span>使用人员</span><span class="stat-mark">♙</span></div>
         <div class="stat-value">${activeEmployees}</div>
         <div class="stat-foot">${getRootOrgs().length} 个根组织</div>
       </div>
-      <div class="stat-card">
-        <div class="stat-label"><span>非资产设备</span><span class="stat-mark">⌁</span></div>
-        <div class="stat-value">${nonAssetCount}</div>
-        <div class="stat-foot">鼠标、键盘、拓展坞等</div>
+      <div class="stat-card metric-card">
+        <div class="stat-label"><span>闲置可用</span><span class="stat-mark">◌</span></div>
+        <div class="stat-value">${idleCount}</div>
+        <div class="stat-foot">可用于新人员配置</div>
       </div>
-      <div class="stat-card">
+      <div class="stat-card metric-card metric-card-warning">
         <div class="stat-label"><span>待关注</span><span class="stat-mark">!</span></div>
         <div class="stat-value">${attentionComputers.length}</div>
-        <div class="stat-foot">维修、丢失或报废状态</div>
+        <div class="stat-foot">${nonAssetCount} 件非资产设备在账</div>
       </div>
     </div>
 
-    <div class="content-grid">
-      <section class="section-block">
-        <div class="section-heading">
-          <div><h2>最近登记的办公终端</h2><span>按注册日期倒序</span></div>
-          <button class="text-button" data-action="navigate" data-page="computers">查看全部 →</button>
-        </div>
-        <div class="data-panel">
-          ${renderComputerTable(recentComputers, false)}
-        </div>
-      </section>
-      <section class="section-block">
-        <div class="section-heading">
-          <div><h2>办公终端资产状态</h2><span>在用、闲置、维修分布</span></div>
-          <button class="text-button" data-action="navigate" data-page="computers">查看台账 →</button>
-        </div>
-        <div class="data-panel dashboard-status-panel">
-          ${renderDashboardComputerStatusChart()}
-        </div>
-      </section>
+    <div class="dashboard-main-grid">
+      <section class="data-panel dashboard-status-panel dashboard-panel-animate">${renderDashboardComputerStatusChart()}</section>
+      <section class="data-panel dashboard-queue-panel dashboard-panel-animate"><div class="section-heading"><div><h2>服务工作队列</h2><span>工单、审批、变更和问题</span></div><button class="text-button" data-action="navigate" data-page="serviceManagement">进入服务管理 ›</button></div><div class="dashboard-queue-list">${queueItems.map(([label, value, page, icon]) => `<button class="dashboard-queue-item" data-action="navigate" data-page="${page}"><span class="dashboard-queue-icon">${icon}</span><span>${label}</span><strong>${value}</strong><i>›</i></button>`).join("")}</div></section>
     </div>
 
-    <div class="dashboard-insight-grid">
-      <section class="section-block">
-        <div class="section-heading">
-          <div><h2>最近入库物资</h2><span>按物资增加操作时间倒序</span></div>
-          <button class="text-button" data-action="navigate" data-page="inventory">查看物资 →</button>
-        </div>
-        <div class="data-panel">
-          ${renderDashboardRecentInboundList()}
-        </div>
-      </section>
-      <section class="section-block">
-        <div class="section-heading">
-          <div><h2>组织架构树</h2><span>含人员与办公终端数量汇总</span></div>
-          <button class="text-button" data-action="navigate" data-page="employees">查看人员 →</button>
-        </div>
-        <div class="data-panel dashboard-org-tree-panel">
-          ${renderDashboardOrgTree()}
-        </div>
-      </section>
+    <div class="dashboard-secondary-grid">
+      <section class="data-panel dashboard-panel-animate"><div class="section-heading"><div><h2>最近登记资产</h2><span>按注册日期倒序</span></div><button class="text-button" data-action="navigate" data-page="computers">全部资产 ›</button></div>${renderComputerTable(recentComputers, false)}</section>
+      <section class="data-panel dashboard-panel-animate"><div class="section-heading"><div><h2>最近入库物资</h2><span>库存增加记录</span></div><button class="text-button" data-action="navigate" data-page="inventory">IT 物资 ›</button></div>${renderDashboardRecentInboundList()}</section>
     </div>
-
-    <section class="section-block">
-      <div class="section-heading">
-        <div><h2>人员设备概览</h2><span>办公终端名称、显示屏型号和非资产数量</span></div>
-        <button class="text-button" data-action="navigate" data-page="employees">查看组织树 →</button>
-      </div>
-      <div class="data-panel">
-        ${renderEmployeeTable(sortEmployees(state.employees).slice(0, 5), false)}
-      </div>
-    </section>
   `;
 }
 
@@ -3563,7 +3984,6 @@ function renderComputerTable(computers, withActions, selectable = false) {
                   withActions
                     ? `<td><div class="inline-actions">
                         <button class="text-button" data-action="open-computer" data-id="${escapeHtml(computer.id)}">编辑</button>
-                        <button class="text-button danger" data-action="delete-computer" data-id="${escapeHtml(computer.id)}">删除</button>
                       </div></td>`
                     : ""
                 }
@@ -4201,7 +4621,7 @@ function renderFlowControlRecordTable(logs) {
               const relatedEmployee = [log.relatedEmployeeName, log.relatedEmployeeNo].filter(Boolean).join(" / ");
               return `<tr>
                 <td class="audit-time">${escapeHtml(formatDateTime(log.occurredAt))}</td>
-                <td><span class="audit-action audit-action-assignment">${escapeHtml(flowRecordActionLabel(log))}</span></td>
+                <td><span class="audit-action ${flowRecordActionClass(log)}">${escapeHtml(flowRecordActionLabel(log))}</span></td>
                 <td>${escapeHtml(flowRecordCategory(log))}</td>
                 <td>${escapeHtml(log.typeName || "未分类物资")}</td>
                 <td><div class="primary-text">${escapeHtml(log.brandName || "未登记品牌")}</div><div class="secondary-text">${escapeHtml(
@@ -4295,7 +4715,7 @@ function renderFlowControlPage() {
     </div>
     <section class="section-block">
       <div class="section-heading">
-        <div><h2>物资流转记录表</h2><span>物资动作自动识别业务类型和业务分类，备注可直接补充和保存。</span></div>
+        <div><h2>物资流转记录表</h2><span>物资动作自动识别业务类型和业务分类，共 ${records.length} 条</span></div>
       </div>
       <div class="data-panel">${renderFlowControlRecordTable(records)}</div>
     </section>
@@ -4425,7 +4845,7 @@ function renderInventoryMovementTable(logs) {
                 <td>${escapeHtml(log.sourceLabel || "—")}</td>
                 <td>${escapeHtml(log.targetLabel || "—")}</td>
                 <td><span class="audit-summary">${escapeHtml(log.note || "—")}</span></td>
-                <td><button class="text-button" data-action="edit-inventory-log-note" data-id="${escapeHtml(log.id)}">标注</button></td>
+                <td><span class="secondary-text">只读</span></td>
               </tr>`,
             )
             .join("")}
@@ -4611,11 +5031,7 @@ function handleInventoryMovementNoteSubmit(form) {
     showToast("备注未发生变化");
     return;
   }
-  log.note = note;
-  persistState(true);
-  closeModal();
-  render();
-  showToast("物资流转备注已保存");
+  showToast("流转日志为事务结果，只能通过新的业务命令产生，暂不支持单独改写。", true);
 }
 
 function handleInventoryPurchaseNoteSubmit(form) {
@@ -4627,9 +5043,7 @@ function handleInventoryPurchaseNoteSubmit(form) {
     showToast("备注未发生变化");
     return;
   }
-  log.note = note;
-  persistState(true);
-  showToast("采购入库备注已保存");
+  showToast("采购入库日志为事务结果，只能通过新的入库命令产生，暂不支持单独改写。", true);
 }
 
 function getVisibleOrgIdsForEmployees(search, employeeIdSet, treeFilterActive = false) {
@@ -4754,7 +5168,6 @@ function renderEmployeeTreeRow(employee) {
       <div class="inline-actions">
         <button class="text-button" data-action="manage-devices" data-id="${escapeHtml(employee.id)}">设备</button>
         <button class="text-button" data-action="open-employee" data-id="${escapeHtml(employee.id)}">编辑</button>
-        <button class="text-button danger" data-action="delete-employee" data-id="${escapeHtml(employee.id)}">删除</button>
       </div>
     </article>
   `;
@@ -4801,7 +5214,6 @@ function renderEmployeeTable(employees, withActions) {
                     ? `<td><div class="inline-actions">
                         <button class="text-button" data-action="manage-devices" data-id="${escapeHtml(employee.id)}">设备</button>
                         <button class="text-button" data-action="open-employee" data-id="${escapeHtml(employee.id)}">编辑</button>
-                        <button class="text-button danger" data-action="delete-employee" data-id="${escapeHtml(employee.id)}">删除</button>
                       </div></td>`
                     : ""
                 }
@@ -5043,9 +5455,78 @@ function openComputerModal(id = "") {
             ${inputField("备注", "remarks", computer.remarks || "", false, "可填写采购批次、工单号等")}
           </div>
         </section>
+        ${
+          isEditing
+            ? `<section class="modal-section">
+                <div class="modal-section-title"><div><h3>设备流转记录</h3><span>分配、归还与生命周期状态变更</span></div></div>
+                <div class="computer-movement-history" data-computer-movement-history="${escapeHtml(computer.id)}">
+                  <div class="empty-state">正在加载设备流转记录...</div>
+                </div>
+              </section>`
+            : ""
+        }
         <div class="modal-footer"><button type="button" class="secondary-button" data-action="close-modal">取消</button><button class="primary-button" type="submit">保存办公终端</button></div>
       </form>`,
+    true,
   );
+  if (isEditing) loadComputerMovementHistory(computer.id);
+}
+
+function computerMovementEventLabel(event) {
+  if (event.type === "assigned") return "分配";
+  if (event.type === "returned") return "归还";
+  return "状态变更";
+}
+
+function renderComputerMovementHistory(events) {
+  if (!events.length) return '<div class="empty-state">暂未记录设备流转。</div>';
+  return `<ol class="computer-movement-timeline">${events
+    .map((event) => {
+      const employee = [event.employeeName, event.employeeNo ? `(${event.employeeNo})` : ""]
+        .filter(Boolean)
+        .join(" ");
+      const status =
+        event.type === "status_changed"
+          ? `${statusLabels[event.previousStatus] || event.previousStatus || "未设置"} → ${
+              statusLabels[event.nextStatus] || event.nextStatus || "未设置"
+            }`
+          : statusLabels[event.nextStatus] || event.nextStatus || "";
+      return `<li class="computer-movement-item">
+        <div class="computer-movement-marker" aria-hidden="true"></div>
+        <div class="computer-movement-body">
+          <div class="computer-movement-heading">
+            <strong>${escapeHtml(computerMovementEventLabel(event))}</strong>
+            <span>${escapeHtml(formatDateTime(event.occurredAt))}</span>
+          </div>
+          <div class="computer-movement-meta">
+            ${employee ? `<span>使用人：${escapeHtml(employee)}</span>` : ""}
+            ${status ? `<span>状态：${escapeHtml(status)}</span>` : ""}
+            ${event.operatedBy ? `<span>操作人：${escapeHtml(event.operatedBy)}</span>` : ""}
+          </div>
+          ${event.notes ? `<p>${escapeHtml(event.notes)}</p>` : ""}
+        </div>
+      </li>`;
+    })
+    .join("")}</ol>`;
+}
+
+async function loadComputerMovementHistory(computerId) {
+  const container = document.querySelector(
+    `[data-computer-movement-history="${CSS.escape(String(computerId))}"]`,
+  );
+  if (!container) return;
+  try {
+    const payload = await requestJson(
+      `/api/computers/${encodeURIComponent(computerId)}/movement-history`,
+    );
+    if (!container.isConnected) return;
+    container.innerHTML = renderComputerMovementHistory(
+      Array.isArray(payload.events) ? payload.events : [],
+    );
+  } catch (error) {
+    if (!container.isConnected) return;
+    container.innerHTML = `<div class="empty-state">无法加载设备流转记录：${escapeHtml(error.message)}</div>`;
+  }
 }
 
 function openEmployeeModal(id = "", presetOrgId = "") {
@@ -5322,7 +5803,7 @@ function updateComputerInventorySelectors(form, changedField) {
 function renderMonitorModule(employeeId, monitor = {}, isDraft = false) {
   const id = monitor.id || "";
   const summary = [monitor.brand, monitor.model].filter(Boolean).join(" ") || "新增显示屏";
-  const removeAction = id ? "delete-monitor" : "remove-device-module";
+  const removeAction = id ? "" : "remove-device-module";
   return `
     <form class="device-module monitor-module" data-form="monitor" data-employee-id="${escapeHtml(
       employeeId,
@@ -5337,9 +5818,11 @@ function renderMonitorModule(employeeId, monitor = {}, isDraft = false) {
                 )}" data-id="${escapeHtml(id)}" />回收</label>`
               : ""
           }
-          <button type="button" class="text-button danger" data-action="${removeAction}" ${
-            id ? `data-id="${escapeHtml(id)}" data-employee-id="${escapeHtml(employeeId)}"` : ""
-          }>删除</button>
+          ${
+            removeAction
+              ? `<button type="button" class="text-button danger" data-action="${removeAction}">移除草稿</button>`
+              : ""
+          }
         </div>
       </div>
       <div class="device-module-grid">
@@ -5356,7 +5839,7 @@ function renderNonAssetModule(employeeId, item = {}, isDraft = false) {
   const typeId = item.typeId || state.nonAssetTypes[0]?.id || "mouse";
   const type = getType(typeId);
   const summary = type?.name || "非资产设备";
-  const removeAction = id ? "delete-nonasset" : "remove-device-module";
+  const removeAction = id ? "" : "remove-device-module";
   return `
     <form class="device-module nonasset-module" data-form="nonasset" data-employee-id="${escapeHtml(
       employeeId,
@@ -5371,9 +5854,11 @@ function renderNonAssetModule(employeeId, item = {}, isDraft = false) {
                 )}" data-id="${escapeHtml(id)}" />回收</label>`
               : ""
           }
-          <button type="button" class="text-button danger" data-action="${removeAction}" ${
-            id ? `data-id="${escapeHtml(id)}" data-employee-id="${escapeHtml(employeeId)}"` : ""
-          }>删除</button>
+          ${
+            removeAction
+              ? `<button type="button" class="text-button danger" data-action="${removeAction}">移除草稿</button>`
+              : ""
+          }
         </div>
       </div>
       <div class="device-module-grid">
@@ -5548,14 +6033,26 @@ function inputField(
   min = "",
   extraAttributes = "",
 ) {
+  const numericConstraint = type !== "password" && min ? `min="${escapeHtml(min)}"` : "";
+  const passwordConstraint =
+    type === "password"
+      ? 'minlength="8" maxlength="256" spellcheck="false" data-password-input'
+      : "";
+  const passwordHint =
+    type === "password"
+      ? '<small class="form-hint password-hint">8-256 位，不允许首尾空格。</small>'
+      : "";
   return `<div class="form-field"><label>${escapeHtml(label)}${required ? " *" : ""}</label><input type="${type}" name="${escapeHtml(
     name,
-  )}" value="${escapeHtml(value)}" placeholder="${escapeHtml(placeholder)}" ${required ? "required" : ""} ${
-    min ? `min="${escapeHtml(min)}"` : ""
-  } ${extraAttributes} /></div>`;
+  )}" value="${escapeHtml(value)}" placeholder="${escapeHtml(placeholder)}" ${required ? "required" : ""} ${numericConstraint} ${passwordConstraint} ${extraAttributes} />${passwordHint}</div>`;
 }
 
 function selectField(label, name, value, options, required = false) {
+  if (Array.isArray(value) && !Array.isArray(options)) {
+    const suppliedOptions = value;
+    value = options;
+    options = suppliedOptions;
+  }
   return `<div class="form-field"><label>${escapeHtml(label)}${required ? " *" : ""}</label><select name="${escapeHtml(
     name,
   )}" ${required ? "required" : ""}>${options
@@ -5623,7 +6120,7 @@ async function handleBackupScheduleSubmit(form) {
 }
 
 async function handleUpdateCheck(button) {
-  if (!isAdminUser()) return showToast("只有管理员可以检查版本更新", true);
+  if (!hasPermission("system_updates", "update")) return showToast("当前账号没有系统更新权限", true);
   const repositoryUrl = currentUpdateRepositoryUrl();
   const releaseChannel =
     document.querySelector("[data-update-release-channel]")?.value ||
@@ -5651,15 +6148,9 @@ async function handleUpdateCheck(button) {
         : "";
     const status = payload.status || "";
     if (status === "up_to_date") {
-      showToast(
-        `当前已是${updateReleaseChannelLabel(releaseChannel)}最新版本 ${
-          payload.currentVersion || payload.currentShortSha || ""
-        }`,
-      );
+      showToast(`当前已是${updateReleaseChannelLabel(releaseChannel)}最新版本 ${payload.currentVersion || payload.currentShortSha || ""}`);
     } else if (status === "update_available") {
-      showToast(
-        `发现可用${updateReleaseChannelLabel(releaseChannel)} ${payload.latestVersion || ""}，请选择后手动更新`,
-      );
+      showToast(`发现可用${updateReleaseChannelLabel(releaseChannel)} ${payload.latestVersion || ""}，请选择后手动更新`);
     } else if (status === "no_releases") {
       showToast("检查完成：项目地址中暂无已发布版本", true);
     } else if (status === "no_release_available") {
@@ -5676,7 +6167,7 @@ async function handleUpdateCheck(button) {
 }
 
 async function handleApplySelectedUpdate() {
-  if (!isAdminUser()) return showToast("只有管理员可以执行版本更新", true);
+  if (!hasPermission("system_updates", "update")) return showToast("当前账号没有系统更新权限", true);
   const repositoryUrl = currentUpdateRepositoryUrl();
   const releaseChannel =
     document.querySelector("[data-update-release-channel]")?.value ||
@@ -5686,7 +6177,7 @@ async function handleApplySelectedUpdate() {
   const checkedReleaseChannel =
     settingsState.updateStatus?.releaseChannel || DEFAULT_UPDATE_RELEASE_CHANNEL;
   if (repositoryUrl !== checkedRepositoryUrl || releaseChannel !== checkedReleaseChannel) {
-    return showToast("项目地址已变化，请先重新检查版本", true);
+    return showToast("项目地址或更新通道已变化，请先重新检查版本", true);
   }
   const targetSha =
     settingsState.updateSelectedSha || document.querySelector("[data-update-target]")?.value || "";
@@ -5780,15 +6271,24 @@ async function handleChangePasswordSubmit(form) {
 
 async function handleUserAccountSubmit(form) {
   if (!isAdminUser()) return showToast("只有管理员可以管理账号", true);
+  if (form.dataset.submitting === "1") return;
+  form.dataset.submitting = "1";
+  const submit = form.querySelector('button[type="submit"]');
   const data = Object.fromEntries(new FormData(form).entries());
   const id = form.dataset.id || "";
   const payload = {
     username: String(data.username || "").trim(),
     displayName: String(data.displayName || "").trim(),
     role: data.role,
+    employeeId: data.employeeId || "",
     isActive: data.isActive === "1",
   };
+  if (!/^[A-Za-z0-9][A-Za-z0-9._-]{2,63}$/.test(payload.username)) {
+    form.dataset.submitting = "0";
+    return showToast("登录账号需使用 3-64 位字母、数字、点、下划线或短横线。", true);
+  }
   if (String(data.password || "").trim()) payload.password = data.password;
+  if (submit) submit.disabled = true;
   try {
     await requestJson(id ? `${API_USERS_URL}/${encodeURIComponent(id)}` : API_USERS_URL, {
       method: id ? "PUT" : "POST",
@@ -5801,6 +6301,9 @@ async function handleUserAccountSubmit(form) {
     showToast(id ? "账号已更新" : "账号已创建");
   } catch (error) {
     showToast(`保存账号失败：${error.message}`, true);
+  } finally {
+    form.dataset.submitting = "0";
+    if (submit?.isConnected) submit.disabled = false;
   }
 }
 
@@ -6718,7 +7221,6 @@ function flowRecordExportRows(logs) {
 function exportFlowRecords() {
   const logs = getFilteredFlowRecords();
   if (!logs.length) return showToast("当前筛选条件下没有可导出的物资流转记录", true);
-
   downloadExcel(`办公资产-物资流转记录-${exportDateStamp()}.xls`, [
     {
       name: "物资流转记录",
@@ -6956,6 +7458,36 @@ document.addEventListener("click", (event) => {
     return;
   }
 
+  if (action === "quick-create-ticket") {
+    if (!hasPermission("tickets", "create")) {
+      showToast("当前账号没有新建工单权限。", true);
+      return;
+    }
+    openTicketModal();
+    return;
+  }
+
+  if (action === "open-notifications") {
+    if (!hasPermission("notifications", "view")) {
+      showToast("当前账号没有查看消息提醒权限。", true);
+      return;
+    }
+    state.page = "serviceManagement";
+    serviceState().view = "notifications";
+    persistState(false);
+    render();
+    loadServiceManagement()
+      .then(render)
+      .catch((error) => showToast(`消息提醒加载失败：${error.message}`, true));
+    return;
+  }
+
+  if (action === "settings-view") {
+    settingsState.view = actionElement.dataset.view || "system";
+    render();
+    return;
+  }
+
   if (action === "check-for-update") {
     handleUpdateCheck(actionElement);
     return;
@@ -7161,6 +7693,30 @@ document.addEventListener("click", (event) => {
           showToast(`日志加载失败：${error.message}`, true);
         });
     }
+    if (state.page === "tickets") {
+      loadTickets()
+        .then(() => render())
+        .catch((error) => {
+          console.error("Unable to load tickets", error);
+          showToast(`工单加载失败：${error.message}`, true);
+        });
+    }
+    if (state.page === "serviceManagement") {
+      loadServiceManagement()
+        .then(() => render())
+        .catch((error) => {
+          console.error("Unable to load service management", error);
+          showToast(`服务管理加载失败：${error.message}`, true);
+        });
+    }
+    if (state.page === "governance") {
+      loadGovernance()
+        .then(() => render())
+        .catch((error) => {
+          console.error("Unable to load governance data", error);
+          showToast(`治理数据加载失败：${error.message}`, true);
+        });
+    }
     return;
   }
 
@@ -7318,6 +7874,8 @@ document.addEventListener("click", (event) => {
   }
 
   if (action === "delete-computer") {
+    return showToast("终端不支持直接删除，请通过编辑将生命周期状态调整为报废。", true);
+    /*
     const computer = state.computers.find((item) => item.id === actionElement.dataset.id);
     if (computer && window.confirm(`确定删除办公终端 ${computer.deviceName} 吗？`)) {
       state.computers = state.computers.filter((item) => item.id !== computer.id);
@@ -7326,9 +7884,12 @@ document.addEventListener("click", (event) => {
       render();
       showToast("办公终端已删除");
     }
+    */
   }
 
   if (action === "delete-employee") {
+    return showToast("人员不支持直接删除，请通过受控离职回收流程处理。", true);
+    /*
     const employee = getEmployee(actionElement.dataset.id);
     if (employee && window.confirm(`确定删除人员 ${employee.name} 吗？名下办公终端会变为未分配。`)) {
       employeeRecoveryDevices(employee)
@@ -7360,9 +7921,12 @@ document.addEventListener("click", (event) => {
       render();
       showToast("人员已删除");
     }
+    */
   }
 
   if (action === "delete-monitor") {
+    return showToast("已登记物资只能通过回收命令归还，不能直接删除。", true);
+    /*
     const employee = getEmployee(actionElement.dataset.employeeId);
     if (employee && window.confirm("确定删除这条显示屏记录吗？")) {
       const removed = (employee.monitors || []).find((monitor) => monitor.id === actionElement.dataset.id);
@@ -7391,9 +7955,12 @@ document.addEventListener("click", (event) => {
       render();
       showToast("显示屏记录已删除");
     }
+    */
   }
 
   if (action === "delete-nonasset") {
+    return showToast("已登记物资只能通过回收命令归还，不能直接删除。", true);
+    /*
     const employee = getEmployee(actionElement.dataset.employeeId);
     if (employee && window.confirm("确定删除这条非资产设备记录吗？")) {
       const removed = getNonAssetItems(employee).find((item) => item.id === actionElement.dataset.id);
@@ -7423,9 +7990,12 @@ document.addEventListener("click", (event) => {
       render();
       showToast("非资产设备记录已删除");
     }
+    */
   }
 
   if (action === "delete-org") {
+    return showToast("组织不支持直接删除，请先调整组织关系后再由迁移处理。", true);
+    /*
     const org = getOrg(actionElement.dataset.id);
     if (org && window.confirm(`确定删除组织 ${org.name} 吗？直接挂在该组织上的记录会变为未分配，下级组织会提升为根组织。`)) {
       state.employees.forEach((employee) => {
@@ -7443,9 +8013,12 @@ document.addEventListener("click", (event) => {
       render();
       showToast("组织已删除");
     }
+    */
   }
 
   if (action === "delete-type") {
+    return showToast("字典类型删除已暂时禁用，避免绕过库存和审计事务。", true);
+    /*
     const type = getType(actionElement.dataset.id);
     if (!type) return;
     if (isProtectedInventoryType(type)) {
@@ -7498,8 +8071,12 @@ document.addEventListener("click", (event) => {
       render();
       showToast("设备类型已删除");
   }
+  */
+  }
 
   if (action === "delete-inventory-brand") {
+    return showToast("库存品牌删除已暂时禁用，避免绕过库存和审计事务。", true);
+    /*
     const brand = getInventoryBrand(actionElement.dataset.id);
     const models = brand ? inventoryModelsForBrand(brand.id) : [];
     if (!brand) return;
@@ -7516,9 +8093,12 @@ document.addEventListener("click", (event) => {
     persistState(true);
     render();
     showToast("库存品牌已删除");
+    */
   }
 
   if (action === "delete-inventory-model") {
+    return showToast("库存型号删除已暂时禁用，避免绕过库存和审计事务。", true);
+    /*
     const model = getInventoryModel(actionElement.dataset.id);
     const modelInUse = state.employees.some(
       (employee) =>
@@ -7548,12 +8128,958 @@ document.addEventListener("click", (event) => {
     persistState(true);
     render();
     showToast("库存型号已删除");
+    */
   }
 
   if (action === "reset-data" && window.confirm("确定从数据库重新加载吗？当前页面未保存的改动会被覆盖。")) {
     hydrateStateFromServer({ toast: true });
   }
 });
+
+function ticketStatusLabel(status) {
+  return {
+    new: "新建",
+    assigned: "已分派",
+    in_progress: "处理中",
+    pending: "待处理",
+    resolved: "已解决",
+    closed: "已关闭",
+    cancelled: "已取消",
+  }[status] || status;
+}
+
+function ticketSlaLabel(state) {
+  return {
+    running: "计时中",
+    breached: "已超时",
+    stopped: "已停止",
+    not_configured: "未配置",
+  }[state] || state || "未配置";
+}
+
+function ticketApprovalLabel(status) {
+  return {
+    not_required: "无需审批",
+    pending: "审批中",
+    approved: "已通过",
+    rejected: "已拒绝",
+  }[status] || status || "无需审批";
+}
+
+function ticketSlaRemaining(ticket) {
+  if (ticket.slaState === "not_configured") return "—";
+  const minutes = Number(ticket.slaRemainingMinutes);
+  if (!Number.isFinite(minutes)) return "—";
+  const absolute = Math.abs(minutes);
+  const value = absolute >= 60 ? `${Math.floor(absolute / 60)} 小时 ${absolute % 60} 分` : `${absolute} 分`;
+  return minutes < 0 ? `超时 ${value}` : `剩余 ${value}`;
+}
+
+function renderTicketTable() {
+  const tickets = Array.isArray(operationsState.tickets) ? operationsState.tickets : [];
+  const serviceLoading = serviceState().loading;
+  return `
+    ${
+      operationsState.ticketLoading || serviceLoading
+        ? '<div class="empty-state">正在加载工单...</div>'
+        : tickets.length
+          ? `<div class="table-wrap"><table>
+              <thead><tr><th>编号</th><th>类型</th><th>主题</th><th>优先级</th><th>状态</th><th>SLA</th><th>请求人</th><th>处理人</th><th>更新时间</th></tr></thead>
+              <tbody>${tickets
+                .map(
+                  (ticket) => `<tr data-action="open-ticket-detail" data-id="${escapeHtml(ticket.id)}">
+                    <td>${escapeHtml(ticket.number || "")}</td>
+                    <td>${ticket.type === "incident" ? "事件" : "请求"}</td>
+                    <td>${escapeHtml(ticket.title || "")}</td>
+                    <td>${escapeHtml(ticket.priority || "")}</td>
+                    <td>${escapeHtml(ticketStatusLabel(ticket.status))}</td>
+                    <td>${escapeHtml(ticketSlaLabel(ticket.slaState))}</td>
+                    <td>${escapeHtml(ticket.requesterName || "—")}</td>
+                    <td>${escapeHtml(ticket.assignedToName || "—")}</td>
+                    <td>${escapeHtml(formatDateTime(ticket.updatedAt || ""))}</td>
+                  </tr>`,
+                )
+                .join("")}</tbody>
+            </table></div>`
+          : '<div class="empty-state">暂无工单</div>'
+    }`;
+}
+
+function renderTicketsPage() {
+  return `
+    <div class="page-intro">
+      <div><h2>工单</h2><p>事件用于恢复服务，请求用于交付标准服务。</p></div>
+      <div class="toolbar-actions">
+        <button class="secondary-button" data-action="refresh-tickets">刷新</button>
+        ${hasPermission("tickets", "create") ? '<button class="primary-button" data-action="open-ticket">新建工单</button>' : ""}
+      </div>
+    </div>
+    <section class="data-panel">${renderTicketTable()}</section>
+  `;
+}
+
+function renderServiceTickets() {
+  return `<section class="data-panel service-tickets-panel">
+    <div class="section-heading">
+      <div><h2>工单</h2><span>事件用于恢复服务，请求用于交付标准服务。</span></div>
+      <div class="toolbar-actions">
+        <button class="secondary-button" data-action="refresh-tickets">刷新</button>
+        ${hasPermission("tickets", "create") ? '<button class="primary-button" data-action="open-ticket">新建工单</button>' : ""}
+      </div>
+    </div>
+    ${renderTicketTable()}
+  </section>`;
+}
+
+function renderGovernancePage() {
+  const runs = Array.isArray(operationsState.syncRuns) ? operationsState.syncRuns : [];
+  const issues = Array.isArray(operationsState.qualityIssues) ? operationsState.qualityIssues : [];
+  return `
+    <div class="page-intro">
+      <div><h2>同步与质量</h2><p>外部数据先进入暂存区，校验通过后再由管理员应用。</p></div>
+      <div class="toolbar-actions">
+        <button class="secondary-button" data-action="refresh-governance">刷新</button>
+        <button class="secondary-button" data-action="run-data-quality">运行质量检查</button>
+        <button class="primary-button" data-action="open-sync-stage">暂存同步数据</button>
+      </div>
+    </div>
+    <section class="section-block">
+      <div class="section-heading"><div><h2>同步暂存批次</h2><span>无效记录不会进入生产主数据。</span></div></div>
+      <div class="data-panel">
+        ${
+          runs.length
+            ? `<div class="table-wrap"><table>
+                <thead><tr><th>来源</th><th>状态</th><th>总数</th><th>有效</th><th>无效</th><th>已应用</th><th>开始时间</th><th>操作</th></tr></thead>
+                <tbody>${runs
+                  .map(
+                    (run) => `<tr>
+                      <td>${escapeHtml(run.sourceCode || "")}</td>
+                      <td>${escapeHtml(run.status || "")}</td>
+                      <td>${escapeHtml(run.recordsTotal || 0)}</td>
+                      <td>${escapeHtml(run.recordsValid || 0)}</td>
+                      <td>${escapeHtml(run.recordsInvalid || 0)}</td>
+                      <td>${escapeHtml(run.recordsApplied || 0)}</td>
+                      <td>${escapeHtml(formatDateTime(run.startedAt || ""))}</td>
+                      <td>${
+                        isAdminUser() && run.status === "validated" && Number(run.recordsInvalid || 0) === 0
+                          ? `<button class="text-button" data-action="apply-sync-run" data-id="${escapeHtml(run.id)}">应用</button>`
+                          : "—"
+                      }</td>
+                    </tr>`,
+                  )
+                  .join("")}</tbody>
+              </table></div>`
+            : '<div class="empty-state">暂无同步批次</div>'
+        }
+      </div>
+    </section>
+    <section class="section-block">
+      <div class="section-heading"><div><h2>数据质量问题</h2><span>发现后可修正主数据，或由操作员标记为已处理。</span></div></div>
+      <div class="data-panel">
+        ${
+          issues.length
+            ? `<div class="table-wrap"><table>
+                <thead><tr><th>严重性</th><th>规则</th><th>对象</th><th>问题</th><th>发现时间</th><th>操作</th></tr></thead>
+                <tbody>${issues
+                  .map(
+                    (issue) => `<tr>
+                      <td>${escapeHtml(issue.severity || "")}</td>
+                      <td>${escapeHtml(issue.ruleCode || "")}</td>
+                      <td>${escapeHtml(`${issue.entityType || ""} ${issue.entityId || ""}`)}</td>
+                      <td>${escapeHtml(issue.title || "")}</td>
+                      <td>${escapeHtml(formatDateTime(issue.lastDetectedAt || ""))}</td>
+                      <td>${
+                        canWriteState()
+                          ? `<button class="text-button" data-action="resolve-quality-issue" data-id="${escapeHtml(issue.id)}">解决</button>
+                             <button class="text-button" data-action="ignore-quality-issue" data-id="${escapeHtml(issue.id)}">忽略</button>`
+                          : "—"
+                      }</td>
+                    </tr>`,
+                  )
+                  .join("")}</tbody>
+              </table></div>`
+            : '<div class="empty-state">没有打开的数据质量问题</div>'
+        }
+      </div>
+    </section>
+  `;
+}
+
+async function loadTickets() {
+  operationsState.ticketLoading = true;
+  render();
+  try {
+    const payload = await requestJson(API_TICKETS_URL);
+    operationsState.tickets = Array.isArray(payload.tickets) ? payload.tickets : [];
+  } finally {
+    operationsState.ticketLoading = false;
+  }
+}
+
+async function loadGovernance() {
+  operationsState.governanceLoading = true;
+  render();
+  try {
+    const [runsPayload, issuesPayload] = await Promise.all([
+      requestJson(API_SYNC_RUNS_URL),
+      requestJson(`${API_QUALITY_ISSUES_URL}?status=open`),
+    ]);
+    operationsState.syncRuns = Array.isArray(runsPayload.runs) ? runsPayload.runs : [];
+    operationsState.qualityIssues = Array.isArray(issuesPayload.issues) ? issuesPayload.issues : [];
+  } finally {
+    operationsState.governanceLoading = false;
+  }
+}
+
+function ticketFormByCode(code) {
+  return (ticketFormDraft.forms || []).find((form) => form.code === code) || ticketFormDraft.forms[0] || null;
+}
+
+function ticketCustomFieldInput(field) {
+  const key = `custom_${field.key}`;
+  const label = field.label || field.key;
+  const required = field.required ? "required" : "";
+  const placeholder = escapeHtml(field.placeholder || "");
+  const options = Array.isArray(field.options) ? field.options : [];
+  if (field.type === "system") {
+    const sourceLabels = Object.fromEntries(designerSystemSources);
+    return `<div class="form-field"><label>${escapeHtml(label)}</label><input type="text" value="${escapeHtml(sourceLabels[(field.config || {}).source] || "系统自动带出")}" readonly tabindex="-1" /></div>`;
+  }
+  if (field.type === "textarea") {
+    return `<div class="form-field full"><label>${escapeHtml(label)}${field.required ? " *" : ""}</label><textarea name="${escapeHtml(key)}" rows="4" placeholder="${placeholder}" ${required}></textarea></div>`;
+  }
+  if (field.type === "select" || field.type === "multiselect") {
+    return `<div class="form-field"><label>${escapeHtml(label)}${field.required ? " *" : ""}</label><select name="${escapeHtml(key)}" ${field.type === "multiselect" ? "multiple" : ""} ${required}><option value="">请选择</option>${options.map((option) => `<option value="${escapeHtml(option.value)}">${escapeHtml(option.label || option.value)}</option>`).join("")}</select></div>`;
+  }
+  if (field.type === "checkbox") {
+    return `<label class="form-field"><span>${escapeHtml(label)}</span><input type="checkbox" name="${escapeHtml(key)}" value="true" /></label>`;
+  }
+  if (field.type === "employee") {
+    return selectField(label, key, [{ value: "", label: "未选择人员" }].concat(state.employees.map((employee) => ({ value: employee.id, label: `${employee.name} (${employee.employeeNo})` }))), "", field.required);
+  }
+  if (field.type === "asset") {
+    return selectField(label, key, [{ value: "", label: "未选择资产" }].concat(state.computers.map((computer) => ({ value: computer.id, label: computer.deviceName }))), "", field.required);
+  }
+  if (field.type === "organization") {
+    return selectField(label, key, getOrgSelectOptions({ includeBlank: true }), "", field.required);
+  }
+  const type = field.type === "number" ? "number" : field.type === "date" ? "date" : field.type === "datetime" ? "datetime-local" : "text";
+  return `<div class="form-field"><label>${escapeHtml(label)}${field.required ? " *" : ""}</label><input type="${type}" name="${escapeHtml(key)}" placeholder="${placeholder}" ${required} /></div>`;
+}
+
+function renderTicketModal(selectedCode = "") {
+  const selectedForm = ticketFormByCode(selectedCode || ticketFormDraft.selectedCode);
+  ticketFormDraft.selectedCode = selectedForm?.code || "";
+  const formOptions = (ticketFormDraft.forms || []).map((form) => ({ value: form.code, label: form.name || form.code }));
+  const customFields = (selectedForm?.fields || []).map(ticketCustomFieldInput).join("");
+  return `${modalHeader("新建工单", "事件用于恢复服务，请求用于交付标准服务。")}
+      <form data-form="ticket">
+        <div class="form-grid">
+          ${selectField("类型", "type", [
+            { value: "incident", label: "事件" },
+            { value: "request", label: "服务请求" },
+          ], "incident", true)}
+          ${selectField("工单表单", "formCode", formOptions.length ? formOptions : [{ value: "", label: "默认表单" }], ticketFormDraft.selectedCode)}
+          ${selectField("影响", "impact", [
+            { value: "low", label: "低" },
+            { value: "medium", label: "中" },
+            { value: "high", label: "高" },
+          ], "medium", true)}
+          ${selectField("紧急度", "urgency", [
+            { value: "low", label: "低" },
+            { value: "medium", label: "中" },
+            { value: "high", label: "高" },
+          ], "medium", true)}
+          ${selectField(
+            "请求人",
+            "requesterEmployeeId",
+            [{ value: "", label: "未关联人员" }].concat(
+              state.employees.map((employee) => ({ value: employee.id, label: `${employee.name} (${employee.employeeNo})` })),
+            ),
+            "",
+          )}
+          ${selectField("关联终端", "relatedComputerId", [{ value: "", label: "未关联终端" }].concat(
+            state.computers.map((computer) => ({ value: computer.id, label: computer.deviceName })),
+          ), "")}
+          ${selectField("组织", "orgId", getOrgSelectOptions({ includeBlank: true }), "")}
+        </div>
+        ${inputField("主题", "title", "", true, "例如：无法连接内网")}
+        ${textareaField("描述", "description", "", true, "现象、影响范围和期望处理结果", 6)}
+        ${customFields ? `<section class="modal-section"><div class="modal-section-title"><h3>${escapeHtml(selectedForm?.name || "业务字段")}</h3><span>按所选表单填写业务信息。</span></div><div class="form-grid">${customFields}</div></section>` : ""}
+        <div class="modal-footer"><button type="button" class="secondary-button" data-action="close-modal">取消</button><button class="primary-button" type="submit">创建工单</button></div>
+      </form>`;
+}
+
+async function openTicketModal(selectedCode = "") {
+  try {
+    const payload = await requestJson(`${API_SERVICE_FORMS_URL}?recordType=ticket&forSubmission=1`);
+    ticketFormDraft.forms = Array.isArray(payload.forms) ? payload.forms : [];
+    ticketFormDraft.selectedCode = selectedCode || ticketFormDraft.selectedCode || ticketFormDraft.forms[0]?.code || "";
+  } catch (error) {
+    ticketFormDraft.forms = [];
+    ticketFormDraft.selectedCode = "";
+    showToast(`读取工单表单失败：${error.message}`, true);
+  }
+  openModal(
+    renderTicketModal(ticketFormDraft.selectedCode),
+    false,
+  );
+}
+
+async function openTicketDetail(ticketId) {
+  try {
+    const payload = await requestJson(`${API_TICKETS_URL}/${encodeURIComponent(ticketId)}`);
+    const ticket = payload.ticket || {};
+    const history = Array.isArray(ticket.history) ? ticket.history : [];
+    const transitionOptions = {
+      new: ["assigned", "in_progress", "cancelled"],
+      assigned: ["in_progress", "pending", "resolved", "cancelled"],
+      in_progress: ["pending", "resolved", "cancelled"],
+      pending: ["in_progress", "resolved", "cancelled"],
+      resolved: ["closed", "in_progress"],
+      closed: [],
+      cancelled: [],
+    }[ticket.status] || [];
+    openModal(
+      `${modalHeader(ticket.number || "工单", ticket.title || "")}
+        <section class="modal-section"><p>${escapeHtml(ticket.description || "")}</p>
+          <div class="form-grid">
+            <div class="form-field"><label>状态</label><input readonly value="${escapeHtml(ticketStatusLabel(ticket.status))}" /></div>
+            <div class="form-field"><label>优先级</label><input readonly value="${escapeHtml(ticket.priority || "")}" /></div>
+            <div class="form-field"><label>SLA 状态</label><input readonly value="${escapeHtml(ticketSlaLabel(ticket.slaState))}" /></div>
+            <div class="form-field"><label>SLA 剩余时间</label><input readonly value="${escapeHtml(ticketSlaRemaining(ticket))}" /></div>
+            <div class="form-field"><label>审批状态</label><input readonly value="${escapeHtml(ticketApprovalLabel(ticket.approvalStatus))}" /></div>
+            <div class="form-field"><label>请求人</label><input readonly value="${escapeHtml(ticket.requesterName || "")}" /></div>
+            <div class="form-field"><label>关联终端</label><input readonly value="${escapeHtml(ticket.relatedComputerName || "")}" /></div>
+          </div>
+        </section>
+        ${
+          Object.keys(ticket.customFields || {}).length
+            ? `<section class="modal-section"><h3>业务字段</h3><div class="form-grid">${Object.entries(ticket.customFields || {})
+                .map(([key, value]) => `<div class="form-field"><label>${escapeHtml(key)}</label><input readonly value="${escapeHtml(Array.isArray(value) ? value.join("、") : String(value ?? ""))}" /></div>`)
+                .join("")}</div></section>`
+            : ""
+        }
+        <section class="modal-section"><h3>处理历史</h3>
+          <div class="audit-list">${history.map((entry) => `<div class="audit-entry"><strong>${escapeHtml(entry.entryType || "")}</strong><span>${escapeHtml(entry.content || "")}</span><small>${escapeHtml(`${entry.createdBy || ""} ${formatDateTime(entry.createdAt || "")}`)}</small></div>`).join("") || "<div class=\"empty-state\">暂无历史</div>"}</div>
+        </section>
+        ${
+          hasPermission("tickets", "update")
+            ? `<form data-form="ticket-note" data-id="${escapeHtml(ticket.id)}">
+                ${textareaField("追加说明", "content", "", true, "记录排查、沟通或处理进展", 3)}
+                <div class="modal-footer"><button class="secondary-button" type="submit">追加说明</button></div>
+              </form>`
+            : ""
+        }
+        ${
+          hasPermission("tickets", "update") && transitionOptions.length
+            ? `<form data-form="ticket-transition" data-id="${escapeHtml(ticket.id)}">
+                <div class="form-grid">
+                  ${selectField("下一状态", "status", transitionOptions.map((value) => ({ value, label: ticketStatusLabel(value) })), transitionOptions[0], true)}
+                  ${selectField("处理人", "assignedToUserId", [{ value: "", label: "未分派" }].concat(
+                    (settingsState.users || []).filter((user) => ["admin", "operator"].includes(user.role)).map((user) => ({ value: user.id, label: user.displayName || user.username })),
+                  ), ticket.assignedToUserId || "")}
+                </div>
+                ${textareaField("解决方案", "resolution", ticket.resolution || "", false, "解决时必填", 3)}
+                ${textareaField("状态说明", "note", "", false, "可选", 2)}
+                <div class="modal-footer"><button class="primary-button" type="submit">更新工单</button></div>
+              </form>`
+            : ""
+        }`,
+      false,
+    );
+  } catch (error) {
+    showToast(`加载工单失败：${error.message}`, true);
+  }
+}
+
+async function handleTicketSubmit(form) {
+  const data = Object.fromEntries(new FormData(form).entries());
+  const selectedForm = ticketFormByCode(data.formCode);
+  const customFields = {};
+  for (const field of selectedForm?.fields || []) {
+    const key = `custom_${field.key}`;
+    if (field.type === "checkbox") {
+      customFields[field.key] = form.querySelector(`[name="${CSS.escape(key)}"]`)?.checked || false;
+    } else if (field.type === "multiselect") {
+      customFields[field.key] = [...(form.querySelector(`[name="${CSS.escape(key)}"]`)?.selectedOptions || [])]
+        .map((option) => option.value)
+        .filter(Boolean);
+    } else if (Object.prototype.hasOwnProperty.call(data, key)) {
+      customFields[field.key] = data[key];
+    }
+  }
+  data.customFields = customFields;
+  try {
+    await requestJson(API_TICKETS_URL, { method: "POST", body: JSON.stringify(data) });
+    closeModal();
+    await loadTickets();
+    render();
+    showToast("工单已创建");
+  } catch (error) {
+    showToast(`创建工单失败：${error.message}`, true);
+  }
+}
+
+async function handleTicketNoteSubmit(form) {
+  const data = Object.fromEntries(new FormData(form).entries());
+  try {
+    await requestJson(`${API_TICKETS_URL}/${encodeURIComponent(form.dataset.id || "")}/notes`, {
+      method: "POST",
+      body: JSON.stringify({ content: data.content, isPublic: true }),
+    });
+    await loadTickets();
+    await openTicketDetail(form.dataset.id || "");
+  } catch (error) {
+    showToast(`追加说明失败：${error.message}`, true);
+  }
+}
+
+async function handleTicketTransitionSubmit(form) {
+  const data = Object.fromEntries(new FormData(form).entries());
+  try {
+    await requestJson(`${API_TICKETS_URL}/${encodeURIComponent(form.dataset.id || "")}/transitions`, {
+      method: "POST",
+      body: JSON.stringify(data),
+    });
+    await loadTickets();
+    await openTicketDetail(form.dataset.id || "");
+  } catch (error) {
+    showToast(`更新工单失败：${error.message}`, true);
+  }
+}
+
+function openSyncStageModal() {
+  openModal(
+    `${modalHeader("暂存外部同步数据", "JSON 数组中每条记录需包含 entityType、externalId、action 和 data。")}
+      <form data-form="sync-stage">
+        <div class="form-grid">
+          ${selectField("来源", "sourceCode", [
+            { value: "manual", label: "Manual maintenance" },
+            { value: "excel", label: "Excel import" },
+            { value: "hr", label: "HR directory" },
+          ], "manual", true)}
+          ${inputField("来源批次标识", "sourceReference", "", false, "例如 HR-20260814")}
+        </div>
+        ${textareaField("记录 JSON", "recordsJson", '[{"entityType":"employee","externalId":"E-1001","action":"upsert","data":{"employeeNo":"E-1001","name":"Example User"}}]', true, "", 12)}
+        <div class="modal-footer"><button type="button" class="secondary-button" data-action="close-modal">取消</button><button class="primary-button" type="submit">暂存并校验</button></div>
+      </form>`,
+    false,
+  );
+}
+
+async function handleSyncStageSubmit(form) {
+  const data = Object.fromEntries(new FormData(form).entries());
+  let records;
+  try {
+    records = JSON.parse(data.recordsJson || "[]");
+  } catch (error) {
+    return showToast("记录 JSON 格式无效。", true);
+  }
+  try {
+    await requestJson(API_SYNC_RUNS_URL, {
+      method: "POST",
+      body: JSON.stringify({
+        sourceCode: data.sourceCode,
+        sourceReference: data.sourceReference || "",
+        records,
+      }),
+    });
+    closeModal();
+    await loadGovernance();
+    render();
+    showToast("同步数据已暂存并完成校验");
+  } catch (error) {
+    showToast(`暂存同步数据失败：${error.message}`, true);
+  }
+}
+
+async function applySyncRun(runId) {
+  try {
+    await runCommand(`${API_SYNC_RUNS_URL}/${encodeURIComponent(runId)}/apply`, {}, "sync-apply");
+    await reloadDomainState();
+    await loadGovernance();
+    render();
+    showToast("同步批次已应用");
+  } catch (error) {
+    showToast(`应用同步批次失败：${error.message}`, true);
+  }
+}
+
+async function runDataQuality() {
+  try {
+    await runCommand("/api/data-quality/run", {}, "data-quality");
+    await loadGovernance();
+    render();
+    showToast("数据质量检查已完成");
+  } catch (error) {
+    showToast(`数据质量检查失败：${error.message}`, true);
+  }
+}
+
+async function resolveQualityIssue(issueId, ignored) {
+  try {
+    await runCommand(
+      `/api/data-quality/issues/${encodeURIComponent(issueId)}/${ignored ? "ignore" : "resolve"}`,
+      {},
+      ignored ? "quality-ignore" : "quality-resolve",
+    );
+    await loadGovernance();
+    render();
+  } catch (error) {
+    showToast(`更新质量问题失败：${error.message}`, true);
+  }
+}
+
+document.addEventListener("click", (event) => {
+  const actionElement = event.target.closest("[data-action]");
+  if (!actionElement) return;
+  const action = actionElement.dataset.action || "";
+  if (action === "open-ticket") openTicketModal();
+  if (action === "open-ticket-detail") openTicketDetail(actionElement.dataset.id || "");
+  if (action === "refresh-tickets") {
+    loadTickets().then(render).catch((error) => showToast(`加载工单失败：${error.message}`, true));
+  }
+  if (action === "open-sync-stage") openSyncStageModal();
+  if (action === "refresh-governance") {
+    loadGovernance().then(render).catch((error) => showToast(`加载治理数据失败：${error.message}`, true));
+  }
+  if (action === "apply-sync-run") applySyncRun(actionElement.dataset.id || "");
+  if (action === "run-data-quality") runDataQuality();
+  if (action === "resolve-quality-issue") resolveQualityIssue(actionElement.dataset.id || "", false);
+  if (action === "ignore-quality-issue") resolveQualityIssue(actionElement.dataset.id || "", true);
+});
+
+async function handleComputerSubmit(form) {
+  const data = Object.fromEntries(new FormData(form).entries());
+  const id = form.dataset.id || "";
+  const selectedModel =
+    data.computerInventoryModelId && data.computerInventoryModelId !== "__custom__"
+      ? getInventoryModel(data.computerInventoryModelId)
+      : null;
+  const selectedBrand = selectedModel ? getInventoryBrand(selectedModel.brandId) : null;
+  const wifiMac = normalizeMacAddress(data.wifiMac);
+  const ethernetMac = normalizeMacAddress(data.ethernetMac);
+  if (!data.deviceName || !isValidMacAddress(wifiMac) || !isValidMacAddress(ethernetMac)) {
+    return showToast("Please provide a device name and valid MAC addresses.", true);
+  }
+  try {
+    await saveResource("computer", id, {
+      deviceName: data.deviceName,
+      orgId: data.orgId || "",
+      deviceType: data.deviceType,
+      brand: selectedBrand?.name || data.brand || "",
+      model: selectedModel?.name || data.model || "",
+      inventoryModelId: selectedModel?.id || "",
+      cpu: selectedModel?.cpu || data.cpu || "",
+      memory: selectedModel?.memory || data.memory || "",
+      storage: normalizeStorageValue(selectedModel?.storage || data.storage || ""),
+      gpu: selectedModel?.gpu || data.gpu || "",
+      fixedAssetCode: data.fixedAssetCode || "",
+      purchaseDate: data.purchaseDate || selectedModel?.inboundDate || "",
+      registeredDate: data.registeredDate || "",
+      snSt: data.snSt || "",
+      wifiMac,
+      ethernetMac,
+      location: data.location || "",
+      department: data.department || "",
+      position: data.position || "",
+      status: data.status || "idle",
+      remarks: data.remarks || "",
+    });
+    closeModal();
+    await reloadDomainState();
+    showToast(id ? "办公终端已更新" : "办公终端已创建");
+  } catch (error) {
+    showToast(`保存办公终端失败：${error.message}`, true);
+  }
+}
+
+async function handleEmployeeSubmit(form) {
+  const data = Object.fromEntries(new FormData(form).entries());
+  const id = form.dataset.id || "";
+  if (data.status === "left") {
+    return showToast("离职归档仍需通过受控回收流程，暂不允许从编辑表单直接提交。", true);
+  }
+  const employeeNo = String(data.employeeNo || "").trim() || employeeNumberFor(data.orgId, id);
+  if (!data.name || !employeeNo) return showToast("人员编号和姓名不能为空。", true);
+  try {
+    await saveResource("employee", id, {
+      employeeNo,
+      name: data.name,
+      orgId: data.orgId || "",
+      department: data.department || "",
+      position: data.position || "",
+      email: data.email || "",
+      mobile: data.mobile || "",
+      status: data.status || "active",
+    });
+    closeModal();
+    await reloadDomainState();
+    showToast(id ? "人员已更新" : "人员已创建");
+  } catch (error) {
+    showToast(`保存人员失败：${error.message}`, true);
+  }
+}
+
+async function handleOrgSubmit(form) {
+  const data = Object.fromEntries(new FormData(form).entries());
+  const id = form.dataset.id || "";
+  const code = String(data.code || "").trim() || orgCodeFor({ name: data.name }, data.parentId, id);
+  if (!code || !data.name) return showToast("组织编码和名称不能为空。", true);
+  try {
+    await saveResource("organization", id, {
+      code,
+      name: data.name,
+      parentId: data.parentId || "",
+      sortOrder: Math.max(0, Number(data.sortOrder || 1000)),
+    });
+    closeModal();
+    await reloadDomainState();
+    showToast(id ? "组织已更新" : "组织已创建");
+  } catch (error) {
+    showToast(`保存组织失败：${error.message}`, true);
+  }
+}
+
+async function handleTypeSubmit(form) {
+  const data = Object.fromEntries(new FormData(form).entries());
+  const id = form.dataset.id || "";
+  if (!data.code || !data.name) return showToast("类型编码和名称不能为空。", true);
+  try {
+    await saveResource("inventory-type", id, {
+      code: data.code,
+      name: data.name,
+      unit: data.unit || "件",
+    });
+    closeModal();
+    await reloadDomainState();
+    showToast(id ? "物资类型已更新" : "物资类型已创建");
+  } catch (error) {
+    showToast(`保存物资类型失败：${error.message}`, true);
+  }
+}
+
+async function handleInventoryBrandSubmit(form) {
+  const data = Object.fromEntries(new FormData(form).entries());
+  const id = form.dataset.id || "";
+  const typeId = form.dataset.typeId || "";
+  if (!typeId || !data.name) return showToast("请选择类型并填写品牌名称。", true);
+  try {
+    await saveResource("inventory-brand", id, {
+      typeId,
+      name: data.name,
+      sortOrder: Math.max(0, Number(data.sortOrder || 1000)),
+    });
+    closeModal();
+    await reloadDomainState();
+    showToast(id ? "库存品牌已更新" : "库存品牌已创建");
+  } catch (error) {
+    showToast(`保存库存品牌失败：${error.message}`, true);
+  }
+}
+
+async function handleInventoryModelSubmit(form) {
+  const data = Object.fromEntries(new FormData(form).entries());
+  const id = form.dataset.id || "";
+  const typeId = form.dataset.typeId || "";
+  const brandId = form.dataset.brandId || "";
+  const previous = getInventoryModel(id);
+  const desiredQuantity = Math.max(0, Number(data.quantity || 0));
+  const isComputerModel = isComputerInventoryType(getType(typeId));
+  if (!typeId || !brandId || !data.name) return showToast("请选择类型、品牌并填写型号。", true);
+  try {
+    const result = await saveResource("inventory-model", id, {
+      typeId,
+      brandId,
+      name: data.name,
+      batchKey: previous?.batchKey || (isComputerModel ? createId("batch") : ""),
+      inboundDate: isComputerModel ? data.inboundDate || "" : "",
+      cpu: isComputerModel ? data.cpu || "" : "",
+      memory: isComputerModel ? data.memory || "" : "",
+      storage: isComputerModel ? normalizeStorageValue(data.storage || "") : "",
+      gpu: isComputerModel ? data.gpu || "" : "",
+      sortOrder: Math.max(0, Number(data.sortOrder || 1000)),
+    });
+    const modelId = result.inventoryModel?.id || id;
+    const quantityDelta = desiredQuantity - Math.max(0, Number(previous?.quantity || 0));
+    if (quantityDelta > 0) {
+      await runCommand(
+        "/api/inventory/receipts",
+        {
+          modelId,
+          quantity: quantityDelta,
+          inboundDate: data.inboundDate || currentDateText(),
+          sourceLabel: "Manual inventory receipt",
+          note: "Inventory model quantity set from the catalog form",
+        },
+        "inventory-receipt",
+      );
+    } else if (quantityDelta < 0) {
+      await runCommand(
+        "/api/inventory/adjustments",
+        {
+          modelId,
+          quantityDelta,
+          note: "Inventory model quantity adjusted from the catalog form",
+        },
+        "inventory-adjust",
+      );
+    }
+    closeModal();
+    await reloadDomainState();
+    showToast(id ? "库存型号已更新" : "库存型号已创建");
+  } catch (error) {
+    showToast(`保存库存型号失败：${error.message}`, true);
+  }
+}
+
+async function handleInventoryImportSubmit(form) {
+  const data = Object.fromEntries(new FormData(form).entries());
+  const typeName = String(data.type || "").trim();
+  const brandName = String(data.brand || "").trim();
+  const modelName = String(data.model || "").trim();
+  const quantity = Math.max(1, Number(data.quantity || 0));
+  if (!typeName || !brandName || !modelName || !quantity) {
+    return showToast("请填写类型、品牌、型号和数量。", true);
+  }
+  const isComputerImport = isComputerInventoryTypeName(typeName);
+  try {
+    let type = isComputerImport ? computerInventoryType() || findInventoryTypeByName(typeName) : findInventoryTypeByName(typeName);
+    if (!type) {
+      const result = await saveResource("inventory-type", "", {
+        code: isComputerImport ? "computer" : inventoryTypeCodeFor(typeName),
+        name: isComputerImport ? "办公终端" : typeName,
+        unit: isComputerImport ? "台" : "件",
+      });
+      type = result.inventoryType;
+    }
+    let brand = findInventoryBrandByName(type.id, brandName);
+    if (!brand) {
+      const result = await saveResource("inventory-brand", "", {
+        typeId: type.id,
+        name: brandName,
+        sortOrder: nextBrandSortOrder(type.id),
+      });
+      brand = result.inventoryBrand;
+    }
+    let model = isComputerImport ? null : findInventoryModelByName(brand.id, modelName);
+    if (!model) {
+      const result = await saveResource("inventory-model", "", {
+        typeId: type.id,
+        brandId: brand.id,
+        name: modelName,
+        batchKey: isComputerImport ? createId("batch") : "",
+        inboundDate: isComputerImport ? data.inboundDate || currentDateText() : "",
+        cpu: isComputerImport ? data.cpu || "" : "",
+        memory: isComputerImport ? data.memory || "" : "",
+        storage: isComputerImport ? normalizeStorageValue(data.storage || "") : "",
+        gpu: isComputerImport ? data.gpu || "" : "",
+        sortOrder: nextModelSortOrder(brand.id),
+      });
+      model = result.inventoryModel;
+    }
+    await runCommand(
+      "/api/inventory/receipts",
+      {
+        modelId: model.id,
+        quantity,
+        inboundDate: data.inboundDate || currentDateText(),
+        sourceLabel: isComputerImport ? "Computer inventory receipt" : "Inventory import",
+        note: data.note || "",
+      },
+      "inventory-receipt",
+    );
+    closeModal();
+    await reloadDomainState();
+    showToast(`已入库 ${type.name} / ${brand.name} / ${model.name}，数量 +${quantity}`);
+  } catch (error) {
+    showToast(`物资入库失败：${error.message}`, true);
+  }
+}
+
+async function finishDeviceSave(mode) {
+  const pending = pendingDeviceSave;
+  pendingDeviceSave = null;
+  if (!pending) return;
+  const employee = getEmployee(pending.employeeId);
+  const model = inventoryModelForItem(pending.item);
+  if (!employee || !model) {
+    return showToast("领用必须关联已登记的库存型号。", true);
+  }
+  try {
+    if (pending.previous?.id) {
+      const returned = await returnUsageAllocations(
+        employee.id,
+        pending.kind === "monitor" ? "monitor" : "non_asset",
+        pending.previous.id,
+        "Superseded by a new allocation",
+      );
+      if (!returned) {
+        throw new Error("Existing usage has no tracked allocation. Create a reconciled allocation before editing it.");
+      }
+    }
+    await runCommand(
+      "/api/inventory/allocations",
+      {
+        allocationType: pending.kind === "monitor" ? "monitor" : "non_asset",
+        employeeId: employee.id,
+        modelId: model.id,
+        quantity: pending.kind === "monitor" ? 1 : Math.max(1, Number(pending.item.quantity || 1)),
+        displayName: pending.item.brand || "",
+        notes: mode === "deduct" ? "Inventory issued to employee" : "Registered without stock deduction",
+        stockAdjusted: mode === "deduct",
+      },
+      "inventory-allocation",
+    );
+    closeModal();
+    await reloadDomainState();
+    openDeviceManager(employee.id);
+    showToast(mode === "deduct" ? "领用已完成并扣减库存" : "领用已登记，库存未扣减");
+  } catch (error) {
+    showToast(`保存领用失败：${error.message}`, true);
+  }
+}
+
+async function handleRoleCreateSubmit(form) {
+  if (!isAdminUser()) return showToast("只有管理员可以创建角色。", true);
+  if (form.dataset.submitting === "1") return;
+  form.dataset.submitting = "1";
+  const submit = form.querySelector('button[type="submit"]');
+  const data = Object.fromEntries(new FormData(form).entries());
+  const usernamePattern = /^[a-z][a-z0-9._-]{2,63}$/;
+  const permissions = [];
+  const access = accessControlState();
+  for (const module of access.modules || []) {
+    const scope =
+      form.querySelector(`[data-role-permission-scope="${CSS.escape(module.code)}"]`)?.value || "none";
+    for (const [action] of permissionActions) {
+      const checkbox = form.querySelector(
+        `[data-role-permission="${CSS.escape(`${module.code}:${action}`)}"]`,
+      );
+      permissions.push({
+        moduleCode: module.code,
+        actionCode: action,
+        canView: action === "view" ? Boolean(checkbox?.checked) : false,
+        canCreate: action === "create" ? Boolean(checkbox?.checked) : false,
+        canUpdate: action === "update" ? Boolean(checkbox?.checked) : false,
+        canDelete: action === "delete" ? Boolean(checkbox?.checked) : false,
+        canApprove: action === "approve" ? Boolean(checkbox?.checked) : false,
+        canExport: action === "export" ? Boolean(checkbox?.checked) : false,
+        dataScope: scope,
+      });
+    }
+  }
+  if (!usernamePattern.test(String(data.code || "").trim())) {
+    form.dataset.submitting = "0";
+    return showToast("角色编码需使用 3-64 位小写字母、数字、点、下划线或短横线。", true);
+  }
+  if (submit) submit.disabled = true;
+  try {
+    const payload = await requestJson(API_ROLES_URL, {
+      method: "POST",
+      body: JSON.stringify({
+        code: String(data.code || "").trim(),
+        name: String(data.name || "").trim(),
+        category: data.category || "custom",
+        isSuperAdmin: data.isSuperAdmin === "on",
+        permissions,
+      }),
+    });
+    const role = payload.role || {};
+    access.targetType = "role";
+    access.targetId = String(role.id || "");
+    form.reset();
+    await loadAccessControl();
+    if (role.id) {
+      access.targetType = "role";
+      access.targetId = String(role.id);
+      await loadAccessControlTarget();
+    }
+    settingsState.view = "access";
+    render();
+    showToast("角色已创建。");
+  } catch (error) {
+    showToast(`创建角色失败：${error.message}`, true);
+  } finally {
+    form.dataset.submitting = "0";
+    if (submit?.isConnected) submit.disabled = false;
+  }
+}
+
+async function handleAccessPermissionsSubmit(form) {
+  if (!isAdminUser()) return showToast("只有管理员可以修改权限。", true);
+  const access = accessControlState();
+  const entries = [];
+  for (const module of access.modules || []) {
+    const scope =
+      form.querySelector(`[data-permission-scope="${CSS.escape(module.code)}"]`)?.value || "none";
+    for (const [action] of permissionActions) {
+      const checkbox = form.querySelector(
+        `[data-permission="${CSS.escape(`${module.code}:${action}`)}"]`,
+      );
+      entries.push({
+        moduleCode: module.code,
+        actionCode: action,
+        canView: action === "view" ? Boolean(checkbox?.checked) : false,
+        canCreate: action === "create" ? Boolean(checkbox?.checked) : false,
+        canUpdate: action === "update" ? Boolean(checkbox?.checked) : false,
+        canDelete: action === "delete" ? Boolean(checkbox?.checked) : false,
+        canApprove: action === "approve" ? Boolean(checkbox?.checked) : false,
+        canExport: action === "export" ? Boolean(checkbox?.checked) : false,
+        dataScope: scope,
+      });
+    }
+  }
+  const endpoint =
+    access.targetType === "role"
+      ? `${API_ROLES_URL}/${encodeURIComponent(access.targetId)}/permissions`
+      : `${API_USERS_URL}/${encodeURIComponent(access.targetId)}/permissions`;
+  try {
+    const payload = await requestJson(endpoint, {
+      method: "PUT",
+      body: JSON.stringify({ permissions: entries }),
+    });
+    access.permissions = Array.isArray(payload.permissions) ? payload.permissions : entries;
+    render();
+    showToast("权限已保存。");
+  } catch (error) {
+    showToast(`权限保存失败：${error.message}`, true);
+  }
+}
+
+async function assignComputer(employeeId) {
+  const select = document.querySelector(`[data-assign-computer="${CSS.escape(employeeId)}"]`);
+  const computerId = select?.value || "";
+  if (!computerId) return showToast("请选择可分配的办公终端。", true);
+  try {
+    await runCommand(
+      `/api/computers/${encodeURIComponent(computerId)}/assignments`,
+      { employeeId, notes: "Assigned from employee device manager" },
+      "computer-assignment",
+    );
+    await reloadDomainState();
+    openDeviceManager(employeeId);
+    showToast("办公终端已分配");
+  } catch (error) {
+    showToast(`分配办公终端失败：${error.message}`, true);
+  }
+}
+
+async function releaseComputer(computerId, employeeId) {
+  try {
+    await runCommand(
+      `/api/computers/${encodeURIComponent(computerId)}/assignments/return`,
+      { nextStatus: "idle", notes: "Returned from employee device manager" },
+      "computer-return",
+    );
+    await reloadDomainState();
+    openDeviceManager(employeeId);
+    showToast("办公终端已归还");
+  } catch (error) {
+    showToast(`归还办公终端失败：${error.message}`, true);
+  }
+}
 
 document.addEventListener("submit", (event) => {
   const form = event.target.closest("form[data-form]");
@@ -7586,6 +9112,62 @@ document.addEventListener("submit", (event) => {
     handleUserAccountSubmit(form);
     return;
   }
+  if (type === "role-create") {
+    handleRoleCreateSubmit(form);
+    return;
+  }
+  if (type === "access-permissions") {
+    handleAccessPermissionsSubmit(form);
+    return;
+  }
+  if (type === "ticket") {
+    handleTicketSubmit(form);
+    return;
+  }
+  if (type === "ticket-note") {
+    handleTicketNoteSubmit(form);
+    return;
+  }
+  if (type === "ticket-transition") {
+    handleTicketTransitionSubmit(form);
+    return;
+  }
+  if (type === "sync-stage") {
+    handleSyncStageSubmit(form);
+    return;
+  }
+  if (type === "service-form") {
+    handleServiceFormSubmit(form);
+    return;
+  }
+  if (type === "sla-policy") {
+    handleSlaPolicySubmit(form);
+    return;
+  }
+  if (type === "approval-workflow") {
+    handleApprovalWorkflowSubmit(form);
+    return;
+  }
+  if (type === "service-change") {
+    handleServiceChangeSubmit(form);
+    return;
+  }
+  if (type === "service-problem") {
+    handleServiceProblemSubmit(form);
+    return;
+  }
+  if (type === "service-knowledge") {
+    handleServiceKnowledgeSubmit(form);
+    return;
+  }
+  if (type === "service-transition") {
+    handleServiceTransitionSubmit(form);
+    return;
+  }
+  if (type === "service-approval") {
+    handleServiceApprovalSubmit(form);
+    return;
+  }
   if (type === "computer") handleComputerSubmit(form);
   if (type === "employee") handleEmployeeSubmit(form);
   if (type === "monitor") handleMonitorSubmit(form);
@@ -7600,6 +9182,37 @@ document.addEventListener("submit", (event) => {
 });
 
 document.addEventListener("change", (event) => {
+  const ticketFormSelect = event.target.closest('form[data-form="ticket"] select[name="formCode"]');
+  if (ticketFormSelect) {
+    ticketFormDraft.selectedCode = ticketFormSelect.value || "";
+    openTicketModal(ticketFormDraft.selectedCode);
+    return;
+  }
+
+  const accessTargetType = event.target.closest("[data-access-target-type]");
+  if (accessTargetType) {
+    const access = accessControlState();
+    access.targetType = accessTargetType.value === "user" ? "user" : "role";
+    access.targetId =
+      access.targetType === "role"
+        ? String(access.roles[0]?.id || "")
+        : String(access.users[0]?.id || "");
+    loadAccessControlTarget()
+      .then(() => render())
+      .catch((error) => showToast(`Unable to load permissions: ${error.message}`, true));
+    return;
+  }
+
+  const accessTargetId = event.target.closest("[data-access-target-id]");
+  if (accessTargetId) {
+    const access = accessControlState();
+    access.targetId = accessTargetId.value || "";
+    loadAccessControlTarget()
+      .then(() => render())
+      .catch((error) => showToast(`Unable to load permissions: ${error.message}`, true));
+    return;
+  }
+
   const updateReleaseChannel = event.target.closest("[data-update-release-channel]");
   if (updateReleaseChannel) {
     const nextChannel = updateReleaseChannel.value || DEFAULT_UPDATE_RELEASE_CHANNEL;
@@ -7615,9 +9228,12 @@ document.addEventListener("change", (event) => {
   const updateRepositoryUrl = event.target.closest("[data-update-repository-url]");
   if (updateRepositoryUrl) {
     const nextUrl = updateRepositoryUrl.value.trim();
-    settingsState.updateRepositoryUrl = nextUrl;
-    settingsState.updateStatus = null;
-    settingsState.updateSelectedSha = "";
+    if (nextUrl !== settingsState.updateRepositoryUrl) {
+      settingsState.updateRepositoryUrl = nextUrl;
+      settingsState.updateStatus = null;
+      settingsState.updateSelectedSha = "";
+      render();
+    }
     return;
   }
 
@@ -7751,9 +9367,8 @@ document.addEventListener("input", (event) => {
 document.addEventListener("input", (event) => {
   const filter = event.target.closest("[data-filter]");
   if (!filter) return;
-  const filterName = filter.dataset.filter;
-  if (!isDeferredTextFilter(filterName)) return;
-  filterSearchDrafts[filterName] = filter.value;
+  if (!isDeferredTextFilter(filter.dataset.filter)) return;
+  filterSearchDrafts[filter.dataset.filter] = filter.value;
 });
 
 document.addEventListener("keydown", (event) => {
@@ -7788,9 +9403,1356 @@ document.addEventListener("keydown", (event) => {
       console.error("Unable to apply audit filters", error);
       showToast(`日志筛选失败：${error.message}`, true);
     });
+  }
+});
+
+const serviceViewLabels = {
+  tickets: "工单",
+  changes: "变更管理",
+  problems: "问题管理",
+  knowledge: "知识库",
+  forms: "服务表单",
+  policies: "SLA 管理",
+  approvals: "审批流程",
+  notifications: "消息通知",
+};
+
+const serviceStatusLabels = {
+  draft: "草稿",
+  submitted: "已提交",
+  assessing: "评估中",
+  approved: "已批准",
+  rejected: "已拒绝",
+  scheduled: "已排期",
+  implementing: "实施中",
+  verified: "已验证",
+  closed: "已关闭",
+  cancelled: "已取消",
+  new: "新建",
+  investigating: "调查中",
+  known_error: "已知错误",
+  resolved: "已解决",
+  review: "审核中",
+  published: "已发布",
+  archived: "已归档",
+  pending: "待审批",
+};
+
+function serviceState() {
+  if (!operationsState.service) {
+    operationsState.service = {
+      view: "tickets",
+      loading: false,
+      changes: [],
+      problems: [],
+      articles: [],
+      forms: [],
+      policies: [],
+      approvals: [],
+      notifications: [],
+    };
+  }
+  return operationsState.service;
+}
+
+function ensureServiceNavigation() {
+  const nav = document.querySelector("#sidebarNav");
+  if (!nav || nav.querySelector('[data-page="serviceManagement"]')) return;
+  nav.insertAdjacentHTML(
+    "beforeend",
+    `<div class="sidebar-section-title sidebar-section-title-spaced">服务管理</div>
+     <button class="nav-item" data-action="navigate" data-page="serviceManagement">
+       <span class="nav-icon">◎</span><span>工单与服务管理</span>
+     </button>`,
+  );
+}
+
+async function loadServiceManagement() {
+  const service = serviceState();
+  service.loading = true;
+  render();
+  const jobs = [];
+  const view = normalizeServiceView();
+  if (view === "tickets" && hasPermission("tickets", "view")) {
+    jobs.push(requestJson(API_TICKETS_URL).then((p) => (operationsState.tickets = p.tickets || [])));
+  }
+  if (view === "changes" && hasPermission("changes", "view")) jobs.push(requestJson(API_CHANGES_URL).then((p) => (service.changes = p.changes || [])));
+  if (view === "problems" && hasPermission("problems", "view")) jobs.push(requestJson(API_PROBLEMS_URL).then((p) => (service.problems = p.problems || [])));
+  if (view === "knowledge" && hasPermission("knowledge", "view")) jobs.push(requestJson(API_KNOWLEDGE_URL).then((p) => (service.articles = p.articles || [])));
+  if (view === "forms" && hasPermission("forms", "view")) jobs.push(requestJson(API_SERVICE_FORMS_URL).then((p) => (service.forms = p.forms || [])));
+  if (view === "policies" && hasPermission("sla", "view")) jobs.push(requestJson(API_SLA_POLICIES_URL).then((p) => (service.policies = p.policies || [])));
+  if (view === "approvals" && hasPermission("approvals", "view")) {
+    jobs.push(requestJson(API_APPROVALS_URL).then((p) => (service.approvals = p.approvals || [])));
+    jobs.push(requestJson(API_WORKFLOWS_URL).then((p) => (service.workflows = p.workflows || [])));
+  }
+  if (view === "notifications" && hasPermission("notifications", "view")) jobs.push(requestJson(API_NOTIFICATIONS_URL).then((p) => (service.notifications = p.notifications || [])));
+  try {
+    await Promise.all(jobs);
+  } finally {
+    service.loading = false;
+    updateAuthenticatedChrome();
+  }
+}
+
+function serviceTableEmpty(text = "暂无数据") {
+  return `<div class="empty-state">${escapeHtml(text)}</div>`;
+}
+
+function renderServiceTabs() {
+  const service = serviceState();
+  return `<div class="service-tabs">${Object.entries(serviceViewLabels)
+    .filter(([view]) => canViewServiceView(view))
+    .map(
+      ([view, label]) =>
+        `<button type="button" class="secondary-button service-tab ${service.view === view ? "is-active" : ""}" data-action="service-view" data-view="${view}" aria-pressed="${service.view === view}">${label}</button>`,
+    )
+    .join("")}</div>`;
+}
+
+function renderServiceChanges() {
+  const service = serviceState();
+  return `<section class="data-panel"><div class="section-heading"><div><h2>变更管理</h2><span>计划、评估、审批、实施和验证均保留记录。</span></div>
+    ${hasPermission("changes", "create") ? '<button class="primary-button" data-action="open-service-change">新建变更</button>' : ""}
+  </div>
+  ${
+    service.changes.length
+      ? `<div class="table-wrap"><table><thead><tr><th>编号</th><th>标题</th><th>类型</th><th>状态</th><th>风险</th><th>处理人</th><th>更新时间</th><th>操作</th></tr></thead><tbody>${service.changes
+          .map(
+            (item) =>
+              `<tr><td>${escapeHtml(item.number || "")}</td><td>${escapeHtml(item.title || "")}</td><td>${escapeHtml(item.type || "")}</td><td>${escapeHtml(serviceStatusLabels[item.status] || item.status || "")}</td><td>${escapeHtml(item.risk || "")}</td><td>${escapeHtml(item.assignedToName || "—")}</td><td>${escapeHtml(formatDateTime(item.updatedAt || ""))}</td><td>${hasPermission("changes", "update") ? `<button class="text-button" data-action="open-service-transition" data-record-type="change" data-id="${escapeHtml(item.id)}" data-status="${escapeHtml(item.status)}">流转</button>` : "—"}</td></tr>`,
+          )
+          .join("")}</tbody></table></div>`
+      : serviceTableEmpty("暂无变更记录")
+  }</section>`;
+}
+
+function renderServiceProblems() {
+  const service = serviceState();
+  return `<section class="data-panel"><div class="section-heading"><div><h2>问题管理</h2><span>针对重复事件、根因、已知错误和永久解决方案进行跟踪。</span></div>
+    ${hasPermission("problems", "create") ? '<button class="primary-button" data-action="open-service-problem">新建问题</button>' : ""}
+  </div>
+  ${
+    service.problems.length
+      ? `<div class="table-wrap"><table><thead><tr><th>编号</th><th>标题</th><th>状态</th><th>影响</th><th>处理人</th><th>更新时间</th><th>操作</th></tr></thead><tbody>${service.problems
+          .map(
+            (item) =>
+              `<tr><td>${escapeHtml(item.number || "")}</td><td>${escapeHtml(item.title || "")}</td><td>${escapeHtml(serviceStatusLabels[item.status] || item.status || "")}</td><td>${escapeHtml(item.impact || "")}</td><td>${escapeHtml(item.assignedToName || "—")}</td><td>${escapeHtml(formatDateTime(item.updatedAt || ""))}</td><td>${hasPermission("problems", "update") ? `<button class="text-button" data-action="open-service-transition" data-record-type="problem" data-id="${escapeHtml(item.id)}" data-status="${escapeHtml(item.status)}">流转</button>` : "—"}</td></tr>`,
+          )
+          .join("")}</tbody></table></div>`
+      : serviceTableEmpty("暂无问题记录")
+  }</section>`;
+}
+
+function renderServiceKnowledge() {
+  const service = serviceState();
+  return `<section class="data-panel"><div class="section-heading"><div><h2>知识库</h2><span>将常见故障、标准操作和解决方案沉淀为可检索文章。</span></div>
+    ${hasPermission("knowledge", "create") ? '<button class="primary-button" data-action="open-service-knowledge">新建文章</button>' : ""}
+  </div>
+  ${
+    service.articles.length
+      ? `<div class="table-wrap"><table><thead><tr><th>编号</th><th>标题</th><th>分类</th><th>状态</th><th>负责人</th><th>更新时间</th><th>操作</th></tr></thead><tbody>${service.articles
+          .map(
+            (item) =>
+              `<tr><td>${escapeHtml(item.number || "")}</td><td>${escapeHtml(item.title || "")}</td><td>${escapeHtml(item.category || "")}</td><td>${escapeHtml(serviceStatusLabels[item.status] || item.status || "")}</td><td>${escapeHtml(item.ownerName || "—")}</td><td>${escapeHtml(formatDateTime(item.updatedAt || ""))}</td><td>${hasPermission("knowledge", "approve") ? `<button class="text-button" data-action="open-service-transition" data-record-type="knowledge" data-id="${escapeHtml(item.id)}" data-status="${escapeHtml(item.status)}">发布</button>` : "—"}</td></tr>`,
+          )
+          .join("")}</tbody></table></div>`
+      : serviceTableEmpty("暂无知识文章")
+  }</section>`;
+}
+
+function renderServiceForms() {
+  const service = serviceState();
+  return `<section class="data-panel"><div class="section-heading"><div><h2>服务表单</h2><span>为工单、变更和问题定义业务字段、类型、必填规则和选项。</span></div>
+    ${hasPermission("forms", "create") ? '<button class="primary-button" data-action="open-form-designer">新建表单</button>' : ""}
+  </div>
+  ${
+    service.forms.length
+      ? `<div class="table-wrap"><table><thead><tr><th>编码</th><th>名称</th><th>业务类型</th><th>版本</th><th>字段数</th><th>更新时间</th><th>操作</th></tr></thead><tbody>${service.forms
+          .map(
+            (item) =>
+              `<tr><td>${escapeHtml(item.code || "")}</td><td>${escapeHtml(item.name || "")}</td><td>${escapeHtml(item.recordType || "")}</td><td>${escapeHtml(item.version || 1)}</td><td>${escapeHtml((item.fields || []).length)}</td><td>${escapeHtml(formatDateTime(item.updatedAt || ""))}</td><td>${hasPermission("forms", "update") ? `<button class="text-button" data-action="open-service-form" data-id="${escapeHtml(item.id)}">编辑</button>` : "—"}</td></tr>`,
+          )
+          .join("")}</tbody></table></div>`
+      : serviceTableEmpty("暂无表单")
+  }</section>`;
+}
+
+function renderServicePolicies() {
+  const service = serviceState();
+  return `<section class="data-panel"><div class="section-heading"><div><h2>SLA 管理</h2><span>按优先级设定响应和解决时限，工单创建后自动开始计时。</span></div>${hasPermission("sla", "create") ? '<button class="primary-button" data-action="open-sla-policy">新建 SLA 策略</button>' : ""}</div>
+  ${
+    service.policies.length
+      ? `<div class="table-wrap"><table><thead><tr><th>编码</th><th>名称</th><th>优先级</th><th>响应时限</th><th>解决时限</th><th>状态</th><th>操作</th></tr></thead><tbody>${service.policies
+          .map(
+            (item) =>
+              `<tr><td>${escapeHtml(item.code || "")}</td><td>${escapeHtml(item.name || "")}</td><td>${escapeHtml(item.priority || "")}</td><td>${escapeHtml(item.responseMinutes || 0)} 分钟</td><td>${escapeHtml(item.resolutionMinutes || 0)} 分钟</td><td>${item.isActive ? "启用" : "停用"}</td><td>${hasPermission("sla", "update") ? `<button class="text-button" data-action="open-sla-policy" data-id="${escapeHtml(item.id)}">编辑</button>` : "—"}</td></tr>`,
+          )
+          .join("")}</tbody></table></div>`
+      : serviceTableEmpty("暂无 SLA 策略")
+  }</section>`;
+}
+
+function renderServiceApprovals() {
+  const service = serviceState();
+  const workflowSection = `<section class="data-panel"><div class="section-heading"><div><h2>审批流程配置</h2><span>按业务类型设置多级审批人，可指定角色或单个用户。</span></div>${hasPermission("approvals", "create") ? '<button class="primary-button" data-action="open-approval-workflow">新建审批流程</button>' : ""}</div>
+  ${
+    service.workflows.length
+      ? `<div class="table-wrap"><table><thead><tr><th>编码</th><th>名称</th><th>业务类型</th><th>步骤</th><th>状态</th><th>操作</th></tr></thead><tbody>${service.workflows
+          .map((workflow) => {
+            const stepText = (workflow.steps || [])
+              .map((step) => `${step.order}. ${step.name}（${step.approverRoleCode || `用户 ${step.approverUserId}`}）`)
+              .join("；");
+            return `<tr><td>${escapeHtml(workflow.code || "")}</td><td>${escapeHtml(workflow.name || "")}</td><td>${escapeHtml(workflow.recordType || "")}</td><td>${escapeHtml(stepText)}</td><td>${workflow.isActive ? "启用" : "停用"}</td><td>${hasPermission("approvals", "update") ? `<button class="text-button" data-action="open-approval-workflow" data-id="${escapeHtml(workflow.id)}">编辑</button>` : "—"}</td></tr>`;
+          })
+          .join("")}</tbody></table></div>`
+      : serviceTableEmpty("暂无审批流程")
+  }</section>`;
+  return `${workflowSection}<section class="data-panel"><div class="section-heading"><div><h2>待审批</h2><span>审批通过后才可进入后续服务管理状态。</span></div></div>
+  ${
+    service.approvals.length
+      ? `<div class="table-wrap"><table><thead><tr><th>业务类型</th><th>记录编号</th><th>流程</th><th>当前步骤</th><th>申请人</th><th>创建时间</th><th>操作</th></tr></thead><tbody>${service.approvals
+          .map(
+            (item) =>
+              `<tr><td>${escapeHtml(item.recordType || "")}</td><td>${escapeHtml(item.recordId || "")}</td><td>${escapeHtml(item.workflowName || "")}</td><td>${escapeHtml(item.currentStepOrder || 1)}</td><td>${escapeHtml(item.requestedBy || "—")}</td><td>${escapeHtml(formatDateTime(item.createdAt || ""))}</td><td>${hasPermission("approvals", "approve") ? `<button class="text-button" data-action="open-approval-decision" data-id="${escapeHtml(item.id)}">审批</button>` : "—"}</td></tr>`,
+          )
+          .join("")}</tbody></table></div>`
+      : serviceTableEmpty("暂无待审批记录")
+  }</section>`;
+}
+
+function renderServiceNotifications() {
+  const service = serviceState();
+  return `<section class="data-panel"><div class="section-heading"><div><h2>消息通知</h2><span>状态变化、审批结果和分派信息会自动生成站内通知。</span></div></div>
+  ${
+    service.notifications.length
+      ? `<div class="notification-list">${service.notifications
+          .map(
+            (item) =>
+              `<div class="notification-item ${item.isRead ? "" : "is-unread"}"><strong>${escapeHtml(item.title || "")}</strong><p>${escapeHtml(item.content || "")}</p><small>${escapeHtml(formatDateTime(item.createdAt || ""))}</small>${item.isRead ? "" : `<button class="text-button" data-action="read-notification" data-id="${escapeHtml(item.id)}">标记已读</button>`}</div>`,
+          )
+          .join("")}</div>`
+      : serviceTableEmpty("暂无通知")
+  }</section>`;
+}
+
+function renderServiceManagementPage() {
+  const service = serviceState();
+  normalizeServiceView();
+  let content = "";
+  if (service.view === "changes") content = renderServiceChanges();
+  else if (service.view === "problems") content = renderServiceProblems();
+  else if (service.view === "knowledge") content = renderServiceKnowledge();
+  else if (service.view === "forms") content = renderServiceFormsDesignerList();
+  else if (service.view === "policies") content = renderServicePolicies();
+  else if (service.view === "approvals") content = renderServiceApprovals();
+  else if (service.view === "notifications") content = renderServiceNotifications();
+  else content = renderServiceTickets();
+  return `<div class="page-intro"><div><h2>工单与服务管理</h2><p>工单、变更、问题、知识库、SLA、审批和通知统一管理。</p></div><div class="toolbar-actions"><button class="secondary-button" data-action="refresh-service">刷新</button></div></div>${renderServiceTabs()}${content}`;
+}
+
+const serviceFormFieldTypes = [
+  { value: "text", label: "单行文本" },
+  { value: "textarea", label: "多行文本" },
+  { value: "number", label: "数字" },
+  { value: "date", label: "日期" },
+  { value: "datetime", label: "日期时间" },
+  { value: "select", label: "单选" },
+  { value: "multiselect", label: "多选" },
+  { value: "checkbox", label: "勾选" },
+  { value: "employee", label: "人员" },
+  { value: "asset", label: "资产" },
+  { value: "organization", label: "组织" },
+];
+
+function serviceRecordDraft(recordType) {
+  return serviceRecordFormDrafts[recordType] || { forms: [], selectedCode: "" };
+}
+
+function serviceRecordFormByCode(recordType, code) {
+  const draft = serviceRecordDraft(recordType);
+  return (draft.forms || []).find((form) => form.code === code) || draft.forms[0] || null;
+}
+
+function renderServiceRecordCustomFields(recordType, selectedCode) {
+  const selectedForm = serviceRecordFormByCode(recordType, selectedCode);
+  const fields = (selectedForm?.fields || []).map(ticketCustomFieldInput).join("");
+  if (!fields) return "";
+  return `<section class="modal-section"><div class="modal-section-title"><h3>${escapeHtml(selectedForm?.name || "业务字段")}</h3><span>按所选表单填写业务信息。</span></div><div class="form-grid">${fields}</div></section>`;
+}
+
+async function loadServiceRecordForms(recordType, selectedCode = "") {
+  const draft = serviceRecordDraft(recordType);
+  try {
+    const payload = await requestJson(`${API_SERVICE_FORMS_URL}?recordType=${encodeURIComponent(recordType)}&forSubmission=1`);
+    draft.forms = Array.isArray(payload.forms) ? payload.forms : [];
+    const defaultCode = `${recordType}_default`;
+    draft.selectedCode =
+      selectedCode ||
+      draft.selectedCode ||
+      draft.forms.find((form) => form.code === defaultCode)?.code ||
+      draft.forms[0]?.code ||
+      "";
+  } catch (error) {
+    draft.forms = [];
+    draft.selectedCode = "";
+    showToast(`读取业务表单失败：${error.message}`, true);
+  }
+  return draft;
+}
+
+function collectServiceCustomFields(form, recordType, formCode) {
+  const selectedForm = serviceRecordFormByCode(recordType, formCode);
+  const values = new FormData(form);
+  const customFields = {};
+  for (const field of selectedForm?.fields || []) {
+    const key = `custom_${field.key}`;
+    if (field.type === "checkbox") {
+      customFields[field.key] = form.querySelector(`[name="${CSS.escape(key)}"]`)?.checked || false;
+    } else if (field.type === "multiselect") {
+      customFields[field.key] = [...(form.querySelector(`[name="${CSS.escape(key)}"]`)?.selectedOptions || [])]
+        .map((option) => option.value)
+        .filter(Boolean);
+    } else if (values.has(key)) {
+      customFields[field.key] = values.get(key);
+    }
+  }
+  return customFields;
+}
+
+function serviceFormOptions(recordType) {
+  const draft = serviceRecordDraft(recordType);
+  return (draft.forms || []).map((form) => ({ value: form.code, label: form.name || form.code }));
+}
+
+async function openServiceChangeModal(selectedCode = "") {
+  const draft = await loadServiceRecordForms("change", selectedCode);
+  openModal(`${modalHeader("新建变更", "变更需要经过评估和审批后才能实施。")}
+    <form data-form="service-change">
+      <div class="form-grid">
+        ${selectField("变更类型", "type", [{ value: "standard", label: "标准变更" }, { value: "normal", label: "普通变更" }, { value: "emergency", label: "紧急变更" }], "normal", true)}
+        ${selectField("影响", "impact", [{ value: "low", label: "低" }, { value: "medium", label: "中" }, { value: "high", label: "高" }], "medium", true)}
+        ${selectField("风险", "risk", [{ value: "low", label: "低" }, { value: "medium", label: "中" }, { value: "high", label: "高" }], "medium", true)}
+        ${selectField("变更表单", "formCode", serviceFormOptions("change").length ? serviceFormOptions("change") : [{ value: "", label: "默认表单" }], draft.selectedCode)}
+      </div>
+      ${inputField("标题", "title", "", true, "例如：更换核心交换机")}
+      ${textareaField("变更说明", "description", "", true, "说明原因、范围、回退方案和验证方式。", 6)}
+      <div data-service-custom-fields="change">${renderServiceRecordCustomFields("change", draft.selectedCode)}</div>
+      <div class="modal-footer"><button type="button" class="secondary-button" data-action="close-modal">取消</button><button class="primary-button" type="submit">创建变更</button></div>
+    </form>`, false);
+}
+
+async function openServiceProblemModal(selectedCode = "") {
+  const draft = await loadServiceRecordForms("problem", selectedCode);
+  openModal(`${modalHeader("新建问题", "用于分析重复事件并记录根因和永久解决方案。")}
+    <form data-form="service-problem">
+      <div class="form-grid">
+        ${selectField("影响", "impact", [{ value: "low", label: "低" }, { value: "medium", label: "中" }, { value: "high", label: "高" }], "medium", true)}
+        ${selectField("问题表单", "formCode", serviceFormOptions("problem").length ? serviceFormOptions("problem") : [{ value: "", label: "默认表单" }], draft.selectedCode)}
+      </div>
+      ${inputField("标题", "title", "", true, "例如：同一部门网络间歇中断")}
+      ${textareaField("问题说明", "description", "", true, "描述现象、影响和已知信息。", 6)}
+      <div data-service-custom-fields="problem">${renderServiceRecordCustomFields("problem", draft.selectedCode)}</div>
+      <div class="modal-footer"><button type="button" class="secondary-button" data-action="close-modal">取消</button><button class="primary-button" type="submit">创建问题</button></div>
+    </form>`, false);
+}
+
+function openServiceKnowledgeModal() {
+  openModal(`${modalHeader("新建知识文章", "沉淀标准操作、常见故障和解决方案。")}
+    <form data-form="service-knowledge">
+      ${inputField("标题", "title", "", true, "例如：VPN 无法连接排查步骤")}
+      ${inputField("摘要", "summary", "", false, "用于搜索结果预览")}
+      ${inputField("分类", "category", "通用", true, "例如：网络、终端、账号")}
+      ${textareaField("正文", "body", "", true, "支持纯文本内容。", 10)}
+      <div class="modal-footer"><button type="button" class="secondary-button" data-action="close-modal">取消</button><button class="primary-button" type="submit">创建文章</button></div>
+    </form>`, false);
+}
+
+function serviceFormOptionsText(field) {
+  return (field.options || [])
+    .map((option) => `${option.value || ""}|${option.label || option.value || ""}`)
+    .join("\n");
+}
+
+const designerFieldCatalog = [
+  { type: "text", label: "单行文本", category: "基础控件" },
+  { type: "textarea", label: "多行文本", category: "基础控件" },
+  { type: "number", label: "数字", category: "基础控件" },
+  { type: "date", label: "日期", category: "基础控件" },
+  { type: "datetime", label: "日期时间", category: "基础控件" },
+  { type: "select", label: "下拉单选", category: "基础控件" },
+  { type: "multiselect", label: "下拉多选", category: "基础控件" },
+  { type: "checkbox", label: "复选框", category: "基础控件" },
+  { type: "employee", label: "人员选择", category: "本系统组件" },
+  { type: "asset", label: "资产选择", category: "本系统组件" },
+  { type: "organization", label: "组织选择", category: "本系统组件" },
+  { type: "system", label: "当前人员信息", category: "系统组件" },
+];
+
+function renderServiceFormsDesignerList() {
+  const forms = serviceState().forms || [];
+  const rows = forms.map((item) => `
+    <tr>
+      <td>${escapeHtml(item.code || "")}</td>
+      <td>${escapeHtml(item.name || "")}</td>
+      <td>${escapeHtml(item.recordType || "")}</td>
+      <td>${escapeHtml(item.version || 1)}</td>
+      <td>${escapeHtml((item.fields || []).length)}</td>
+      <td>${escapeHtml(formatDateTime(item.updatedAt || ""))}</td>
+      <td>${hasPermission("forms", "update") ? `<button class="text-button" data-action="open-form-designer" data-id="${escapeHtml(item.id)}">设计</button>` : "—"}</td>
+    </tr>`).join("");
+  return `<section class="data-panel">
+    <div class="section-heading">
+      <div><h2>表单</h2><span>设计工单、变更和问题的字段、流程、列表与权限。</span></div>
+      ${hasPermission("forms", "create") ? '<button class="primary-button" data-action="open-form-designer">新建表单</button>' : ""}
+    </div>
+    ${forms.length ? `<div class="table-wrap"><table><thead><tr><th>编码</th><th>名称</th><th>业务类型</th><th>版本</th><th>字段数</th><th>更新时间</th><th>操作</th></tr></thead><tbody>${rows}</tbody></table></div>` : serviceTableEmpty("暂无表单")}
+  </section>`;
+}
+
+const designerSystemSources = [
+  ["current_user_name", "当前账号名称"],
+  ["current_employee_name", "当前人员姓名"],
+  ["current_employee_no", "当前人员编号"],
+  ["current_department", "当前部门"],
+  ["current_org", "当前组织"],
+  ["current_position", "当前职位"],
+  ["current_user_email", "当前账号邮箱"],
+  ["current_user_mobile", "当前账号手机"],
+  ["current_datetime", "当前日期时间"],
+];
+
+function designerForm() {
+  return formDesignerState.form || {
+    id: "",
+    code: "",
+    name: "",
+    recordType: "ticket",
+    description: "",
+    fields: [],
+    layout: { columns: 1, labelPosition: "top" },
+    workflow: { steps: [] },
+    listConfig: { columns: [] },
+    settings: { submitMessage: "提交成功", allowDraft: true },
+  };
+}
+
+function designerFieldKey(field) {
+  return String(field?.key || "").trim();
+}
+
+function designerNewField(type = "text") {
+  const base = designerFieldCatalog.find((item) => item.type === type) || designerFieldCatalog[0];
+  const suffix = Math.random().toString(36).slice(2, 7);
+  return {
+    key: `${base.type}_${suffix}`,
+    label: base.label,
+    type: base.type,
+    placeholder: "",
+    options: ["select", "multiselect"].includes(base.type) ? [{ value: "option_1", label: "选项 1" }] : [],
+    config: base.type === "system" ? { source: "current_employee_name", readonly: true } : {},
+    required: false,
+    readonly: base.type === "system",
+    sortOrder: 0,
+  };
+}
+
+function designerNormalizeForm(form) {
+  const value = form || {};
+  value.fields = Array.isArray(value.fields) ? value.fields.map((field) => ({
+    ...field,
+    key: designerFieldKey(field) || designerNewField("text").key,
+    config: field.config && typeof field.config === "object" ? field.config : {},
+    options: Array.isArray(field.options) ? field.options : [],
+  })) : [];
+  value.layout = value.layout && typeof value.layout === "object" ? value.layout : { columns: 1, labelPosition: "top" };
+  value.workflow = value.workflow && typeof value.workflow === "object" ? value.workflow : { steps: [] };
+  value.workflow.steps = Array.isArray(value.workflow.steps)
+    ? value.workflow.steps.map((step, index) => ({
+        nodeType: step.nodeType || "approval",
+        name: step.name || (step.nodeType === "handler" ? "经办节点" : step.nodeType === "cc" ? "抄送节点" : `审批节点 ${index + 1}`),
+        approverType: step.approverType || (step.approverUserId ? "user" : "role"),
+        approverRoleCode: step.approverRoleCode || "",
+        approverUserId: step.approverUserId || "",
+        required: step.required !== false,
+        notify: step.notify !== false,
+      }))
+    : [];
+  value.listConfig = value.listConfig && typeof value.listConfig === "object" ? value.listConfig : { columns: [] };
+  value.settings = value.settings && typeof value.settings === "object" ? value.settings : { submitMessage: "提交成功", allowDraft: true };
+  return value;
+}
+
+function designerSelectedField() {
+  return designerForm().fields.find((field) => designerFieldKey(field) === formDesignerState.selectedFieldKey) || null;
+}
+
+function designerPreviewField(field) {
+  const key = escapeHtml(field.key || "");
+  const placeholder = escapeHtml(field.placeholder || "");
+  if (field.type === "textarea") return `<textarea disabled rows="3" placeholder="${placeholder}"></textarea>`;
+  if (field.type === "checkbox") return `<input type="checkbox" disabled />`;
+  if (field.type === "select" || field.type === "multiselect") {
+    return `<select disabled ${field.type === "multiselect" ? "multiple" : ""}><option>${field.type === "multiselect" ? "可多选" : "请选择"}</option></select>`;
+  }
+  if (field.type === "system") return `<div class="designer-readonly-value">${escapeHtml((field.config || {}).source || "系统自动带出")}</div>`;
+  return `<input disabled type="${field.type === "datetime" ? "datetime-local" : field.type}" placeholder="${placeholder}" data-field-preview="${key}" />`;
+}
+
+function renderDesignerPalette() {
+  const groups = new Map();
+  designerFieldCatalog.forEach((item) => {
+    if (!groups.has(item.category)) groups.set(item.category, []);
+    groups.get(item.category).push(item);
+  });
+  return [...groups.entries()].map(([category, items]) => `
+    <section class="designer-palette-group">
+      <h3>${escapeHtml(category)}</h3>
+      <div class="designer-palette-grid">${items.map((item) => `
+        <button type="button" class="designer-palette-item" draggable="true" data-action="designer-add-field" data-type="${escapeHtml(item.type)}" title="拖入画布或点击添加">
+          <span class="designer-palette-icon">${item.type === "system" ? "◎" : item.type === "employee" ? "人" : item.type === "asset" ? "箱" : "+"}</span>
+          <span>${escapeHtml(item.label)}</span>
+        </button>`).join("")}</div>
+    </section>`).join("");
+}
+
+function renderDesignerCanvas() {
+  const fields = designerForm().fields;
+  return `<div class="designer-canvas-head"><div><span class="eyebrow">FORM CANVAS</span><h2>${escapeHtml(designerForm().name || "未命名表单")}</h2></div><span class="designer-canvas-hint">拖动字段调整顺序</span></div>
+    <div class="designer-canvas" data-designer-dropzone>
+      ${fields.length ? fields.map((field, index) => `
+        <article class="designer-field-card ${designerFieldKey(field) === formDesignerState.selectedFieldKey ? "is-selected" : ""}" draggable="true" data-designer-field="${escapeHtml(field.key)}" data-index="${index}">
+          <div class="designer-field-card-head"><span class="designer-drag-handle" title="拖动排序">⋮⋮</span><strong>${escapeHtml(field.label || field.key)}</strong>${field.required ? '<span class="designer-required">必填</span>' : ""}<button type="button" class="icon-button" data-action="designer-delete-field" data-key="${escapeHtml(field.key)}" title="删除字段">×</button></div>
+          <div class="designer-field-preview">${designerPreviewField(field)}</div>
+        </article>`).join("") : `<div class="designer-empty-canvas"><strong>从左侧添加控件</strong><span>点击控件或拖入此区域开始设计</span></div>`}
+    </div>`;
+}
+
+function designerInput(label, name, value, type = "text") {
+  return `<label class="designer-property-field"><span>${escapeHtml(label)}</span><input data-designer-property="${escapeHtml(name)}" type="${type}" value="${escapeHtml(value ?? "")}" /></label>`;
+}
+
+function designerFormInput(label, name, value, type = "text") {
+  return `<label class="designer-property-field"><span>${escapeHtml(label)}</span><input data-designer-form-property="${escapeHtml(name)}" type="${type}" value="${escapeHtml(value ?? "")}" /></label>`;
+}
+
+function renderDesignerProperties() {
+  const field = designerSelectedField();
+  if (!field) return `<div class="designer-properties-empty"><strong>选择一个控件</strong><span>右侧将显示控件属性</span></div>`;
+  const source = (field.config || {}).source || "current_employee_name";
+  return `<div class="designer-properties-head"><span class="eyebrow">FIELD PROPERTIES</span><h2>${escapeHtml(field.label || field.key)}</h2></div>
+    ${designerInput("字段名称", "label", field.label)}
+    ${designerInput("字段标识", "key", field.key)}
+    <label class="designer-property-field"><span>字段类型</span><select data-designer-property="type">${designerFieldCatalog.map((item) => `<option value="${item.type}" ${item.type === field.type ? "selected" : ""}>${escapeHtml(item.label)}</option>`).join("")}</select></label>
+    ${designerInput("占位提示", "placeholder", field.placeholder)}
+    ${["select", "multiselect"].includes(field.type) ? `<label class="designer-property-field"><span>选项</span><textarea data-designer-property="options" rows="5">${escapeHtml(serviceFormOptionsText(field))}</textarea></label>` : ""}
+    ${field.type === "system" ? `<label class="designer-property-field"><span>自动带出</span><select data-designer-property="systemSource">${designerSystemSources.map(([value, label]) => `<option value="${value}" ${value === source ? "selected" : ""}>${label}</option>`).join("")}</select></label>` : ""}
+    <label class="designer-switch"><input type="checkbox" data-designer-property="required" ${field.required ? "checked" : ""} /> <span>必填</span></label>
+    <label class="designer-switch"><input type="checkbox" data-designer-property="readonly" ${field.readonly || field.type === "system" ? "checked" : ""} ${field.type === "system" ? "disabled" : ""} /> <span>只读</span></label>`;
+}
+
+function renderDesignerSettings() {
+  const form = designerForm();
+  return `<div class="designer-settings-panel">
+    <div class="designer-settings-section"><h2>表单属性</h2>${designerFormInput("表单编码", "formCode", form.code)}${designerFormInput("表单名称", "formName", form.name)}<label class="designer-property-field"><span>业务类型</span><select data-designer-form-property="recordType"><option value="ticket" ${form.recordType === "ticket" ? "selected" : ""}>工单</option><option value="change" ${form.recordType === "change" ? "selected" : ""}>变更管理</option><option value="problem" ${form.recordType === "problem" ? "selected" : ""}>问题管理</option></select></label><label class="designer-property-field"><span>说明</span><textarea data-designer-form-property="description" rows="3">${escapeHtml(form.description || "")}</textarea></label></div>
+    <div class="designer-settings-section"><h2>权限对象</h2><p class="designer-muted">按角色或用户控制查看、提交、修改、删除、审批和导出。</p>${renderDesignerPermissionRows()}</div>
+    <div class="designer-settings-section"><h2>提交设置</h2>${designerFormInput("提交成功提示", "submitMessage", form.settings.submitMessage || "提交成功")}<label class="designer-switch"><input type="checkbox" data-designer-form-property="allowDraft" ${form.settings.allowDraft !== false ? "checked" : ""} /> <span>允许保存草稿</span></label></div>
+  </div>`;
+}
+
+function designerWorkflowSteps() {
+  const form = designerForm();
+  if (!form.workflow || typeof form.workflow !== "object") form.workflow = { steps: [] };
+  if (!Array.isArray(form.workflow.steps)) form.workflow.steps = [];
+  return form.workflow.steps;
+}
+
+function designerWorkflowOptions() {
+  const service = serviceState();
+  return {
+    roles: [{ value: "", label: "选择角色" }].concat(
+      (service.workflowRoles || []).map((role) => ({ value: role.code, label: role.name || role.code })),
+    ),
+    users: [{ value: "", label: "选择用户" }].concat(
+      (service.workflowUsers || []).map((user) => ({ value: user.id, label: user.displayName || user.username })),
+    ),
+  };
+}
+
+function renderDesignerWorkflowNode(step, index) {
+  const nodeType = step.nodeType || "approval";
+  const nodeTypeLabel = { handler: "经办节点", approval: "审批节点", cc: "抄送节点" }[nodeType] || "审批节点";
+  const personnel =
+    nodeType === "cc"
+      ? step.approverType === "user"
+        ? (serviceState().workflowUsers || []).find((user) => String(user.id) === String(step.approverUserId))?.displayName
+        : (serviceState().workflowRoles || []).find((role) => role.code === step.approverRoleCode)?.name
+      : nodeType === "handler"
+        ? step.approverType === "user"
+          ? (serviceState().workflowUsers || []).find((user) => String(user.id) === String(step.approverUserId))?.displayName
+          : (serviceState().workflowRoles || []).find((role) => role.code === step.approverRoleCode)?.name
+        : step.approverType === "user"
+          ? (serviceState().workflowUsers || []).find((user) => String(user.id) === String(step.approverUserId))?.displayName
+          : (serviceState().workflowRoles || []).find((role) => role.code === step.approverRoleCode)?.name;
+  return `<div class="designer-flow-node-wrap">
+    ${index > 0 ? '<span class="designer-flow-connector" aria-hidden="true"></span>' : ""}
+    <button type="button" class="designer-flow-node ${formDesignerState.selectedWorkflowStepIndex === index ? "is-selected" : ""}" data-designer-workflow-step="${index}">
+      <span class="designer-flow-node-icon">${nodeType === "handler" ? "↗" : nodeType === "cc" ? "⌁" : "✓"}</span>
+      <span class="designer-flow-node-copy"><strong>${escapeHtml(step.name || nodeTypeLabel)}</strong><small>${escapeHtml(nodeTypeLabel)} · ${escapeHtml(personnel || "未配置人员")}</small></span>
+      <span class="designer-flow-node-state">${step.required === false ? "可选" : "必经"}</span>
+    </button>
+  </div>`;
+}
+
+function renderDesignerWorkflowProperties() {
+  const steps = designerWorkflowSteps();
+  const index =
+    formDesignerState.selectedWorkflowStepIndex >= 0
+      ? formDesignerState.selectedWorkflowStepIndex
+      : steps.length
+        ? 0
+        : -1;
+  if (index >= 0 && formDesignerState.selectedWorkflowStepIndex < 0) {
+    formDesignerState.selectedWorkflowStepIndex = index;
+  }
+  const step = steps[index];
+  if (!step) {
+    return `<div class="designer-properties-empty"><strong>选择一个流程节点</strong><span>流程人员、节点类型和审批规则会显示在这里</span></div>`;
+  }
+  const options = designerWorkflowOptions();
+  const approverType = step.approverType || (step.approverUserId ? "user" : "role");
+  return `<div class="designer-properties-head"><span class="eyebrow">NODE PROPERTIES</span><h2>${escapeHtml(step.name || "流程节点")}</h2></div>
+    <label class="designer-property-field"><span>节点名称</span><input data-designer-workflow-property="name" data-index="${index}" value="${escapeHtml(step.name || "")}" /></label>
+    <label class="designer-property-field"><span>节点类型</span><select data-designer-workflow-property="nodeType" data-index="${index}">
+      <option value="handler" ${step.nodeType === "handler" ? "selected" : ""}>经办节点</option>
+      <option value="approval" ${step.nodeType === "approval" || !step.nodeType ? "selected" : ""}>审批节点</option>
+      <option value="cc" ${step.nodeType === "cc" ? "selected" : ""}>抄送节点</option>
+    </select></label>
+    <label class="designer-property-field"><span>人员来源</span><select data-designer-workflow-property="approverType" data-index="${index}">
+      <option value="role" ${approverType === "role" ? "selected" : ""}>按角色</option>
+      <option value="user" ${approverType === "user" ? "selected" : ""}>指定用户</option>
+    </select></label>
+    <label class="designer-property-field" ${approverType === "user" ? "hidden" : ""}><span>流程角色</span><select data-designer-workflow-property="approverRoleCode" data-index="${index}">${options.roles.map((item) => `<option value="${escapeHtml(item.value)}" ${item.value === step.approverRoleCode ? "selected" : ""}>${escapeHtml(item.label)}</option>`).join("")}</select></label>
+    <label class="designer-property-field" ${approverType !== "user" ? "hidden" : ""}><span>流程人员</span><select data-designer-workflow-property="approverUserId" data-index="${index}">${options.users.map((item) => `<option value="${escapeHtml(item.value)}" ${String(item.value) === String(step.approverUserId) ? "selected" : ""}>${escapeHtml(item.label)}</option>`).join("")}</select></label>
+    <label class="designer-switch"><input type="checkbox" data-designer-workflow-property="required" data-index="${index}" ${step.required !== false ? "checked" : ""} /> <span>必须通过</span></label>
+    <label class="designer-switch"><input type="checkbox" data-designer-workflow-property="notify" data-index="${index}" ${step.notify !== false ? "checked" : ""} /> <span>进入节点时通知</span></label>
+    <button type="button" class="danger-text-button" data-action="designer-delete-workflow-step" data-index="${index}">删除此节点</button>`;
+}
+
+function renderDesignerWorkflow() {
+  const steps = designerWorkflowSteps();
+  return `<div class="designer-workflow-layout">
+    <aside class="designer-workflow-palette">
+      <div class="designer-palette-group"><h3>节点</h3><button type="button" class="designer-node-tool" data-action="designer-add-workflow-step" data-node-type="handler"><span>↗</span><strong>经办节点</strong><small>指定处理人执行任务</small></button><button type="button" class="designer-node-tool" data-action="designer-add-workflow-step" data-node-type="approval"><span>✓</span><strong>审批节点</strong><small>指定人员或角色审批</small></button><button type="button" class="designer-node-tool" data-action="designer-add-workflow-step" data-node-type="cc"><span>⌁</span><strong>抄送节点</strong><small>流程推进时同步通知</small></button></div>
+      <div class="designer-flow-help"><strong>流程人员</strong><span>提交表单后，节点配置的人员会显示在工单详情、审批记录和消息提醒中。</span></div>
+    </aside>
+    <main class="designer-workflow-canvas"><div class="designer-canvas-head"><div><span class="eyebrow">WORKFLOW CANVAS</span><h2>${escapeHtml(designerForm().name || "未命名表单")}</h2></div><span class="designer-canvas-hint">从上到下依次执行</span></div><div class="designer-flow-start"><span>▶</span><strong>开始</strong><small>提交表单</small></div><div class="designer-flow-list">${steps.length ? steps.map(renderDesignerWorkflowNode).join("") : '<div class="designer-empty-canvas"><strong>从左侧添加流程节点</strong><span>节点人员将在表单详情中显示</span></div>'}</div><div class="designer-flow-end"><span>◉</span><strong>结束</strong></div></main>
+    <aside class="designer-properties designer-workflow-properties">${renderDesignerWorkflowProperties()}</aside>
+  </div>`;
+}
+
+function renderDesignerPermissionRows() {
+  const permissions = formDesignerState.permissions || [];
+  const roles = settingsState.accessControl?.roles || [];
+  const users = settingsState.users || [];
+  const rows = permissions.map((item, index) => {
+    const subjects = item.subjectType === "role" ? roles : users;
+    return `<div class="designer-permission-row" data-permission-index="${index}">
+      <select data-designer-permission="subjectType"><option value="role" ${item.subjectType === "role" ? "selected" : ""}>角色</option><option value="user" ${item.subjectType === "user" ? "selected" : ""}>用户</option></select>
+      <select data-designer-permission="subjectId">${subjects.map((subject) => `<option value="${escapeHtml(subject.id)}" ${String(subject.id) === String(item.subjectId) ? "selected" : ""}>${escapeHtml(subject.name || subject.displayName || subject.username || subject.code)}</option>`).join("")}</select>
+      ${["view", "submit", "update", "delete", "approve", "export"].map((action) => `<label title="${action}"><input type="checkbox" data-designer-permission="${action}" ${item[`can${action.charAt(0).toUpperCase()}${action.slice(1)}`] ? "checked" : ""} />${{ view: "看", submit: "提", update: "改", delete: "删", approve: "审", export: "导" }[action]}</label>`).join("")}
+      <select data-designer-permission="dataScope">${[["all", "全部资产"], ["organization", "所属部门"], ["own", "本人资产"], ["submitted", "本人提交"], ["assigned", "负责工单"], ["none", "无数据"]].map(([value, label]) => `<option value="${value}" ${value === (item.dataScope || "all") ? "selected" : ""}>${label}</option>`).join("")}</select>
+      <button type="button" class="icon-button" data-action="designer-remove-permission" data-index="${index}" title="删除权限对象">×</button>
+    </div>`;
+  }).join("");
+  return `<div class="designer-permission-list">${rows || '<div class="designer-muted">尚未配置表单级权限，默认沿用模块权限。</div>'}</div><div class="designer-permission-add"><select data-designer-add-subject-type><option value="role">角色</option><option value="user">用户</option></select><select data-designer-add-subject-id>${roles.map((role) => `<option value="${escapeHtml(role.id)}">${escapeHtml(role.name || role.code)}</option>`).join("")}</select><button type="button" class="secondary-button" data-action="designer-add-permission">添加权限对象</button></div>`;
+}
+
+function renderServiceFormDesignerPage() {
+  const panels = [["form", "表单设计"], ["workflow", "流程设计"], ["settings", "表单设置"]];
+  const form = designerForm();
+  let content = "";
+  if (formDesignerState.activePanel === "settings") content = renderDesignerSettings();
+  else if (formDesignerState.activePanel === "workflow") content = renderDesignerWorkflow();
+  else content = `<div class="form-designer-layout"><aside class="designer-palette">${renderDesignerPalette()}</aside><main class="designer-workspace">${renderDesignerCanvas()}</main><aside class="designer-properties">${renderDesignerProperties()}</aside></div>`;
+  return `<div class="form-designer-page"><header class="form-designer-toolbar"><button type="button" class="icon-button" data-action="designer-back" title="返回服务管理">‹</button><div class="designer-title"><input data-designer-title value="${escapeHtml(form.name || "未命名表单")}" aria-label="表单名称" /><span>${form.id ? `版本 ${escapeHtml(form.version || 1)}` : "新建表单"}</span></div><nav class="designer-tabs">${panels.map(([value, label]) => `<button type="button" class="${formDesignerState.activePanel === value ? "is-active" : ""}" data-action="designer-panel" data-panel="${value}">${label}</button>`).join("")}</nav><div class="designer-toolbar-actions"><span class="${formDesignerState.dirty ? "designer-dirty" : ""}">${formDesignerState.dirty ? "未保存" : "已保存"}</span><button type="button" class="primary-button" data-action="designer-save">保存</button></div></header>${formDesignerState.loading ? '<div class="designer-loading">正在加载表单…</div>' : content}</div>`;
+}
+
+async function openFormDesigner(formId = "") {
+  formDesignerState = { formId: String(formId || ""), form: designerNormalizeForm(formId ? null : { recordType: "ticket", fields: [] }), selectedFieldKey: "", selectedWorkflowStepIndex: -1, activePanel: "form", permissions: [], loading: Boolean(formId), dirty: false };
+  state.page = "formDesigner";
+  render();
+  try {
+    await loadWorkflowOptions();
+    if (formId) {
+      const [formPayload, permissionPayload] = await Promise.all([
+        requestJson(`${API_SERVICE_FORMS_URL}/${encodeURIComponent(formId)}`),
+        requestJson(`${API_SERVICE_FORMS_URL}/${encodeURIComponent(formId)}${API_SERVICE_FORM_PERMISSIONS_URL}`),
+      ]);
+      formDesignerState.form = designerNormalizeForm(formPayload.form);
+      formDesignerState.permissions = Array.isArray(permissionPayload.permissions) ? permissionPayload.permissions : [];
+    }
+  } catch (error) {
+    showToast(`加载表单设计失败：${error.message}`, true);
+    state.page = "serviceManagement";
+    serviceState().view = "forms";
+  } finally {
+    formDesignerState.loading = false;
+    render();
+  }
+}
+
+function designerSyncFieldFromPanel(target) {
+  const field = designerSelectedField();
+  if (!field) return;
+  const property = target.dataset.designerProperty;
+  if (!property) return;
+  if (property === "required" || property === "readonly") field[property] = Boolean(target.checked);
+  else if (property === "options") {
+    field.options = target.value.split(/\r?\n/).map((line) => line.trim()).filter(Boolean).map((line) => {
+      const [value, ...labelParts] = line.split("|");
+      return { value: value.trim(), label: labelParts.join("|").trim() || value.trim() };
+    });
+  } else if (property === "systemSource") {
+    field.type = "system";
+    field.config = { ...(field.config || {}), source: target.value, readonly: true };
+    field.readonly = true;
+  } else if (property === "type") {
+    field.type = target.value;
+    if (target.value === "system") {
+      field.config = { ...(field.config || {}), source: "current_employee_name", readonly: true };
+      field.readonly = true;
+    } else if (!["select", "multiselect"].includes(target.value)) field.options = [];
+  } else field[property] = target.value;
+  formDesignerState.dirty = true;
+}
+
+async function saveFormDesigner() {
+  const form = designerForm();
+  const title = document.querySelector("[data-designer-title]")?.value.trim();
+  if (title) form.name = title;
+  if (!form.code || !form.name) return showToast("表单编码和名称不能为空。", true);
+  const payload = {
+    code: form.code,
+    name: form.name,
+    recordType: form.recordType,
+    description: form.description || "",
+    fields: form.fields.map((field, index) => ({ ...field, sortOrder: (index + 1) * 10 })),
+    layout: form.layout,
+    workflow: form.workflow,
+    listConfig: form.listConfig,
+    settings: form.settings,
+  };
+  try {
+    const endpoint = form.id ? `${API_SERVICE_FORMS_URL}/${encodeURIComponent(form.id)}` : API_SERVICE_FORMS_URL;
+    const result = await requestJson(endpoint, { method: form.id ? "PUT" : "POST", body: JSON.stringify(payload) });
+    formDesignerState.form = designerNormalizeForm(result.form);
+    formDesignerState.formId = String(result.form?.id || form.id || "");
+    if (formDesignerState.formId && isAdminUser()) {
+      const permissionPayload = await requestJson(`${API_SERVICE_FORMS_URL}/${encodeURIComponent(formDesignerState.formId)}${API_SERVICE_FORM_PERMISSIONS_URL}`, { method: "PUT", body: JSON.stringify({ permissions: formDesignerState.permissions || [] }) });
+      formDesignerState.permissions = permissionPayload.permissions || formDesignerState.permissions;
+    }
+    formDesignerState.dirty = false;
+    showToast("表单设计已保存。");
+    render();
+  } catch (error) {
+    showToast(`保存表单设计失败：${error.message}`, true);
+  }
+}
+
+function renderServiceFormFieldRow(field = {}) {
+  const type = field.type || "text";
+  return `<section class="service-form-builder-row" data-service-form-field>
+    <div class="form-grid">
+      ${inputField("字段标识", "fieldKey", field.key || "", true, "小写字母、数字和下划线")}
+      ${inputField("字段名称", "fieldLabel", field.label || "", true, "例如：业务影响说明")}
+      ${selectField("字段类型", "fieldType", serviceFormFieldTypes, type, true)}
+      ${inputField("提示文字", "fieldPlaceholder", field.placeholder || "", false, "填写提示")}
+    </div>
+    <div class="service-form-builder-options">
+      ${textareaField("选项", "fieldOptions", serviceFormOptionsText(field), false, "仅单选/多选使用；每行格式：值|显示名称", 3)}
+      <label class="service-form-check"><input type="checkbox" name="fieldRequired" ${field.required ? "checked" : ""} /> 必填</label>
+      <label class="service-form-check"><input type="checkbox" name="fieldReadonly" ${field.readonly ? "checked" : ""} /> 只读</label>
+      <button type="button" class="text-button" data-action="remove-service-form-field">删除字段</button>
+    </div>
+  </section>`;
+}
+
+function readServiceFormFields(form) {
+  return [...form.querySelectorAll("[data-service-form-field]")].map((row, index) => {
+    const type = row.querySelector('[name="fieldType"]')?.value || "text";
+    const rawOptions = row.querySelector('[name="fieldOptions"]')?.value || "";
+    const options = ["select", "multiselect"].includes(type)
+      ? rawOptions
+          .split(/\r?\n/)
+          .map((line) => line.trim())
+          .filter(Boolean)
+          .map((line) => {
+            const [value, ...labelParts] = line.split("|");
+            const label = labelParts.join("|").trim() || value.trim();
+            return { value: value.trim(), label };
+          })
+          .filter((option) => option.value)
+      : [];
+    return {
+      key: row.querySelector('[name="fieldKey"]')?.value.trim() || "",
+      label: row.querySelector('[name="fieldLabel"]')?.value.trim() || "",
+      type,
+      placeholder: row.querySelector('[name="fieldPlaceholder"]')?.value.trim() || "",
+      options,
+      required: Boolean(row.querySelector('[name="fieldRequired"]')?.checked),
+      readonly: Boolean(row.querySelector('[name="fieldReadonly"]')?.checked),
+      sortOrder: (index + 1) * 10,
+    };
+  });
+}
+
+function openServiceFormModal(formId = "") {
+  const existing = (serviceState().forms || []).find((form) => String(form.id) === String(formId));
+  const fields = existing?.fields?.length ? existing.fields : [{ type: "text" }];
+  const editing = Boolean(existing);
+  openModal(`${modalHeader(editing ? "编辑服务表单" : "新建服务表单", "通过可视化字段编辑器定义工单、变更和问题的业务字段。")}
+    <form data-form="service-form" data-id="${escapeHtml(existing?.id || "")}">
+      <div class="form-grid">
+        ${inputField("表单编码", "code", existing?.code || "", true, "例如：new_employee_request")}
+        ${inputField("表单名称", "name", existing?.name || "", true, "例如：新员工入职申请")}
+        ${selectField("业务类型", "recordType", [{ value: "ticket", label: "工单" }, { value: "change", label: "变更管理" }, { value: "problem", label: "问题管理" }], existing?.recordType || "ticket", true)}
+      </div>
+      ${textareaField("说明", "description", existing?.description || "", false, "表单用途说明。", 3)}
+      <section class="modal-section"><div class="modal-section-title"><h3>表单字段</h3><span>选项字段按“值|显示名称”逐行填写。</span><button type="button" class="secondary-button" data-action="add-service-form-field">添加字段</button></div><div data-service-form-fields>${fields.map((field) => renderServiceFormFieldRow(field)).join("")}</div></section>
+      <div class="modal-footer"><button type="button" class="secondary-button" data-action="close-modal">取消</button><button class="primary-button" type="submit">保存表单</button></div>
+    </form>`, false);
+}
+
+function openSlaPolicyModal(policyId = "") {
+  const existing = (serviceState().policies || []).find((policy) => String(policy.id) === String(policyId));
+  const editing = Boolean(existing);
+  openModal(`${modalHeader(editing ? "编辑 SLA 策略" : "新建 SLA 策略", "按工单优先级设置响应和解决时限。")}
+    <form data-form="sla-policy" data-id="${escapeHtml(existing?.id || "")}">
+      <div class="form-grid">
+        ${inputField("策略编码", "code", existing?.code || "", true, "例如：critical_4h")}
+        ${inputField("策略名称", "name", existing?.name || "", true, "例如：关键业务 SLA")}
+        ${selectField("优先级", "priority", [{ value: "high", label: "高" }, { value: "medium", label: "中" }, { value: "low", label: "低" }], existing?.priority || "medium", true)}
+        ${inputField("响应时限（分钟）", "responseMinutes", existing?.responseMinutes || 60, true, "例如：30")}
+        ${inputField("解决时限（分钟）", "resolutionMinutes", existing?.resolutionMinutes || 240, true, "例如：240")}
+      </div>
+      <label class="service-form-check"><input type="checkbox" name="isActive" ${existing?.isActive === false || existing?.isActive === 0 ? "" : "checked"} /> 启用此策略</label>
+      <div class="modal-footer"><button type="button" class="secondary-button" data-action="close-modal">取消</button><button class="primary-button" type="submit">保存策略</button></div>
+    </form>`, false);
+}
+
+async function loadWorkflowOptions() {
+  const service = serviceState();
+  if (service.workflowUsers.length && service.workflowRoles.length) return;
+  const [usersResult, rolesResult] = await Promise.allSettled([
+    requestJson(API_USERS_URL),
+    requestJson(API_ROLES_URL),
+  ]);
+  service.workflowUsers =
+    usersResult.status === "fulfilled" && Array.isArray(usersResult.value.users)
+      ? usersResult.value.users.filter((user) => user.isActive !== false)
+      : [];
+  service.workflowRoles =
+    rolesResult.status === "fulfilled" && Array.isArray(rolesResult.value.roles)
+      ? rolesResult.value.roles.filter((role) => role.isActive !== false)
+      : [];
+}
+
+function workflowStepRow(step = {}) {
+  const service = serviceState();
+  const approverType = step.approverUserId ? "user" : "role";
+  const roleOptions = [{ value: "", label: "选择角色" }].concat(
+    (service.workflowRoles || []).map((role) => ({ value: role.code, label: role.name || role.code })),
+  );
+  const userOptions = [{ value: "", label: "选择用户" }].concat(
+    (service.workflowUsers || []).map((user) => ({ value: user.id, label: user.displayName || user.username })),
+  );
+  return `<section class="workflow-step-row" data-workflow-step>
+    <div class="form-grid">
+      ${inputField("步骤名称", "stepName", step.name || "", true, "例如：部门负责人审批")}
+      ${selectField("审批人类型", "approverType", [{ value: "role", label: "按角色" }, { value: "user", label: "指定用户" }], approverType, true)}
+      <div data-workflow-role ${approverType === "user" ? "hidden" : ""}>${selectField("审批角色", "approverRoleCode", roleOptions, step.approverRoleCode || "", true)}</div>
+      <div data-workflow-user ${approverType === "role" ? "hidden" : ""}>${selectField("审批用户", "approverUserId", userOptions, step.approverUserId || "", true)}</div>
+    </div>
+    <div class="service-form-builder-options">
+      <label class="service-form-check"><input type="checkbox" name="stepRequired" ${step.required === false || step.required === 0 ? "" : "checked"} /> 必须通过</label>
+      <button type="button" class="text-button" data-action="remove-workflow-step">删除步骤</button>
+    </div>
+  </section>`;
+}
+
+function readWorkflowSteps(form) {
+  return [...form.querySelectorAll("[data-workflow-step]")].map((row) => {
+    const approverType = row.querySelector('[name="approverType"]')?.value || "role";
+    return {
+      name: row.querySelector('[name="stepName"]')?.value.trim() || "",
+      approverRoleCode: approverType === "role" ? row.querySelector('[name="approverRoleCode"]')?.value || "" : "",
+      approverUserId: approverType === "user" ? row.querySelector('[name="approverUserId"]')?.value || "" : "",
+      required: Boolean(row.querySelector('[name="stepRequired"]')?.checked),
+    };
+  });
+}
+
+function syncWorkflowStepApprover(row) {
+  const approverType = row.querySelector('[name="approverType"]')?.value || "role";
+  const roleBox = row.querySelector("[data-workflow-role]");
+  const userBox = row.querySelector("[data-workflow-user]");
+  if (roleBox) roleBox.hidden = approverType !== "role";
+  if (userBox) userBox.hidden = approverType !== "user";
+}
+
+async function openApprovalWorkflowModal(workflowId = "") {
+  try {
+    await loadWorkflowOptions();
+  } catch (error) {
+    showToast(`读取审批人配置失败：${error.message}`, true);
     return;
   }
-  if (event.key === "Escape" && document.querySelector("#modalRoot").innerHTML) closeModal();
+  const existing = (serviceState().workflows || []).find((workflow) => String(workflow.id) === String(workflowId));
+  const steps = existing?.steps?.length ? existing.steps : [{ name: "一级审批", approverRoleCode: "operator", required: true }];
+  const editing = Boolean(existing);
+  openModal(`${modalHeader(editing ? "编辑审批流程" : "新建审批流程", "一个步骤可以按角色分派，或指定到单个用户。")}
+    <form data-form="approval-workflow" data-id="${escapeHtml(existing?.id || "")}">
+      <div class="form-grid">
+        ${inputField("流程编码", "code", existing?.code || "", true, "例如：change_department_approval")}
+        ${inputField("流程名称", "name", existing?.name || "", true, "例如：部门变更审批")}
+        ${selectField("业务类型", "recordType", [{ value: "ticket", label: "工单" }, { value: "change", label: "变更管理" }, { value: "problem", label: "问题管理" }], existing?.recordType || "change", true)}
+      </div>
+      <label class="service-form-check"><input type="checkbox" name="isActive" ${existing?.isActive === false || existing?.isActive === 0 ? "" : "checked"} /> 启用此流程</label>
+      <section class="modal-section"><div class="modal-section-title"><h3>审批步骤</h3><span>从上到下依次执行。</span><button type="button" class="secondary-button" data-action="add-workflow-step">添加步骤</button></div><div data-workflow-steps>${steps.map((step) => workflowStepRow(step)).join("")}</div></section>
+      <div class="modal-footer"><button type="button" class="secondary-button" data-action="close-modal">取消</button><button class="primary-button" type="submit">保存流程</button></div>
+    </form>`, false);
+}
+
+function openServiceTransitionModal(recordType, recordId, currentStatus) {
+  const transitions = {
+    change: { draft: ["submitted", "cancelled"], submitted: ["assessing", "cancelled"], assessing: ["scheduled", "rejected", "cancelled"], approved: ["scheduled", "cancelled"], scheduled: ["implementing", "cancelled"], implementing: ["verified", "cancelled"], verified: ["closed", "implementing"] },
+    problem: { new: ["investigating", "cancelled"], investigating: ["known_error", "resolved", "cancelled"], known_error: ["resolved", "cancelled"], resolved: ["closed", "investigating"] },
+    knowledge: { draft: ["review", "archived"], review: ["published", "draft", "archived"], published: ["archived", "draft"], archived: ["draft"] },
+  }[recordType] || {};
+  const options = transitions[currentStatus] || [];
+  if (!options.length) return showToast("当前状态没有可执行的流转。", true);
+  openModal(`${modalHeader("更新状态", "状态变更会写入历史并触发相关通知。")}
+    <form data-form="service-transition" data-record-type="${escapeHtml(recordType)}" data-id="${escapeHtml(recordId)}">
+      ${selectField("下一状态", "status", options.map((value) => ({ value, label: serviceStatusLabels[value] || value })), options[0], true)}
+      ${recordType === "problem" ? textareaField("根因", "rootCause", "", false, "可选", 3) : ""}
+      ${recordType === "problem" ? textareaField("解决方案", "resolution", "", false, "可选", 3) : ""}
+      <div class="modal-footer"><button type="button" class="secondary-button" data-action="close-modal">取消</button><button class="primary-button" type="submit">保存状态</button></div>
+    </form>`, false);
+}
+
+function openApprovalDecisionModal(approvalId) {
+  openModal(`${modalHeader("审批", "请确认本步骤是否同意。")}
+    <form data-form="service-approval" data-id="${escapeHtml(approvalId)}">
+      ${selectField("审批结果", "decision", [{ value: "approved", label: "同意" }, { value: "rejected", label: "拒绝" }], "approved", true)}
+      ${textareaField("审批意见", "comment", "", false, "可选", 4)}
+      <div class="modal-footer"><button type="button" class="secondary-button" data-action="close-modal">取消</button><button class="primary-button" type="submit">提交审批</button></div>
+    </form>`, false);
+}
+
+async function handleServiceFormSubmit(form) {
+  const data = Object.fromEntries(new FormData(form).entries());
+  try {
+    const formId = form.dataset.id || "";
+    const existing = (serviceState().forms || []).find((item) => String(item.id) === String(formId));
+    const endpoint = formId ? `${API_SERVICE_FORMS_URL}/${encodeURIComponent(formId)}` : API_SERVICE_FORMS_URL;
+    await requestJson(endpoint, {
+      method: formId ? "PUT" : "POST",
+      body: JSON.stringify({
+        code: data.code || existing?.code,
+        name: data.name,
+        recordType: data.recordType || existing?.recordType,
+        description: data.description,
+        fields: readServiceFormFields(form),
+      }),
+    });
+    closeModal();
+    await loadServiceManagement();
+    render();
+    showToast("服务表单已保存");
+  } catch (error) {
+    showToast(`保存服务表单失败：${error.message}`, true);
+  }
+}
+
+async function handleSlaPolicySubmit(form) {
+  const data = Object.fromEntries(new FormData(form).entries());
+  const policyId = form.dataset.id || "";
+  try {
+    await requestJson(policyId ? `${API_SLA_POLICIES_URL}/${encodeURIComponent(policyId)}` : API_SLA_POLICIES_URL, {
+      method: policyId ? "PUT" : "POST",
+      body: JSON.stringify({
+        code: data.code,
+        name: data.name,
+        priority: data.priority,
+        responseMinutes: Number(data.responseMinutes),
+        resolutionMinutes: Number(data.resolutionMinutes),
+        isActive: data.isActive === "on",
+      }),
+    });
+    closeModal();
+    await loadServiceManagement();
+    render();
+    showToast("SLA 策略已保存");
+  } catch (error) {
+    showToast(`保存 SLA 策略失败：${error.message}`, true);
+  }
+}
+
+async function handleApprovalWorkflowSubmit(form) {
+  const data = Object.fromEntries(new FormData(form).entries());
+  const workflowId = form.dataset.id || "";
+  const existing = (serviceState().workflows || []).find((workflow) => String(workflow.id) === String(workflowId));
+  try {
+    await requestJson(workflowId ? `${API_WORKFLOWS_URL}/${encodeURIComponent(workflowId)}` : API_WORKFLOWS_URL, {
+      method: workflowId ? "PUT" : "POST",
+      body: JSON.stringify({
+        code: data.code || existing?.code,
+        name: data.name,
+        recordType: data.recordType || existing?.recordType,
+        isActive: data.isActive === "on",
+        steps: readWorkflowSteps(form),
+      }),
+    });
+    closeModal();
+    await loadServiceManagement();
+    render();
+    showToast("审批流程已保存");
+  } catch (error) {
+    showToast(`保存审批流程失败：${error.message}`, true);
+  }
+}
+
+async function handleServiceChangeSubmit(form) {
+  const data = Object.fromEntries(new FormData(form).entries());
+  data.customFields = collectServiceCustomFields(form, "change", data.formCode);
+  try {
+    await requestJson(API_CHANGES_URL, { method: "POST", body: JSON.stringify(data) });
+    closeModal();
+    await loadServiceManagement();
+    render();
+    showToast("变更已创建");
+  } catch (error) {
+    showToast(`创建变更失败：${error.message}`, true);
+  }
+}
+
+async function handleServiceProblemSubmit(form) {
+  const data = Object.fromEntries(new FormData(form).entries());
+  data.customFields = collectServiceCustomFields(form, "problem", data.formCode);
+  try {
+    await requestJson(API_PROBLEMS_URL, { method: "POST", body: JSON.stringify(data) });
+    closeModal();
+    await loadServiceManagement();
+    render();
+    showToast("问题已创建");
+  } catch (error) {
+    showToast(`创建问题失败：${error.message}`, true);
+  }
+}
+
+async function handleServiceKnowledgeSubmit(form) {
+  const data = Object.fromEntries(new FormData(form).entries());
+  try {
+    await requestJson(API_KNOWLEDGE_URL, { method: "POST", body: JSON.stringify(data) });
+    closeModal();
+    await loadServiceManagement();
+    render();
+    showToast("知识文章已创建");
+  } catch (error) {
+    showToast(`创建知识文章失败：${error.message}`, true);
+  }
+}
+
+async function handleServiceTransitionSubmit(form) {
+  const data = Object.fromEntries(new FormData(form).entries());
+  const type = form.dataset.recordType;
+  const endpoint = type === "change" ? API_CHANGES_URL : type === "problem" ? API_PROBLEMS_URL : API_KNOWLEDGE_URL;
+  try {
+    await requestJson(`${endpoint}/${encodeURIComponent(form.dataset.id)}/transitions`, { method: "POST", body: JSON.stringify(data) });
+    closeModal();
+    await loadServiceManagement();
+    render();
+    showToast("状态已更新");
+  } catch (error) {
+    showToast(`状态更新失败：${error.message}`, true);
+  }
+}
+
+async function handleServiceApprovalSubmit(form) {
+  const data = Object.fromEntries(new FormData(form).entries());
+  try {
+    await requestJson(`${API_APPROVALS_URL}/${encodeURIComponent(form.dataset.id)}/decision`, { method: "POST", body: JSON.stringify(data) });
+    closeModal();
+    await loadServiceManagement();
+    render();
+    showToast("审批已提交");
+  } catch (error) {
+    showToast(`审批提交失败：${error.message}`, true);
+  }
+}
+
+document.addEventListener("click", (event) => {
+  const item = event.target.closest("[data-action]");
+  if (!item) return;
+  const action = item.dataset.action;
+  if (action === "service-view") {
+    const service = serviceState();
+    const view = item.dataset.view || "tickets";
+    if (!canViewServiceView(view)) {
+      showToast("当前账号没有查看该服务模块的权限。", true);
+      return;
+    }
+    service.view = view;
+    loadServiceManagement()
+      .then(render)
+      .catch((error) => showToast(`加载服务管理失败：${error.message}`, true));
+    return;
+  }
+  if (action === "refresh-service") {
+    loadServiceManagement().then(render).catch((error) => showToast(`刷新服务管理失败：${error.message}`, true));
+    return;
+  }
+  if (action === "open-service-change") return openServiceChangeModal();
+  if (action === "open-service-problem") return openServiceProblemModal();
+  if (action === "open-service-knowledge") return openServiceKnowledgeModal();
+  if (action === "open-form-designer") return openFormDesigner(item.dataset.id || "");
+  if (action === "open-service-form") return openServiceFormModal(item.dataset.id || "");
+  if (action === "designer-back") {
+    state.page = "serviceManagement";
+    serviceState().view = "forms";
+    render();
+    return;
+  }
+  if (action === "designer-panel") {
+    formDesignerState.activePanel = item.dataset.panel || "form";
+    render();
+    return;
+  }
+  if (action === "designer-add-field") {
+    const field = designerNewField(item.dataset.type || "text");
+    designerForm().fields.push(field);
+    formDesignerState.selectedFieldKey = field.key;
+    formDesignerState.dirty = true;
+    render();
+    return;
+  }
+  if (action === "designer-delete-field") {
+    const key = item.dataset.key || "";
+    const form = designerForm();
+    form.fields = form.fields.filter((field) => designerFieldKey(field) !== key);
+    if (formDesignerState.selectedFieldKey === key) formDesignerState.selectedFieldKey = "";
+    formDesignerState.dirty = true;
+    render();
+    return;
+  }
+  if (action === "designer-save") {
+    saveFormDesigner();
+    return;
+  }
+  if (action === "designer-add-workflow-step") {
+    const steps = designerWorkflowSteps();
+    const nodeType = item.dataset.nodeType || "approval";
+    const index = steps.length + 1;
+    steps.push({
+      nodeType,
+      name: nodeType === "handler" ? `经办节点 ${index}` : nodeType === "cc" ? `抄送节点 ${index}` : `审批节点 ${index}`,
+      approverType: "role",
+      approverRoleCode: serviceState().workflowRoles?.[0]?.code || "",
+      approverUserId: "",
+      required: nodeType !== "cc",
+      notify: true,
+    });
+    formDesignerState.selectedWorkflowStepIndex = steps.length - 1;
+    formDesignerState.dirty = true;
+    render();
+    return;
+  }
+  if (action === "designer-delete-workflow-step") {
+    const index = Number(item.dataset.index || -1);
+    const steps = designerWorkflowSteps();
+    if (index >= 0 && index < steps.length) steps.splice(index, 1);
+    formDesignerState.selectedWorkflowStepIndex = Math.min(
+      formDesignerState.selectedWorkflowStepIndex,
+      steps.length - 1,
+    );
+    formDesignerState.dirty = true;
+    render();
+    return;
+  }
+  if (action === "designer-add-permission") {
+    const type = document.querySelector("[data-designer-add-subject-type]")?.value || "role";
+    const id = document.querySelector("[data-designer-add-subject-id]")?.value || "";
+    if (!id) return showToast("请选择权限对象。", true);
+    formDesignerState.permissions.push({
+      subjectType: type,
+      subjectId: id,
+      canView: true,
+      canSubmit: true,
+      canUpdate: false,
+      canDelete: false,
+      canApprove: false,
+      canExport: false,
+      dataScope: "all",
+    });
+    formDesignerState.dirty = true;
+    render();
+    return;
+  }
+  if (action === "designer-remove-permission") {
+    formDesignerState.permissions.splice(Number(item.dataset.index || -1), 1);
+    formDesignerState.dirty = true;
+    render();
+    return;
+  }
+  if (action === "add-service-form-field") {
+    const container = item.closest("form")?.querySelector("[data-service-form-fields]");
+    if (container) container.insertAdjacentHTML("beforeend", renderServiceFormFieldRow({ type: "text" }));
+    return;
+  }
+  if (action === "remove-service-form-field") {
+    item.closest("[data-service-form-field]")?.remove();
+    return;
+  }
+  if (action === "open-sla-policy") return openSlaPolicyModal(item.dataset.id || "");
+  if (action === "open-approval-workflow") return openApprovalWorkflowModal(item.dataset.id || "");
+  if (action === "add-workflow-step") {
+    const container = item.closest("form")?.querySelector("[data-workflow-steps]");
+    if (container) container.insertAdjacentHTML("beforeend", workflowStepRow({ approverRoleCode: "operator", required: true }));
+    return;
+  }
+  if (action === "remove-workflow-step") {
+    item.closest("[data-workflow-step]")?.remove();
+    return;
+  }
+  if (action === "open-service-transition") return openServiceTransitionModal(item.dataset.recordType, item.dataset.id, item.dataset.status);
+  if (action === "open-approval-decision") return openApprovalDecisionModal(item.dataset.id);
+  if (action === "read-notification") {
+    requestJson(`${API_NOTIFICATIONS_URL}/${encodeURIComponent(item.dataset.id)}/read`, { method: "POST", body: "{}" })
+      .then(() => loadServiceManagement())
+      .then(render)
+      .catch((error) => showToast(`通知更新失败：${error.message}`, true));
+  }
+});
+
+document.addEventListener("change", (event) => {
+  const target = event.target;
+  if (target.matches("[data-designer-property]")) {
+    designerSyncFieldFromPanel(target);
+    render();
+    return;
+  }
+  if (target.matches("[data-designer-form-property]")) {
+    const form = designerForm();
+    const property = target.dataset.designerFormProperty;
+    if (property === "allowDraft") form.settings.allowDraft = Boolean(target.checked);
+    else if (property === "formCode") form.code = target.value;
+    else if (property === "formName") form.name = target.value;
+    else if (property === "submitMessage") form.settings.submitMessage = target.value;
+    else form[property] = target.value;
+    formDesignerState.dirty = true;
+    render();
+    return;
+  }
+  if (target.matches("[data-designer-workflow-property]")) {
+    const index = Number(target.dataset.index || -1);
+    const step = designerWorkflowSteps()[index];
+    if (!step) return;
+    const property = target.dataset.designerWorkflowProperty;
+    if (property === "required" || property === "notify") step[property] = Boolean(target.checked);
+    else if (property === "approverType") {
+      step.approverType = target.value;
+      if (target.value === "role") step.approverUserId = "";
+      else step.approverRoleCode = "";
+    } else {
+      step[property] = target.value;
+    }
+    formDesignerState.dirty = true;
+    render();
+    return;
+  }
+  if (target.matches("[data-designer-permission]")) {
+    const row = target.closest("[data-permission-index]");
+    const item = formDesignerState.permissions[Number(row?.dataset.permissionIndex || -1)];
+    if (!item) return;
+    const key = target.dataset.designerPermission;
+    if (key === "subjectType") {
+      item.subjectType = target.value;
+      const subjects = target.value === "role" ? settingsState.accessControl?.roles || [] : settingsState.users || [];
+      item.subjectId = String(subjects[0]?.id || "");
+    } else if (key === "subjectId" || key === "dataScope") item[key] = target.value;
+    else item[`can${key.charAt(0).toUpperCase()}${key.slice(1)}`] = Boolean(target.checked);
+    formDesignerState.dirty = true;
+    render();
+    return;
+  }
+  if (target.matches("[data-designer-add-subject-type]")) {
+    const targetSelect = document.querySelector("[data-designer-add-subject-id]");
+    const subjects = target.value === "role" ? settingsState.accessControl?.roles || [] : settingsState.users || [];
+    if (targetSelect) {
+      targetSelect.innerHTML = subjects.map((subject) => `<option value="${escapeHtml(subject.id)}">${escapeHtml(subject.name || subject.displayName || subject.username || subject.code)}</option>`).join("");
+    }
+    return;
+  }
+  const form = target.closest("form[data-form]");
+  if (!form) return;
+  if ((form.dataset.form === "service-change" || form.dataset.form === "service-problem") && target.name === "formCode") {
+    const recordType = form.dataset.form === "service-change" ? "change" : "problem";
+    serviceRecordDraft(recordType).selectedCode = target.value;
+    const container = form.querySelector(`[data-service-custom-fields="${recordType}"]`);
+    if (container) container.innerHTML = renderServiceRecordCustomFields(recordType, target.value);
+  }
+  if (form.dataset.form === "approval-workflow" && target.name === "approverType") {
+    syncWorkflowStepApprover(target.closest("[data-workflow-step]"));
+  }
+});
+
+document.addEventListener("click", (event) => {
+  const field = event.target.closest("[data-designer-field]");
+  if (field) {
+    formDesignerState.selectedFieldKey = field.dataset.designerField || "";
+    render();
+    return;
+  }
+  const workflowStep = event.target.closest("[data-designer-workflow-step]");
+  if (workflowStep) {
+    formDesignerState.selectedWorkflowStepIndex = Number(workflowStep.dataset.designerWorkflowStep || -1);
+    render();
+  }
+});
+
+document.addEventListener("dragstart", (event) => {
+  const palette = event.target.closest("[data-action='designer-add-field']");
+  const field = event.target.closest("[data-designer-field]");
+  if (palette) event.dataTransfer?.setData("application/x-form-field-type", palette.dataset.type || "text");
+  if (field) event.dataTransfer?.setData("application/x-form-field-key", field.dataset.designerField || "");
+});
+
+document.addEventListener("dragover", (event) => {
+  if (event.target.closest("[data-designer-dropzone]")) event.preventDefault();
+});
+
+document.addEventListener("drop", (event) => {
+  const dropzone = event.target.closest("[data-designer-dropzone]");
+  if (!dropzone) return;
+  event.preventDefault();
+  const type = event.dataTransfer?.getData("application/x-form-field-type");
+  const draggedKey = event.dataTransfer?.getData("application/x-form-field-key");
+  const form = designerForm();
+  if (type) {
+    const field = designerNewField(type);
+    form.fields.push(field);
+    formDesignerState.selectedFieldKey = field.key;
+  } else if (draggedKey) {
+    const sourceIndex = form.fields.findIndex((field) => designerFieldKey(field) === draggedKey);
+    const targetCard = event.target.closest("[data-designer-field]");
+    const targetIndex = Number(targetCard?.dataset.index || form.fields.length - 1);
+    if (sourceIndex >= 0) {
+      const [moved] = form.fields.splice(sourceIndex, 1);
+      form.fields.splice(Math.max(0, targetIndex), 0, moved);
+    }
+  }
+  formDesignerState.dirty = true;
+  render();
 });
 
 initializeTheme();

@@ -1,3 +1,5 @@
+USE office_asset_mgmt;
+
 SET NAMES utf8mb4;
 
 CREATE TABLE IF NOT EXISTS app_state_revision (

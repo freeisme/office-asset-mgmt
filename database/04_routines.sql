@@ -1,3 +1,5 @@
+USE office_asset_mgmt;
+
 SET NAMES utf8mb4;
 
 DROP PROCEDURE IF EXISTS sp_assign_computer;

@@ -1,5 +1,9 @@
+USE office_asset_mgmt;
+
 SET NAMES utf8mb4;
 
+-- Generic reference data only. Create the organization hierarchy in the
+-- application after deployment; do not place company personnel or assets here.
 INSERT INTO non_asset_type (type_code, type_name, unit_name)
 VALUES
   ('monitor', '显示屏', '件'),

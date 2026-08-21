@@ -1,145 +1,134 @@
-# Office Asset Management
+# 办公资产与 IT 服务管理
 
-办公资产管理系统，包含：
+`v2.0.0` 是面向内部 IT 资产运营与 ITIL 服务管理的单体 Web 系统。项目不包含业务数据、数据库备份、账户密码、令牌或证书。
 
-- 办公终端台账与使用人分配
-- 组织架构树和人员管理
-- 显示屏、鼠标、键盘、拓展坞等 IT 物资库存
-- 物资导入、库存增减和回收
-- 操作日志、分类筛选与 Excel 导出
-- 管理员数据库备份、每日定时计划、备份记录与密码确认下载
-- 管理员手动检查 GitHub 或 Gitea 的发行版或 Beta 版，并选择更高的语义化版本更新
+## 模块范围
 
-本发布目录不包含任何业务数据、数据库备份、Excel 原始文件、运行日志或数据库密码。
+- 办公终端、IT 物资、组织架构、人员和资产关系管理。
+- 入库、领用、归还、设备分配与设备归还的独立命令接口、独立事务、幂等键和审计记录。
+- 办公终端详情中的设备流转时间线。
+- 中文细粒度权限：角色、用户覆盖权限、模块和操作权限，以及全部/所属部门/本人等数据范围。
+- 工单、服务表单设计、人员与组织信息自动预填、工作流、多级审批、SLA 计时、通知、变更管理、问题管理和知识库。
+- 同步暂存、导入结果追踪和数据质量审计。
+- 数据库备份、审计日志、系统设置和更新检查。
 
-## 技术栈
+`GET /api/state` 保留为前端兼容读取接口。`PUT /api/state` 已退役并返回 `405 STATE_WRITE_RETIRED`；业务写入必须调用资源接口或命令接口。
 
-- Python 3.10+
-- MySQL 8.0+
-- 原生 HTML / CSS / JavaScript
-- Python 标准库 HTTP 服务，无第三方 Python 依赖
+## 技术与目录
 
-## 目录
+- Python 3.10+ 标准库 HTTP 服务
+- MySQL 8.0+，Docker Compose 使用 MySQL 8.4
+- 原生 HTML、CSS、JavaScript，无前端构建步骤
 
 ```text
 .
-├── database/                         # 空库初始化和结构脚本
-├── deploy/
-│   ├── docker/init_database.sh        # Docker 空库初始化包装脚本
-│   ├── nginx/office-asset-mgmt.conf  # Nginx 反向代理示例
-│   ├── systemd/                      # systemd 服务配置
-│   └── scripts/                      # 初始化和备份脚本
-├── web/                              # 前端页面
-├── Dockerfile                        # 应用镜像构建文件
-├── compose.yaml                      # 应用和 MySQL 的 Docker Compose 编排
-├── .dockerignore                     # Docker 构建上下文排除规则
-├── .env.example                      # 配置模板，不含真实密码
-├── server.py                         # 后端服务
-├── requirements.txt                  # 说明：仅使用标准库
-├── DEPLOY_UBUNTU.md                  # Ubuntu 原生部署文档
-├── DOCKER_DEPLOY.md                  # Docker Compose 部署文档
-├── DEVELOPMENT_GUIDE.md               # 详细开发指南
-├── GITHUB_RELEASE.md                 # GitHub 推送与版本发布说明
-└── LICENSE                           # 内部使用许可
+├── server.py                    # HTTP 路由与应用入口
+├── office_asset/                # 领域服务、仓储、权限与公共逻辑
+├── web/                         # 前端页面与交互
+├── database/                    # 仅用于空库初始化的历史 SQL
+├── migrations/                  # 可追踪、不可修改的增量迁移
+├── migration_runner.py          # 迁移登记、校验和执行器
+├── qa_security_regression.py    # 接口安全与权限回归测试
+├── deploy/                      # Docker、原生部署、Nginx 与备份脚本
+├── deploy.ps1                   # Windows 部署与升级入口
+├── compose.yaml                 # MySQL、迁移器和应用编排
+└── VERSION_NOTES.md             # 版本说明
 ```
 
-## 文档入口
+## 新库部署
 
-- [详细开发指南](DEVELOPMENT_GUIDE.md)
-- [GitHub Wiki](https://github.com/freeisme/office-asset-mgmt/wiki)
-- [Ubuntu 部署](DEPLOY_UBUNTU.md)
-- [Docker 部署](DOCKER_DEPLOY.md)
-- [安全审查](SECURITY_REVIEW.md)
+### Windows
 
-GitHub Wiki 按主题维护架构、模块、数据库迁移、测试、部署、发布、安全运维和故障排查
-文档。Wiki 与代码仓库分开维护，生产密码、令牌、私钥、备份和业务数据不得写入其中。
+```powershell
+.\deploy.ps1 -User root -Database office_asset_mgmt
+```
 
-## Docker Compose 启动
+脚本只对空库执行 `database/` 中的历史初始化文件，随后登记 `legacy-20260813` 基线并执行 `migrations/`。数据库名只能包含字母、数字和下划线。
 
-推荐在 Linux 服务器或 Docker Desktop 中使用 Docker Compose 运行完整的应用与 MySQL：
+### Docker Compose
 
 ```bash
 cp .env.example .env
-# 编辑 .env，替换 DB_PASSWORD 和 MYSQL_ROOT_PASSWORD
+# 配置 DB_PASSWORD、MYSQL_ROOT_PASSWORD；生产环境保持 AUTH_COOKIE_SECURE=true
 docker compose up -d --build
 ```
 
-生产环境请先通过 HTTPS 反向代理访问。仅本机调试 HTTP 时，才将 `.env` 中的
-`AUTH_COOKIE_SECURE` 显式设为 `false`：
+Compose 启动顺序为 `db` 健康检查通过后执行一次 `migrate`，迁移成功后才启动 `app`。空库初始化脚本会登记 `legacy-20260813`；`migrate` 失败时应用不会启动。
 
-```text
-http://服务器IP:8000/
-```
+## 现有数据库升级
 
-详细的初始化、备份、升级、局域网访问和 Nginx 配置见
-[DOCKER_DEPLOY.md](DOCKER_DEPLOY.md)。
-
-## 本地启动
-
-Linux/macOS:
-
-```bash
-cp .env.example .env
-set -a
-source .env
-set +a
-python3 server.py
-```
-
-Windows PowerShell:
+1. 先完成并验证数据库备份。
+2. 首次引入迁移登记时，确认实例已经包含 `legacy-20260813` 历史基线和安全基线。
+3. 显式执行：
 
 ```powershell
-$env:DB_PASSWORD = "你的MySQL密码"
-$env:MYSQL_BIN = "D:\MySQL\bin\mysql.exe"
+.\deploy.ps1 -User root -Database office_asset_mgmt -AdoptExistingBaseline
+```
+
+4. 以后版本只执行新增的 `migrations/*.sql`。
+
+不要对已有业务库直接运行 `database/01_schema.sql`。它含有重建对象的逻辑，仅适用于空库或明确批准的重建。
+
+Docker 中升级已有卷且缺少登记表时，`migrate` 会停止并拒绝自动采用基线。完成备份和结构确认后，显式执行一次：
+
+```bash
+docker compose run --rm --entrypoint python migrate \
+  migration_runner.py --database office_asset_mgmt --mark-baseline legacy-20260813
+docker compose up -d
+```
+
+完整规则见 [MIGRATIONS.md](MIGRATIONS.md)。
+
+## 本机隔离测试沙盒
+
+后续测试从 GitHub 克隆后创建独立数据库，不使用生产库：
+
+```powershell
+git clone https://github.com/freeisme/office-asset-mgmt.git office-asset-mgmt-test
+cd office-asset-mgmt-test
+.\deploy.ps1 -User root -Database office_asset_mgmt_test
+
+$env:DB_HOST = "127.0.0.1"
+$env:DB_PORT = "3306"
+$env:DB_NAME = "office_asset_mgmt_test"
+$env:DB_USER = "root"
+$env:DB_PASSWORD = "<仅保存在本机环境变量中的密码>"
+$env:MYSQL_BIN = "D:\MYSQL\bin\mysql.exe"
 $env:SERVER_HOST = "127.0.0.1"
-$env:SERVER_PORT = "8000"
+$env:SERVER_PORT = "8011"
 python .\server.py
 ```
 
-浏览器访问：
+访问 `http://127.0.0.1:8011/`。测试结束后停止服务并只删除测试数据库；不要删除生产数据库或将测试数据提交到 Git。
 
-```text
-http://127.0.0.1:8000/
+## 验证
+
+```powershell
+python -m py_compile server.py office_asset\*.py migration_runner.py qa_security_regression.py
+python .\migration_runner.py --database office_asset_mgmt_test --verify
+python .\qa_security_regression.py
 ```
 
-生产环境建议使用 Nginx 对外提供 HTTPS，Python 服务只监听 `127.0.0.1:8000`。
+前端语法检查：
 
-首次部署并执行 `database/19_auth_and_settings.sql` 后，首次访问会进入管理员初始化页。系统不设置固定默认密码；创建管理员后，可在“设置”页面维护账号、角色、启停状态、系统名称、登录提示语和会话时长。
+```powershell
+node --check web\app.js
+```
+
+## 文档
+
+- [迁移与升级](MIGRATIONS.md)
+- [版本说明](VERSION_NOTES.md)
+- [GitHub 发布流程](GITHUB_RELEASE.md)
+- [Docker 部署](DOCKER_DEPLOY.md)
+- [Ubuntu 原生部署](DEPLOY_UBUNTU.md)
+- [开发指南](DEVELOPMENT_GUIDE.md)
+- [前端与接口说明](web/README.md)
+- [GitHub Wiki](https://github.com/freeisme/office-asset-mgmt/wiki)
 
 ## 安全要求
 
-1. 不要把 `.env`、数据库备份、Excel 数据文件或真实密码提交到 GitHub。
-2. 生产环境使用独立 MySQL 账号，不建议 Web 服务使用 `root`。
-3. 对外开放时使用 HTTPS，保留 `AUTH_COOKIE_SECURE=true`，并限制服务器防火墙端口。
-4. 更新控制服务使用 HTTPS 和独立控制令牌；不要将令牌或其 CA 证书私钥提交到 Git。
-5. 定期执行 `deploy/scripts/backup_database.sh`，并将备份复制到独立存储。
-
-详细部署流程见 [DEPLOY_UBUNTU.md](DEPLOY_UBUNTU.md)。
-
-## GitHub 发布
-
-本目录可以推送到 GitHub，但 GitHub 仅执行源码校验，不会自动登录或更新服务器。
-具体推送、语义化版本标签和 Releases 流程见 [GITHUB_RELEASE.md](GITHUB_RELEASE.md)。
-
-GitHub 更新由内网 Gitea 拉取镜像同步到生产更新源，再由管理员在系统设置中手动选择
-已发布版本更新。镜像同步不会直接部署服务器。
-
-## 授权
-
-本项目不是开源软件。代码仅授权给获准组织内部使用、维护和定制，禁止未经书面许可的
-对外分发或商用转售。完整条款见 [LICENSE](LICENSE)。
-
-首次发布：
-
-```bash
-cd office-asset-management-github
-git init
-git add .
-git diff --cached --check
-git commit -m "Initial release"
-git branch -M main
-git remote add origin <你的GitHub仓库地址>
-git push -u origin main
-```
-
-不要将原始项目根目录直接提交。部署前请阅读 [DEPLOY_UBUNTU.md](DEPLOY_UBUNTU.md)。
+- 不提交 `.env`、数据库导出、备份、日志、Excel 源数据、账号、密码、访问令牌或私钥。
+- 生产环境通过 HTTPS 访问并保持 `AUTH_COOKIE_SECURE=true`。
+- 权限必须由服务端校验；隐藏前端菜单不是授权控制。
+- 升级前备份，迁移后执行校验和权限回归测试。

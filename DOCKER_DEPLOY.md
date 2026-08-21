@@ -1,41 +1,23 @@
-# Docker Deployment
+# Docker Compose 部署
 
-This document deploys the data-free release of Office Asset Management with Docker Compose.
-The stack contains:
+本部署方式包含 MySQL、一次性迁移服务和应用服务：
 
 ```text
-Browser
-  |
-  +-- app:8000 (Python HTTP service)
-          |
-          +-- db:3306 (MySQL 8.4, internal Compose network only)
+Browser -> app:8000 -> db:3306
+                    ^
+                 migrate
 ```
 
-The MySQL data is stored in the named Docker volume `mysql-data`; web-created database
-backups are stored separately in `backup-data`. The database port is not published to the
-host by default.
+`migrate` 仅在数据库健康后执行。它应用已登记基线之后的增量迁移；失败时 `app` 不会启动。
 
-## 1. Prerequisites
-
-Install Docker Engine or Docker Desktop with Docker Compose v2, then verify:
-
-```bash
-docker --version
-docker compose version
-```
-
-On Ubuntu, run the commands below as a user that is allowed to use Docker.
-
-## 2. Configure Secrets
-
-From the project root:
+## 1. 配置
 
 ```bash
 cp .env.example .env
 chmod 600 .env
 ```
 
-Edit `.env` and replace both passwords before the first startup:
+至少设置以下值：
 
 ```dotenv
 APP_PORT=8000
@@ -43,98 +25,58 @@ DB_NAME=office_asset_mgmt
 DB_USER=office_asset_app
 DB_PASSWORD=replace-with-a-long-random-password
 MYSQL_ROOT_PASSWORD=replace-with-a-different-long-random-password
-AUTH_SESSION_HOURS=8
 AUTH_COOKIE_SECURE=true
-UPDATE_SERVICE_URL=https://host.docker.internal:9000
-UPDATE_CONTROL_TOKEN=replace-with-a-dedicated-update-control-token
-UPDATE_SERVICE_CA_FILE=/run/office-asset-mgmt/update-service/update-control-ca.pem
-UPDATE_SERVICE_CERTS_DIR=./secrets/update-service
 ```
 
-Rules:
+不要提交 `.env`。生产环境必须通过 HTTPS 访问并保持 `AUTH_COOKIE_SECURE=true`。
 
-- `DB_PASSWORD` is the application database account password.
-- `MYSQL_ROOT_PASSWORD` is only for MySQL administration and must differ from `DB_PASSWORD`.
-- Do not commit `.env` to Git.
-- Keep `AUTH_COOKIE_SECURE=true` in production. Only local HTTP debugging may set it
-  to `false`; Secure cookies do not work over plain HTTP.
-- `UPDATE_SERVICE_URL` must use HTTPS in production. Place the issuing CA certificate
-  at `${UPDATE_SERVICE_CERTS_DIR}/update-control-ca.pem`; this directory is mounted
-  read-only into the application and is ignored by Git.
-
-## 3. First Startup
-
-Run:
+## 2. 首次启动
 
 ```bash
 docker compose config
 docker compose up -d --build
 docker compose ps
-docker compose logs -f
+docker compose logs --tail=200 migrate
+docker compose logs --tail=200 app
 ```
 
-The first start initializes MySQL through `deploy/docker/init_database.sh`. It selects
-`MYSQL_DATABASE` explicitly and runs only the reviewed schema, migration and reference
-scripts in the required order. Smoke-test and ad hoc import scripts are not run.
+空数据卷会由 `deploy/docker/init_database.sh` 初始化历史结构和参考数据，同时登记 `legacy-20260813`。之后 `migrate` 应用 `migrations/` 中的全部未登记版本。
 
-Verify the services:
+验证：
 
 ```bash
 curl http://127.0.0.1:8000/api/health
-docker compose exec db sh -c 'MYSQL_PWD="$MYSQL_PASSWORD" mysql -u"$MYSQL_USER" "$MYSQL_DATABASE" -e "SHOW TABLES;"'
+docker compose exec db sh -c 'MYSQL_PWD="$MYSQL_PASSWORD" mysql -u"$MYSQL_USER" "$MYSQL_DATABASE" -e "SELECT version, applied_at FROM schema_migration ORDER BY version;"'
 ```
 
-Open the application:
+首次浏览器访问会进入管理员初始化流程，系统没有固定默认密码。
 
-```text
-http://SERVER_IP:8000/
-```
+## 3. 已有数据卷升级
 
-With `AUTH_COOKIE_SECURE=true`, the application must be opened through an HTTPS reverse
-proxy before logging in. For an isolated local HTTP test only, set
-`AUTH_COOKIE_SECURE=false` in `.env`, recreate the app container, and restore it to
-`true` before production use.
-
-The first browser visit opens the administrator initialization page. The system has no
-fixed default password.
-
-## 4. LAN and Reverse Proxy
-
-For direct LAN access, keep:
-
-```dotenv
-APP_PORT=8000
-```
-
-Then allow TCP port 8000 only for the required LAN network.
-
-For Nginx on the same host, bind the application to loopback instead:
-
-```dotenv
-APP_PORT=127.0.0.1:8000
-AUTH_COOKIE_SECURE=true
-```
-
-Use the existing Nginx example at `deploy/nginx/office-asset-mgmt.conf` and expose only
-ports 80/443. Do not publish MySQL port 3306 unless a separate operational requirement
-exists.
-
-## 5. Data Persistence and Backup
-
-Check the named volume:
+1. 先创建并验证数据库备份。
+2. 拉取已验证版本并查看 `VERSION_NOTES.md`、`MIGRATIONS.md`。
+3. 构建并启动：
 
 ```bash
-docker volume ls
-docker volume inspect office-asset-management-github_mysql-data
-docker volume inspect office-asset-management-github_backup-data
+git pull --ff-only
+docker compose build --pull
+docker compose up -d
+docker compose ps
 ```
 
-Open **Settings > Database backup** as an administrator to create a backup immediately,
-set the daily backup time, review the backup list, and download a selected backup after
-confirming the current account password. Scheduled and manual web backups are compressed
-`.sql.gz` files in the `backup-data` volume and are not served as static web files.
+如果已有库没有 `schema_migration`，`migrate` 会停止。这是保护机制，不会重放 `database/01_schema.sql`。确认数据库已达到历史基线后，显式登记一次：
 
-For an additional independent raw SQL backup from the command line:
+```bash
+docker compose run --rm --entrypoint python migrate \
+  migration_runner.py --database office_asset_mgmt --mark-baseline legacy-20260813
+docker compose up -d
+```
+
+将命令中的数据库名替换为实际 `DB_NAME`。不要用删除 `mysql-data` 卷来绕过迁移问题。
+
+## 4. 备份与恢复
+
+管理员可以在系统设置中创建受控备份。额外的命令行备份示例：
 
 ```bash
 mkdir -p backups
@@ -143,60 +85,16 @@ docker compose exec -T db sh -c \
   > "backups/office_asset_mgmt_$(date +%Y%m%d_%H%M%S).sql"
 ```
 
-Restore a verified backup:
+恢复前停止应用并确认目标数据库，恢复后重新运行迁移校验和关键业务验证。
 
-```bash
-docker compose exec -T db sh -c \
-  'MYSQL_PWD="$MYSQL_PASSWORD" exec mysql --binary-mode=1 -u"$MYSQL_USER" "$MYSQL_DATABASE"' \
-  < backups/office_asset_mgmt_YYYYMMDD_HHMMSS.sql
-```
-
-Store backups outside the server as well. Do not commit generated `.sql` or `.sql.gz`
-backup files.
-
-## 6. Upgrade
-
-Before updating, create a backup. Then:
-
-```bash
-git pull
-docker compose build --pull app
-docker compose up -d
-docker compose ps
-curl http://127.0.0.1:8000/api/health
-```
-
-The Docker initialization wrapper runs only when the MySQL volume is empty. For schema
-changes on an existing system, review the release notes and run the appropriate SQL
-migration manually against the `db` service. Never delete the data volume merely to
-rerun initialization.
-
-## 7. Stop and Remove
-
-Stop containers while retaining database data:
-
-```bash
-docker compose down
-```
-
-Stop containers and permanently delete all Docker-managed database data:
-
-```bash
-docker compose down -v
-```
-
-Run the second command only after a successful backup has been verified.
-
-## 8. Troubleshooting
+## 5. 运维
 
 ```bash
 docker compose ps
 docker compose logs --tail=200 app
+docker compose logs --tail=200 migrate
 docker compose logs --tail=200 db
-docker compose exec app python -c "import urllib.request; print(urllib.request.urlopen('http://127.0.0.1:8000/api/health').read().decode())"
-docker compose exec db sh -c 'MYSQL_PWD="$MYSQL_PASSWORD" mysql -u"$MYSQL_USER" "$MYSQL_DATABASE" -e "SELECT 1;"'
+docker compose down
 ```
 
-If the database initialization was interrupted during the first startup, inspect the
-database logs before deciding whether to remove `mysql-data`. Removing the volume starts
-with an empty database and deletes all data stored in that volume.
+`docker compose down -v` 会永久删除 Docker 管理的数据库卷，只能在已验证备份可恢复时执行。

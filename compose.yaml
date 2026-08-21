@@ -25,6 +25,23 @@ services:
       retries: 30
       start_period: 30s
 
+  migrate:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: "no"
+    environment:
+      DB_HOST: db
+      DB_PORT: "3306"
+      DB_NAME: ${DB_NAME:-office_asset_mgmt}
+      DB_USER: ${DB_USER:-office_asset_app}
+      DB_PASSWORD: ${DB_PASSWORD:?Set DB_PASSWORD in .env}
+      MYSQL_BIN: /usr/bin/mysql
+    command: ["python", "migration_runner.py", "--database", "${DB_NAME:-office_asset_mgmt}"]
+    depends_on:
+      db:
+        condition: service_healthy
+
   app:
     build:
       context: .
@@ -56,8 +73,8 @@ services:
     ports:
       - "${APP_PORT:-8000}:8000"
     depends_on:
-      db:
-        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
     healthcheck:
       test:
         [

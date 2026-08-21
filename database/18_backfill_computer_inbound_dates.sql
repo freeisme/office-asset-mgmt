@@ -1,6 +1,8 @@
+USE office_asset_mgmt;
+
 SET NAMES utf8mb4;
 
--- 办公终端库存型号的入库日期以关联采购入库记录中最早的一次为准。
+-- 电脑库存型号的入库日期以关联采购入库记录中最早的一次为准。
 -- 仅回填空值，避免覆盖已经人工确认过的日期；重复执行不会改变结果。
 DROP TEMPORARY TABLE IF EXISTS tmp_computer_inbound_dates;
 
@@ -21,7 +23,7 @@ WHERE purchase.is_active = 1
   AND purchase.inbound_date IS NOT NULL
   AND (
     LOWER(TRIM(purchase_type.type_code)) IN ('computer', 'pc')
-    OR TRIM(purchase_type.type_name) IN ('电脑', '办公终端', '办公设备终端')
+    OR TRIM(purchase_type.type_name) = '电脑'
   )
 GROUP BY purchase.model_id;
 
@@ -34,7 +36,7 @@ SET m.inbound_date = inbound.first_inbound_date
 WHERE m.inbound_date IS NULL
   AND (
     LOWER(TRIM(t.type_code)) IN ('computer', 'pc')
-    OR TRIM(t.type_name) IN ('电脑', '办公终端', '办公设备终端')
+    OR TRIM(t.type_name) = '电脑'
   );
 
 DROP TEMPORARY TABLE tmp_computer_inbound_dates;

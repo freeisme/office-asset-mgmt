@@ -5,8 +5,8 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta name="theme-color" content="#ffffff" />
     <title>办公资产中台</title>
-    <link rel="stylesheet" href="styles.css?v=20260813-02" />
-    <script src="app.js?v=20260813-02" defer></script>
+    <link rel="stylesheet" href="styles.css?v=20260821-v2.0.0" />
+    <script src="app.js?v=20260821-v2.0.0" defer></script>
   </head>
   <body>
     <div id="authRoot"></div>
@@ -56,6 +56,19 @@
             <span>操作日志</span>
           </button>
           <div class="sidebar-section-title sidebar-section-title-spaced">系统</div>
+          <button class="nav-item" data-action="navigate" data-page="tickets">
+            <span class="nav-icon">◆</span>
+            <span>工单</span>
+          </button>
+          <div class="sidebar-section-title sidebar-section-title-spaced">服务管理</div>
+          <button class="nav-item" data-action="navigate" data-page="serviceManagement">
+            <span class="nav-icon">◎</span>
+            <span>工单与服务管理</span>
+          </button>
+          <button class="nav-item" data-action="navigate" data-page="governance">
+            <span class="nav-icon">◎</span>
+            <span>同步与质量</span>
+          </button>
           <button class="nav-item" data-action="navigate" data-page="settings">
             <span class="nav-icon">⚙</span>
             <span>设置</span>
@@ -79,6 +92,26 @@
           </div>
           <div class="topbar-actions">
             <button
+              class="topbar-icon-button"
+              type="button"
+              data-action="quick-create-ticket"
+              title="新建工单"
+              aria-label="新建工单"
+              hidden
+            >
+              +
+            </button>
+            <button
+              class="topbar-icon-button notification-button"
+              type="button"
+              data-action="open-notifications"
+              title="消息提醒"
+              aria-label="消息提醒"
+              hidden
+            >
+              &#128276;<span class="notification-count" data-notification-count hidden>0</span>
+            </button>
+            <button
               class="ghost-button theme-toggle"
               type="button"
               data-action="toggle-theme"
@@ -88,8 +121,14 @@
             >
               ☾
             </button>
-            <button class="ghost-button" data-action="reset-data" title="从数据库重新加载">
-              ↺ 重新加载数据
+            <button
+              class="ghost-button topbar-reload-button"
+              type="button"
+              data-action="reset-data"
+              title="从数据库重新加载"
+              aria-label="从数据库重新加载"
+            >
+              &#8635;
             </button>
             <div class="user-badge">
               <span class="avatar" id="userAvatar">IT</span>

@@ -7,6 +7,9 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 
 COPY server.py ./
+COPY office_asset ./office_asset
+COPY migrations ./migrations
+COPY migration_runner.py ./
 COPY web ./web
 
 ENV PYTHONDONTWRITEBYTECODE=1 \

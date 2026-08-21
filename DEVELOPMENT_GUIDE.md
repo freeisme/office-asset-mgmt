@@ -6,6 +6,14 @@
 本文档不包含任何真实密码、SSH 私钥、Webhook Secret、更新控制令牌、业务数据或
 数据库备份。生产运行时配置只保存在服务器上的 `.env` 或 systemd 环境文件中。
 
+## v2.0.0 开发与测试约定
+
+- 后端入口仍为 `server.py`，领域服务、SQL 仓储、鉴权和公共代码位于 `office_asset/`；新增业务优先扩展相应模块，避免恢复全量状态快照写入。
+- `GET /api/state` 只能兼容读取。入库、领用、归还、设备分配和设备归还必须使用独立命令、事务、幂等键和审计记录。
+- 数据库结构变化必须添加新的 `migrations/YYYYMMDD_NNN_description.sql`，不得修改已发布迁移。执行前后运行 `python migration_runner.py --database <测试库> --verify`。
+- 测试环境使用独立数据库，例如 `office_asset_mgmt_test`，并用 `127.0.0.1:8011` 启动；不得使用生产库或提交测试数据。
+- 发布前运行 Python 编译、`node --check web/app.js`、`qa_security_regression.py` 和浏览器关键路径验证。
+
 ## 文档导航
 
 GitHub Wiki 提供适合团队日常查阅的模块化文档：

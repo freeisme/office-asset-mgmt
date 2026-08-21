@@ -1,3 +1,5 @@
+USE office_asset_mgmt;
+
 SET NAMES utf8mb4;
 
 SET @add_computer_cpu := IF(
