@@ -64,7 +64,14 @@ docker compose up -d
 docker compose ps
 ```
 
-如果已有库没有 `schema_migration`，`migrate` 会停止。这是保护机制，不会重放 `database/bootstrap/01_schema.sql`。确认数据库已达到历史基线后，显式登记一次：
+如果已有库没有 `schema_migration`，`migrate` 会停止。这是保护机制，不会重放
+`database/bootstrap/01_schema.sql`。确认数据库已达到历史基线后，在 `.env` 中临时设置：
+
+```dotenv
+MIGRATION_ADOPT_BASELINE=legacy-20260813
+```
+
+下一次受控更新会先验证关键历史表，再登记基线并执行增量迁移。也可以显式登记一次：
 
 ```bash
 docker compose run --rm --entrypoint python migrate \
@@ -73,17 +80,21 @@ docker compose up -d
 ```
 
 将命令中的数据库名替换为实际 `DB_NAME`。不要用删除 `mysql-data` 卷来绕过迁移问题。
+成功后删除 `.env` 中的 `MIGRATION_ADOPT_BASELINE`，并运行 `docker compose run --rm migrate
+--entrypoint python migrate tools/migration_runner.py --database office_asset_mgmt --verify`
+确认没有待执行迁移。
 
 ## 4. 备份与恢复
 
-管理员可以在系统设置中创建受控备份。额外的命令行备份示例：
+管理员可以在系统设置中创建受控备份。部署账户执行 Docker 数据库备份时使用项目脚本：
 
 ```bash
-mkdir -p backups
-docker compose exec -T db sh -c \
-  'MYSQL_PWD="$MYSQL_PASSWORD" exec mysqldump --single-transaction --skip-lock-tables --no-tablespaces --routines --events --triggers --hex-blob -u"$MYSQL_USER" "$MYSQL_DATABASE"' \
-  > "backups/office_asset_mgmt_$(date +%Y%m%d_%H%M%S).sql"
+sudo -u officeasset-deploy -H bash \
+  /opt/office-asset-mgmt/deploy/scripts/backup_compose_database.sh
 ```
+
+备份默认写入 `/home/officeasset-deploy/backups/office-asset-mgmt/`，生成 `.sql.gz` 文件和
+同名 `.sha256` 校验文件，并通过临时文件和原子移动避免将部分导出文件当成可恢复备份。
 
 恢复前停止应用并确认目标数据库，恢复后重新运行迁移校验和关键业务验证。
 

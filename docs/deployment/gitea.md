@@ -264,10 +264,22 @@ docker compose -f /opt/office-asset-mgmt/compose.yaml ps
 docker compose -f /opt/office-asset-mgmt/compose.yaml logs --tail=100 app
 ```
 
-Database migrations are intentionally not run automatically. Back up the database and
-apply a reviewed migration manually before deploying a schema-changing release. The
-deployment script restores the prior Git commit and rebuilds the previous application
-image if the new build, startup, or health check fails.
+Before a schema-changing release, create a compressed backup and SHA-256 checksum with
+the deployment user:
+
+```bash
+sudo -u officeasset-deploy -H bash \
+  /opt/office-asset-mgmt/deploy/scripts/backup_compose_database.sh
+```
+
+The update script runs tracked migrations as a deployment gate before it replaces the
+application container. For an existing database without `schema_migration`, set
+`MIGRATION_ADOPT_BASELINE=legacy-20260813` temporarily in `/opt/office-asset-mgmt/.env`
+only after the backup and legacy baseline have been verified. The migration runner
+validates required legacy tables before recording the baseline. Remove the setting after
+a successful deployment. The script restores the prior Git commit and starts the prior
+app without rerunning its migration dependency if the migration, build, startup, or
+health check fails.
 
 ## 6. Backup Gitea
 

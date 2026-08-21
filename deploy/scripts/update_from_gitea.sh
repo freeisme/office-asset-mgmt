@@ -85,7 +85,8 @@ rollback_deployment() {
   if ! docker compose "${compose_args[@]}" build app; then
     echo "Rollback image build failed." >&2
   fi
-  docker compose "${compose_args[@]}" up -d --remove-orphans
+  docker compose "${compose_args[@]}" up -d --wait --no-deps db
+  docker compose "${compose_args[@]}" up -d --no-deps --remove-orphans app
   if ! wait_for_health; then
     echo "Rollback health check failed: ${HEALTH_URL}" >&2
     docker compose "${compose_args[@]}" ps >&2 || true
@@ -113,11 +114,24 @@ git reset --hard "${target_sha}"
 
 docker compose "${compose_args[@]}" config --quiet
 
-echo "Building the application image ..."
-docker compose "${compose_args[@]}" build --pull app
+echo "Building the application and migration images ..."
+docker compose "${compose_args[@]}" build --pull app migrate
 
-echo "Starting the application stack ..."
-docker compose "${compose_args[@]}" up -d --remove-orphans
+echo "Ensuring the database service is healthy ..."
+docker compose "${compose_args[@]}" up -d --wait --no-deps db
+
+echo "Stopping the previous application before database migration ..."
+docker compose "${compose_args[@]}" stop app || true
+
+echo "Running tracked database migrations ..."
+if ! docker compose "${compose_args[@]}" run --rm --no-deps -T migrate; then
+  echo "Tracked migration failed. Migration output is retained in the deployment service journal." >&2
+  docker compose "${compose_args[@]}" ps >&2 || true
+  exit 1
+fi
+
+echo "Starting the application service ..."
+docker compose "${compose_args[@]}" up -d --no-deps --remove-orphans app
 
 echo "Checking ${HEALTH_URL} ..."
 if ! wait_for_health; then

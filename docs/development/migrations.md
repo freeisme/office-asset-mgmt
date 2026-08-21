@@ -8,6 +8,7 @@
 4. 已登记迁移不得修改。任何修复必须创建新的迁移文件。
 5. 迁移文件不得固定 `USE database_name`。两个历史 `20260814_*` 迁移在执行时会去除旧的 `USE` 行，但校验和仍基于原文件。
 6. `/api/state` 仅保留只读兼容用途；所有业务写操作使用资源接口或命令接口和独立事务。
+7. 对已有业务库的基线接管只能显式指定 `legacy-20260813`。迁移器会检查旧库的组织、人员、资产、审计、认证、库存和备份关键表；校验失败时不会创建迁移登记表。
 
 ## 迁移清单
 
@@ -48,13 +49,23 @@
 
 脚本不会重放历史重建 SQL。基线检查失败时应恢复备份或先补齐历史版本，而不是绕过校验。
 
-Docker 已有数据卷缺少登记表时会使 `migrate` 失败。确认备份和基线后，执行：
+Docker 已有数据卷缺少登记表时会使 `migrate` 失败。确认备份和基线后，可以临时在
+部署目录 `.env` 设置：
+
+```dotenv
+MIGRATION_ADOPT_BASELINE=legacy-20260813
+```
+
+下一次受控更新会校验基线、登记 `schema_migration` 并执行增量迁移。也可以在已检出的
+v2.0.2 或更高版本中手动执行：
 
 ```bash
 docker compose run --rm --entrypoint python migrate \
   tools/migration_runner.py --database office_asset_mgmt --mark-baseline legacy-20260813
 docker compose up -d
 ```
+
+成功后必须从 `.env` 删除 `MIGRATION_ADOPT_BASELINE`，避免以后升级误用基线接管模式。
 
 ## 校验
 
@@ -67,6 +78,7 @@ python .\tools\migration_runner.py --database office_asset_mgmt --verify
 
 - `Pending migrations`：存在尚未应用的版本。
 - `checksum mismatch`：已应用文件被修改，必须恢复原文件并另建迁移。
+- `missing required tables`：旧库不符合 `legacy-20260813`，不得采用基线；应从备份恢复或先完成历史升级。
 - MySQL 错误：立即停止升级，从备份和 SQL 兼容性开始排查。
 
 ## 回滚

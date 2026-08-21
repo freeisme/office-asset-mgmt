@@ -1,5 +1,6 @@
 import importlib.util
 import re
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 from unittest import TestCase, mock
@@ -13,6 +14,7 @@ def load_module(name: str, path: Path):
     if spec is None or spec.loader is None:
         raise RuntimeError(f"Unable to load {path}")
     module = importlib.util.module_from_spec(spec)
+    sys.modules[name] = module
     spec.loader.exec_module(module)
     return module
 
@@ -21,6 +23,10 @@ server = load_module("office_asset_server_tests", ROOT / "server.py")
 deploy_webhook = load_module(
     "office_asset_deploy_webhook_tests",
     ROOT / "deploy" / "gitea" / "deploy_webhook.py",
+)
+migration_runner = load_module(
+    "office_asset_migration_runner_tests",
+    ROOT / "tools" / "migration_runner.py",
 )
 
 
@@ -291,6 +297,19 @@ class DeploymentScriptTests(TestCase):
         self.assertIn('mv -- "${temporary_file}" "${backup_file}"', script)
         self.assertNotIn('> "${backup_file}"', script)
 
+    def test_compose_backup_script_uses_deployment_user_home_and_atomic_output(self):
+        script = (ROOT / "deploy" / "scripts" / "backup_compose_database.sh").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertIn('${HOME:-/tmp}/backups/office-asset-mgmt', script)
+        self.assertIn('docker compose --env-file "${ENV_FILE}" -f "${COMPOSE_FILE}" exec -T db', script)
+        self.assertIn('sql_temporary_file="$(mktemp', script)
+        self.assertIn('gzip --stdout -- "${sql_temporary_file}" > "${archive_temporary_file}"', script)
+        self.assertIn('sha256sum "${archive_temporary_file}" > "${checksum_temporary_file}"', script)
+        self.assertIn('mv -- "${archive_temporary_file}" "${backup_file}"', script)
+        self.assertIn('mv -- "${checksum_temporary_file}" "${checksum_file}"', script)
+
     def test_docker_initializer_does_not_put_root_password_in_arguments(self):
         script = (ROOT / "deploy" / "docker" / "init_database.sh").read_text(
             encoding="utf-8"
@@ -337,6 +356,68 @@ class DeploymentScriptTests(TestCase):
 
         self.assertIn("DEPLOY_REPOSITORY_URL", script)
         self.assertIn('git fetch --tags "${DEPLOY_REPOSITORY_URL}" "${DEPLOY_BRANCH}"', script)
+        self.assertIn('build --pull app migrate', script)
+        self.assertIn('up -d --wait --no-deps db', script)
+        self.assertIn('stop app || true', script)
+        self.assertIn('run --rm --no-deps -T migrate', script)
+        self.assertIn('up -d --no-deps --remove-orphans app', script)
+        self.assertNotIn('docker compose "${compose_args[@]}" up -d --remove-orphans', script)
+
+
+class MigrationBaselineTests(TestCase):
+    def test_existing_database_requires_explicit_baseline_adoption(self):
+        with (
+            mock.patch.object(migration_runner, "table_exists", return_value=False),
+            mock.patch.object(migration_runner, "has_existing_business_tables", return_value=True),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "schema_migration registry"):
+                migration_runner.prepare_migration_registry("office_asset_mgmt")
+
+    def test_baseline_adoption_validates_legacy_schema_before_writing_registry(self):
+        with (
+            mock.patch.object(migration_runner, "table_exists", return_value=False),
+            mock.patch.object(migration_runner, "has_existing_business_tables", return_value=True),
+            mock.patch.object(
+                migration_runner,
+                "missing_tables",
+                return_value=["auth_bootstrap_guard"],
+            ),
+            mock.patch.object(migration_runner, "ensure_registry") as ensure_registry,
+            mock.patch.object(migration_runner, "mark_baseline") as mark_baseline,
+        ):
+            with self.assertRaisesRegex(RuntimeError, "missing required tables"):
+                migration_runner.prepare_migration_registry(
+                    "office_asset_mgmt",
+                    migration_runner.LEGACY_BASELINE_VERSION,
+                )
+            ensure_registry.assert_not_called()
+            mark_baseline.assert_not_called()
+
+    def test_baseline_adoption_records_only_verified_legacy_baseline(self):
+        with (
+            mock.patch.object(migration_runner, "table_exists", return_value=False),
+            mock.patch.object(migration_runner, "has_existing_business_tables", return_value=True),
+            mock.patch.object(migration_runner, "missing_tables", return_value=[]),
+            mock.patch.object(migration_runner, "ensure_registry") as ensure_registry,
+            mock.patch.object(migration_runner, "mark_baseline") as mark_baseline,
+        ):
+            migration_runner.prepare_migration_registry(
+                "office_asset_mgmt",
+                migration_runner.LEGACY_BASELINE_VERSION,
+            )
+
+        ensure_registry.assert_called_once_with("office_asset_mgmt")
+        mark_baseline.assert_called_once_with(
+            "office_asset_mgmt",
+            migration_runner.LEGACY_BASELINE_VERSION,
+        )
+
+    def test_only_the_known_legacy_baseline_can_be_adopted(self):
+        with self.assertRaisesRegex(RuntimeError, "Unsupported baseline"):
+            migration_runner.validate_legacy_baseline(
+                "office_asset_mgmt",
+                "legacy-unknown",
+            )
 
     def test_version_notes_use_semver_headings(self):
         notes = (ROOT / "VERSION_NOTES.md").read_text(encoding="utf-8")

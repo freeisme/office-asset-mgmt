@@ -37,6 +37,7 @@ services:
       DB_USER: ${DB_USER:-office_asset_app}
       DB_PASSWORD: ${DB_PASSWORD:?Set DB_PASSWORD in .env}
       MYSQL_BIN: /usr/bin/mysql
+      MIGRATION_ADOPT_BASELINE: ${MIGRATION_ADOPT_BASELINE:-}
     command: ["python", "tools/migration_runner.py", "--database", "${DB_NAME:-office_asset_mgmt}"]
     depends_on:
       db:

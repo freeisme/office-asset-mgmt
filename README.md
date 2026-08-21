@@ -1,6 +1,6 @@
 # 办公资产与 IT 服务管理
 
-`v2.0.1` 是面向内部 IT 资产运营和 ITIL 服务管理的单体 Web 系统。仓库不包含业务数据、数据库备份、账户密码、令牌或证书。
+`v2.0.2` 是面向内部 IT 资产运营和 ITIL 服务管理的单体 Web 系统。仓库不包含业务数据、数据库备份、账户密码、令牌或证书。
 
 ## 模块
 
@@ -64,9 +64,30 @@ Compose 会在数据库健康后运行一次迁移器；迁移成功后才启动
 
 ## 已有数据库升级
 
-1. 先完成并验证数据库备份。
-2. 确认数据库已经包含 `legacy-20260813` 历史基线及安全基线。
-3. 首次接入迁移登记时显式采用基线：
+1. 先使用部署账户创建并验证数据库备份：
+
+```bash
+sudo -u officeasset-deploy -H bash \
+  /opt/office-asset-mgmt/deploy/scripts/backup_compose_database.sh
+```
+
+备份默认写入 `/home/officeasset-deploy/backups/office-asset-mgmt/`，不写入可能由
+root 管理的应用目录。脚本会生成 `.sql.gz` 备份及同名 `.sha256` 校验文件。
+
+2. 确认数据库已经包含 `legacy-20260813` 历史结构及安全基线。
+3. 仅当旧库没有 `schema_migration` 时，在部署服务器 `.env` 中临时设置：
+
+```dotenv
+MIGRATION_ADOPT_BASELINE=legacy-20260813
+```
+
+迁移器会先检查旧库关键表，再登记基线并执行 `database/migrations/`。未设置该值时，
+已有业务库会拒绝更新，避免自动重放历史初始化 SQL。
+
+4. 从设置页更新到已验证版本，或按部署文档执行受控更新。升级成功后删除
+`MIGRATION_ADOPT_BASELINE`，再执行一次迁移校验。
+
+Windows 环境可在已备份且确认基线后使用：
 
 ```powershell
 .\scripts\windows\deploy.ps1 -User root -Database office_asset_mgmt -AdoptExistingBaseline

@@ -16,6 +16,18 @@ HISTORICAL_FIXED_USE_MIGRATIONS = {
     "20260814_001_itil_governance",
     "20260814_002_command_atomicity",
 }
+LEGACY_BASELINE_VERSION = "legacy-20260813"
+LEGACY_BASELINE_REQUIRED_TABLES = (
+    "audit_log",
+    "auth_bootstrap_guard",
+    "computer_asset",
+    "database_backup",
+    "employee",
+    "it_inventory_brand",
+    "it_inventory_model",
+    "org_unit",
+    "user_account",
+)
 
 
 @dataclass(frozen=True)
@@ -113,6 +125,36 @@ def has_existing_business_tables(database: str) -> bool:
     return int(result or "0") > 0
 
 
+def missing_tables(database: str, table_names: tuple[str, ...]) -> list[str]:
+    quoted_names = ", ".join(sql_quote(name) for name in table_names)
+    output = run_mysql(
+        f"""
+        SELECT table_name
+        FROM information_schema.tables
+        WHERE table_schema = DATABASE()
+          AND table_name IN ({quoted_names});
+        """,
+        database,
+    )
+    existing = {line.strip() for line in output.splitlines() if line.strip()}
+    return [table_name for table_name in table_names if table_name not in existing]
+
+
+def validate_legacy_baseline(database: str, version: str) -> None:
+    if version != LEGACY_BASELINE_VERSION:
+        raise RuntimeError(
+            f"Unsupported baseline {version!r}. "
+            f"Only {LEGACY_BASELINE_VERSION!r} is supported by this release."
+        )
+
+    missing = missing_tables(database, LEGACY_BASELINE_REQUIRED_TABLES)
+    if missing:
+        raise RuntimeError(
+            f"Database is not compatible with {LEGACY_BASELINE_VERSION}; "
+            "missing required tables: " + ", ".join(missing)
+        )
+
+
 def discover_migrations() -> list[Migration]:
     if not MIGRATIONS_DIR.exists():
         return []
@@ -155,6 +197,26 @@ def mark_baseline(database: str, version: str) -> None:
         database,
     )
     print(f"Baseline recorded: {version}")
+
+
+def prepare_migration_registry(database: str, baseline: str = "") -> None:
+    registry_exists = table_exists(database, "schema_migration")
+    if not registry_exists and has_existing_business_tables(database):
+        if not baseline:
+            raise RuntimeError(
+                "This database has business tables but no schema_migration registry. "
+                "Take a verified backup, confirm the legacy baseline, then run with "
+                f"--mark-baseline {LEGACY_BASELINE_VERSION}."
+            )
+        validate_legacy_baseline(database, baseline)
+
+    if baseline:
+        validate_legacy_baseline(database, baseline)
+
+    if not registry_exists:
+        ensure_registry(database)
+    if baseline:
+        mark_baseline(database, baseline)
 
 
 def apply_migrations(database: str, verify_only: bool = False) -> None:
@@ -209,7 +271,14 @@ def apply_migrations(database: str, verify_only: bool = False) -> None:
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Apply tracked MySQL migrations.")
     parser.add_argument("--database", default=os.environ.get("DB_NAME", "office_asset_mgmt"))
-    parser.add_argument("--mark-baseline", default="")
+    parser.add_argument(
+        "--mark-baseline",
+        default=os.environ.get("MIGRATION_ADOPT_BASELINE", ""),
+        help=(
+            "Explicitly adopt a verified existing database baseline. "
+            "Defaults to MIGRATION_ADOPT_BASELINE when set."
+        ),
+    )
     parser.add_argument("--verify", action="store_true")
     return parser.parse_args()
 
@@ -217,16 +286,7 @@ def parse_args() -> argparse.Namespace:
 def main() -> int:
     args = parse_args()
     try:
-        registry_exists = table_exists(args.database, "schema_migration")
-        if not registry_exists and has_existing_business_tables(args.database) and not args.mark_baseline:
-            raise RuntimeError(
-                "This database has business tables but no schema_migration registry. "
-                "Take a verified backup, confirm the legacy baseline, then run with "
-                "--mark-baseline legacy-20260813."
-            )
-        ensure_registry(args.database)
-        if args.mark_baseline:
-            mark_baseline(args.database, args.mark_baseline)
+        prepare_migration_registry(args.database, args.mark_baseline.strip())
         apply_migrations(args.database, verify_only=args.verify)
     except RuntimeError as exc:
         print(f"Migration failed: {exc}", file=sys.stderr)
