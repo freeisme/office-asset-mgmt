@@ -15,20 +15,20 @@ python .\tests\integration\qa_security_regression.py
 
 确认暂存区不包含 `.env`、令牌、密码、私钥、数据库备份、测试数据库导出、日志、Excel 或 CSV 业务数据。
 
-## v2.0.0 发布
+## v2.0.1 发布
 
-1. 在 `VERSION_NOTES.md` 写入与标签一致的 `v2.0.0` 条目。
+1. 在 `VERSION_NOTES.md` 写入与标签一致的 `v2.0.1` 条目。
 2. 只暂存源代码、迁移、部署脚本和文档。
 3. 创建提交并推送 `main`。
 4. 创建带注释标签：
 
 ```powershell
-git tag -a v2.0.0 -m "Release v2.0.0"
+git tag -a v2.0.1 -m "Release v2.0.1"
 git push github main
-git push github v2.0.0
+git push github v2.0.1
 ```
 
-5. 在 GitHub Release 中选择 `v2.0.0` 标签，发布正式版本说明。
+5. 在 GitHub Release 中选择 `v2.0.1` 标签，发布正式版本说明。
 6. 更新 Wiki：架构、权限、资产操作、服务管理、迁移、测试、安全和本版本发布说明。
 
 ## 升级约束
@@ -40,4 +40,4 @@ git push github v2.0.0
 
 ## 版本命名
 
-稳定版本使用 `vMAJOR.MINOR.PATCH`，例如 `v2.0.0`。预发布版本使用 `vMAJOR.MINOR.PATCH-beta.N`。每个标签都应对应 `VERSION_NOTES.md` 中同名版本说明。
+稳定版本使用 `vMAJOR.MINOR.PATCH`，例如 `v2.0.1`。预发布版本使用 `vMAJOR.MINOR.PATCH-beta.N`。每个标签都应对应 `VERSION_NOTES.md` 中同名版本说明。
