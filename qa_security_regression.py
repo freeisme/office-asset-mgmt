@@ -282,31 +282,6 @@ def main() -> int:
     if os.environ.get("QA_INPROCESS_SERVER") == "1":
         os.environ.update(env)
         import server as app_server
-        print(
-            "QA_SERVER_CONTEXT",
-            app_server.DB_NAME,
-            bool(app_server.find_user_by_username("qa_verify_admin")),
-            app_server.verify_password(
-                PASSWORD,
-                str((app_server.find_user_by_username("qa_verify_admin") or {}).get("passwordHash", "")),
-            ),
-            flush=True,
-        )
-        original_find_user = app_server.find_user_by_username
-        original_verify = app_server.verify_password
-
-        def debug_find_user(username: str):
-            user = original_find_user(username)
-            print("QA_LOGIN_USER", username, user and user.get("id"), user and user.get("isActive"), flush=True)
-            return user
-
-        def debug_verify(password: str, stored_hash: str):
-            result = original_verify(password, stored_hash)
-            print("QA_LOGIN_VERIFY", repr(password), bool(stored_hash), result, flush=True)
-            return result
-
-        app_server.find_user_by_username = debug_find_user
-        app_server.verify_password = debug_verify
 
         in_process_server = app_server.ThreadingHTTPServer(
             (app_server.SERVER_HOST, app_server.SERVER_PORT),

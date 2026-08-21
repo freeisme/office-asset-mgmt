@@ -223,8 +223,8 @@ class ReleaseSelectionTests(TestCase):
     def test_repository_url_validation_accepts_github_and_internal_gitea(self):
         valid_urls = [
             "https://github.com/freeisme/office-asset-mgmt.git",
-            "ssh://git@192.168.253.25:2222/admin1/office-asset-management.git",
-            "git@192.168.253.25:admin1/office-asset-management.git",
+            "ssh://git@192.0.2.10:2222/organization/office-asset-mgmt.git",
+            "git@192.0.2.10:organization/office-asset-mgmt.git",
             "http://gitea.local/admin1/office-asset-management.git",
         ]
 

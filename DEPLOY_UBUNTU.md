@@ -226,7 +226,7 @@ https://服务器局域网IP/
 例如：
 
 ```text
-https://192.168.1.100/
+https://asset.example.internal/
 ```
 
 ## 8. 防火墙

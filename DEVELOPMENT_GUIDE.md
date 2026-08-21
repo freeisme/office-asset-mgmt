@@ -86,11 +86,11 @@ GitHub Wiki 提供适合团队日常查阅的模块化文档：
 
 | 项目 | 当前值 |
 | --- | --- |
-| 服务器地址 | `192.168.253.25` |
+| 服务器地址 | `<asset-server-host>` |
 | 服务器 SSH | `22` |
 | Gitea SSH | `2222` |
 | 应用目录 | `/opt/office-asset-mgmt` |
-| 应用地址 | `http://192.168.253.25:8000/` |
+| 应用地址 | `https://asset.example.internal/` |
 | Gitea 仓库 | `admin1/office-asset-management` |
 | 发布分支 | `main` |
 | 应用数据库服务名 | `db` |
@@ -775,7 +775,7 @@ git push origin main
 当前远程仓库：
 
 ```text
-ssh://git@192.168.253.25:2222/admin1/office-asset-management.git
+ssh://git@code.example.internal:2222/organization/office-asset-mgmt.git
 ```
 
 服务器 Webhook 服务收到 Gitea 的 `main` 分支 push 后，会校验：

@@ -2,11 +2,11 @@
 
 本文档对应当前服务器部署：
 
-- 服务器：`192.168.253.25`
+- 服务器：`<asset-server-host>`
 - 应用目录：`/opt/office-asset-mgmt`
 - Compose 文件：`/opt/office-asset-mgmt/compose.yaml`
 - 环境文件：`/opt/office-asset-mgmt/.env`
-- 应用地址：`http://192.168.253.25:8000/`
+- 应用地址：`https://asset.example.internal/`
 - 应用容器：`office-asset-mgmt-app-1`
 - MySQL 容器：`office-asset-mgmt-db-1`
 
@@ -46,7 +46,7 @@ MySQL root 密码在同一个 `.env` 文件的 `MYSQL_ROOT_PASSWORD` 中。
 office-asset-mgmt-db-1   3306/tcp
 ```
 
-宿主机的 `192.168.253.25:3306` 属于另一套 1Panel MySQL
+宿主机的 `<asset-server-host>:3306` 可能属于另一套 MySQL 服务
 容器 `1Panel-mysql-Xwiv`，不是办公资产管理系统数据库。
 
 当前应用网络：
@@ -63,7 +63,7 @@ office-asset-mgmt_default
 Windows PowerShell：
 
 ```powershell
-ssh admin1@192.168.253.25 -p 22
+ssh <deployment-user>@<asset-server-host> -p 22
 ```
 
 进入服务器后：
@@ -310,7 +310,7 @@ PostgreSQL 容器 `gitea-db`，不是 `office-asset-mgmt-db-1`。
 ## 10. 从远程办公终端使用 GUI 客户端
 
 当前办公资产 MySQL 没有发布到宿主机，因此不能直接在本地 GUI
-中连接 `192.168.253.25:3306`。该地址目前是另一套 1Panel MySQL。
+中连接 `<asset-server-host>:3306`。确认该地址对应当前目标 MySQL 实例。
 
 推荐做法是临时只绑定到服务器本机回环地址：
 
@@ -333,7 +333,7 @@ sudo docker compose \
 在 Windows 本地建立 SSH 隧道：
 
 ```powershell
-ssh -L 13306:127.0.0.1:13306 admin1@192.168.253.25 -p 22
+ssh -L 13306:127.0.0.1:13306 <deployment-user>@<asset-server-host> -p 22
 ```
 
 GUI 客户端连接参数：
