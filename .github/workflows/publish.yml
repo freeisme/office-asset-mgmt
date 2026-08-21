@@ -29,7 +29,7 @@ jobs:
           python-version: "3.11"
 
       - name: Compile Python source
-        run: python -m compileall -q server.py office_asset migration_runner.py qa_security_regression.py
+        run: python -m compileall -q server.py office_asset tools tests migration_runner.py run_mysql_utf8.py qa_security_regression.py
 
       - name: Run regression tests
         run: python -m unittest discover -s tests -v

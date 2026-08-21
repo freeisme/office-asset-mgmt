@@ -7,10 +7,10 @@ GitHub 仓库用于源码审查、版本标签、Release、Wiki 和自动校验�
 ```powershell
 git status --short
 git diff --check
-python -m py_compile server.py office_asset\*.py migration_runner.py qa_security_regression.py
+python -m compileall -q server.py office_asset tools tests migration_runner.py run_mysql_utf8.py qa_security_regression.py
 node --check web\app.js
-python .\migration_runner.py --database office_asset_mgmt_test --verify
-python .\qa_security_regression.py
+python .\tools\migration_runner.py --database office_asset_mgmt_test --verify
+python .\tests\integration\qa_security_regression.py
 ```
 
 确认暂存区不包含 `.env`、令牌、密码、私钥、数据库备份、测试数据库导出、日志、Excel 或 CSV 业务数据。
@@ -34,7 +34,7 @@ git push github v2.0.0
 ## 升级约束
 
 - GitHub Release 仅表示可部署源码版本，不代表生产升级已完成。
-- 生产升级前必须备份，按 [MIGRATIONS.md](MIGRATIONS.md) 执行迁移并验证。
+- 生产升级前必须备份，按 [数据库迁移说明](../development/migrations.md) 执行迁移并验证。
 - 只允许管理员在受控流程中选择已发布的稳定版本。
 - 回退代码不会回退数据库，恢复数据必须使用已验证的备份。
 

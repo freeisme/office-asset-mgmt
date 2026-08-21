@@ -258,6 +258,28 @@ class ReleaseSelectionTests(TestCase):
 
 
 class DeploymentScriptTests(TestCase):
+    def test_repository_layout_has_canonical_paths_and_compatibility_entries(self):
+        self.assertTrue((ROOT / "database" / "bootstrap").is_dir())
+        self.assertTrue((ROOT / "database" / "migrations").is_dir())
+        self.assertTrue((ROOT / "database" / "manual").is_dir())
+        self.assertTrue((ROOT / "tools" / "migration_runner.py").is_file())
+        self.assertTrue((ROOT / "scripts" / "windows" / "deploy.ps1").is_file())
+        self.assertTrue((ROOT / "docs" / "README.md").is_file())
+
+        runner = (ROOT / "tools" / "migration_runner.py").read_text(encoding="utf-8")
+        self.assertIn('ROOT_DIR = Path(__file__).resolve().parents[1]', runner)
+        self.assertIn('ROOT_DIR / "database" / "migrations"', runner)
+
+        root_runner = (ROOT / "migration_runner.py").read_text(encoding="utf-8")
+        root_deploy = (ROOT / "deploy.ps1").read_text(encoding="utf-8")
+        windows_deploy = (ROOT / "scripts" / "windows" / "deploy.ps1").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("from tools.migration_runner import main", root_runner)
+        self.assertIn('scripts\\windows\\deploy.ps1', root_deploy)
+        self.assertIn('[Alias("DbName")][string]$Database', windows_deploy)
+        self.assertNotIn('[Alias("DbName")][string]$DbName', windows_deploy)
+
     def test_backup_script_uses_atomic_private_output(self):
         script = (ROOT / "deploy" / "scripts" / "backup_database.sh").read_text(
             encoding="utf-8"
@@ -280,14 +302,18 @@ class DeploymentScriptTests(TestCase):
 
     def test_compose_healthcheck_keeps_mysql_password_out_of_arguments(self):
         compose = (ROOT / "compose.yaml").read_text(encoding="utf-8")
-        docker_doc = (ROOT / "DOCKER_DEPLOY.md").read_text(encoding="utf-8")
+        docker_doc = (ROOT / "docs" / "deployment" / "docker.md").read_text(
+            encoding="utf-8"
+        )
 
         self.assertIn('MYSQL_PWD=\\"$$MYSQL_PASSWORD\\" mysql', compose)
         self.assertNotIn('-p"$$MYSQL_PASSWORD"', compose)
         self.assertNotIn('-p"$MYSQL_PASSWORD"', docker_doc)
 
     def test_security_migration_adds_session_provenance_columns(self):
-        migration = (ROOT / "database" / "21_security_hardening.sql").read_text(
+        migration = (
+            ROOT / "database" / "bootstrap" / "21_security_hardening.sql"
+        ).read_text(
             encoding="utf-8"
         )
 
@@ -295,7 +321,9 @@ class DeploymentScriptTests(TestCase):
         self.assertIn("ADD COLUMN user_agent VARCHAR(500)", migration)
 
     def test_update_repository_setting_migration_exists(self):
-        migration = (ROOT / "database" / "22_update_repository_setting.sql").read_text(
+        migration = (
+            ROOT / "database" / "bootstrap" / "22_update_repository_setting.sql"
+        ).read_text(
             encoding="utf-8"
         )
 

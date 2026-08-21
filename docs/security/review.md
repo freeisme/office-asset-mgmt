@@ -72,7 +72,7 @@
 ### 10. 旧安装缺少会话来源与安全迁移字段
 
 - 风险：旧数据库无法记录会话创建来源，且升级代码写入新字段时可能因列不存在而失败。
-- 修复：`database/21_security_hardening.sql` 以幂等方式补充 `ip_address` 和
+- 修复：`database/bootstrap/21_security_hardening.sql` 以幂等方式补充 `ip_address` 和
   `user_agent`，并由新会话记录这些来源信息。
 
 ### 11. 状态快照可用缺失字段或版本零值覆盖
@@ -148,5 +148,5 @@
 [ ] Webhook 无效签名返回 401
 [ ] 更新服务使用受信任 TLS，且不接受普通标签或缺少版本说明的版本
 [ ] 更新构建或健康检查失败后恢复之前的应用版本
-[ ] database/21_security_hardening.sql 已在测试库成功执行
+[ ] database/bootstrap/21_security_hardening.sql 已在测试库成功执行
 ```

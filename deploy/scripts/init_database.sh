@@ -50,17 +50,17 @@ for sql_file in \
 do
   echo "Applying ${sql_file}"
   sed -E '/^[[:space:]]*USE[[:space:]]+[^;]+;[[:space:]]*$/Id' \
-    "${ROOT_DIR}/database/${sql_file}" | "${MYSQL_BIN}" "${mysql_args[@]}" "${DB_NAME}"
+    "${ROOT_DIR}/database/bootstrap/${sql_file}" | "${MYSQL_BIN}" "${mysql_args[@]}" "${DB_NAME}"
 done
 
-if [[ ! -f "${ROOT_DIR}/migration_runner.py" ]]; then
-  echo "Missing migration runner: ${ROOT_DIR}/migration_runner.py" >&2
+if [[ ! -f "${ROOT_DIR}/tools/migration_runner.py" ]]; then
+  echo "Missing migration runner: ${ROOT_DIR}/tools/migration_runner.py" >&2
   exit 1
 fi
 
 DB_HOST="${DB_HOST}" DB_PORT="${DB_PORT}" DB_USER="${DB_USER}" DB_NAME="${DB_NAME}" \
   MYSQL_BIN="${MYSQL_BIN}" DB_PASSWORD="${MYSQL_PWD}" \
-  "${PYTHON_BIN}" "${ROOT_DIR}/migration_runner.py" \
+  "${PYTHON_BIN}" "${ROOT_DIR}/tools/migration_runner.py" \
     --database "${DB_NAME}" \
     --mark-baseline legacy-20260813
 
