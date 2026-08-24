@@ -4395,8 +4395,14 @@ html[data-theme="dark"] {
 
 html[data-theme="dark"],
 html[data-theme="dark"] body,
+html[data-theme="dark"] .app-shell,
 html[data-theme="dark"] .main-content,
 html[data-theme="dark"] .page-content,
+html[data-theme="dark"] .form-designer-page,
+html[data-theme="dark"] .form-designer-layout,
+html[data-theme="dark"] .designer-workspace,
+html[data-theme="dark"] .designer-workflow-layout,
+html[data-theme="dark"] .designer-workflow-canvas,
 html[data-theme="dark"] .auth-page {
   color: var(--ink);
   background: var(--canvas) !important;
@@ -4542,6 +4548,24 @@ html[data-theme="dark"] .nav-item.is-active {
   color: #ffffff;
   border-color: rgba(227, 6, 19, 0.54);
   background: #3a0c10;
+}
+
+html[data-theme="dark"] .tag-chip,
+html[data-theme="dark"] .device-chip {
+  color: var(--ink);
+  background: #111111 !important;
+  border-color: var(--line) !important;
+}
+
+html[data-theme="dark"] .device-chip small {
+  color: var(--muted);
+}
+
+html[data-theme="dark"] .device-chip-button:hover,
+html[data-theme="dark"] .tag-chip:hover {
+  color: var(--ink);
+  background: #1a1a1a !important;
+  border-color: var(--ink) !important;
 }
 
 .topbar-icon-button {
@@ -6335,220 +6359,6 @@ html:not([data-theme="dark"]) .form-field textarea::placeholder,
 html:not([data-theme="dark"]) .designer-property-field input::placeholder,
 html:not([data-theme="dark"]) .designer-property-field textarea::placeholder {
   color: #777383 !important;
-  opacity: 1;
-}
-
-/* Enforce one readable foreground/background contract across every workspace. */
-html[data-theme="light"] {
-  color-scheme: light;
-  --navy-950: #000000;
-  --navy-900: #000000;
-  --navy-700: #000000;
-  --ink: #000000;
-  --muted: #000000;
-  --line: #c8c8c8;
-  --line-soft: #e2e2e2;
-  --canvas: #ffffff;
-  --white: #ffffff;
-  --teal: #000000;
-  --teal-soft: #ffffff;
-  --amber: #000000;
-  --amber-soft: #ffffff;
-  --red: #000000;
-  --red-soft: #ffffff;
-  --green: #000000;
-  --green-soft: #ffffff;
-  --shadow: none;
-}
-
-html[data-theme="dark"] {
-  color-scheme: dark;
-  --navy-950: #ffffff;
-  --navy-900: #ffffff;
-  --navy-700: #ffffff;
-  --ink: #ffffff;
-  --muted: #ffffff;
-  --line: #5a5a5a;
-  --line-soft: #303030;
-  --canvas: #000000;
-  --white: #000000;
-  --teal: #ffffff;
-  --teal-soft: #000000;
-  --amber: #ffffff;
-  --amber-soft: #000000;
-  --red: #ffffff;
-  --red-soft: #000000;
-  --green: #ffffff;
-  --green-soft: #000000;
-  --shadow: none;
-}
-
-html[data-theme] body,
-html[data-theme] .app-shell,
-html[data-theme] .main-content,
-html[data-theme] .page-content,
-html[data-theme] .form-designer-page,
-html[data-theme] .form-designer-layout,
-html[data-theme] .designer-workspace,
-html[data-theme] .designer-workflow-layout,
-html[data-theme] .designer-workflow-canvas,
-html[data-theme] .auth-page {
-  color: var(--ink) !important;
-  background: var(--canvas) !important;
-}
-
-html[data-theme] .sidebar,
-html[data-theme] .topbar,
-html[data-theme] .data-panel,
-html[data-theme] .stat-card,
-html[data-theme] .settings-panel,
-html[data-theme] .auth-panel,
-html[data-theme] .service-tabs,
-html[data-theme] .toolbar > .toolbar-actions,
-html[data-theme] .form-designer-toolbar,
-html[data-theme] .designer-palette,
-html[data-theme] .designer-properties,
-html[data-theme] .designer-workflow-palette,
-html[data-theme] .designer-workflow-properties,
-html[data-theme] .designer-canvas,
-html[data-theme] .designer-field-card,
-html[data-theme] .designer-simple-panel,
-html[data-theme] .designer-settings-panel,
-html[data-theme] .designer-permission-row,
-html[data-theme] .modal-panel,
-html[data-theme] .empty-state,
-html[data-theme] .settings-readonly-note,
-html[data-theme] .settings-loading,
-html[data-theme] .toast,
-html[data-theme] .dashboard-welcome {
-  color: var(--ink) !important;
-  border-color: var(--line) !important;
-  background: var(--white) !important;
-  box-shadow: none !important;
-}
-
-html[data-theme] .form-field input,
-html[data-theme] .form-field select,
-html[data-theme] .form-field textarea,
-html[data-theme] .search-box,
-html[data-theme] .select-box,
-html[data-theme] .select-box input,
-html[data-theme] .select-box select,
-html[data-theme] .purchase-note-input,
-html[data-theme] .flow-record-note-input,
-html[data-theme] .designer-title input,
-html[data-theme] .designer-property-field input,
-html[data-theme] .designer-property-field select,
-html[data-theme] .designer-property-field textarea,
-html[data-theme] .designer-field-preview input,
-html[data-theme] .designer-field-preview select,
-html[data-theme] .designer-field-preview textarea,
-html[data-theme] .designer-readonly-value,
-html[data-theme] .designer-permission-row select,
-html[data-theme] .designer-permission-add select {
-  color: var(--ink) !important;
-  border-color: var(--line) !important;
-  background: var(--white) !important;
-}
-
-html[data-theme] .form-field input::placeholder,
-html[data-theme] .form-field textarea::placeholder,
-html[data-theme] .designer-property-field input::placeholder,
-html[data-theme] .designer-property-field textarea::placeholder {
-  color: var(--muted) !important;
-}
-
-html[data-theme] .sidebar .brand strong,
-html[data-theme] .sidebar .nav-item,
-html[data-theme] .sidebar .nav-icon,
-html[data-theme] .topbar h1,
-html[data-theme] .page-intro h2,
-html[data-theme] .section-heading h2,
-html[data-theme] .stat-value,
-html[data-theme] .modal-header h2,
-html[data-theme] .dashboard-welcome h2,
-html[data-theme] .dashboard-welcome p,
-html[data-theme] .designer-title input,
-html[data-theme] .designer-palette-group h3,
-html[data-theme] .designer-settings-section h2,
-html[data-theme] .designer-canvas-head h2,
-html[data-theme] .designer-properties-head h2,
-html[data-theme] .designer-simple-panel h2,
-html[data-theme] .designer-field-card-head,
-html[data-theme] .designer-property-field > span,
-html[data-theme] .designer-switch,
-html[data-theme] .designer-permission-row label,
-html[data-theme] .designer-tabs button,
-html[data-theme] .icon-button {
-  color: var(--ink) !important;
-}
-
-html[data-theme] .brand small,
-html[data-theme] .sidebar-section-title,
-html[data-theme] .sidebar-footer,
-html[data-theme] .sidebar-footer strong,
-html[data-theme] .form-hint,
-html[data-theme] .password-hint,
-html[data-theme] .designer-muted,
-html[data-theme] .designer-canvas-hint,
-html[data-theme] .designer-properties-empty span,
-html[data-theme] .designer-empty-canvas span,
-html[data-theme] .designer-toolbar-actions,
-html[data-theme] .designer-simple-panel p {
-  color: var(--muted) !important;
-}
-
-html[data-theme] .primary-button,
-html[data-theme] .secondary-button,
-html[data-theme] .danger-button,
-html[data-theme] .topbar-icon-button,
-html[data-theme] .icon-button,
-html[data-theme] .nav-item.is-active,
-html[data-theme] .service-tabs .service-tab.is-active,
-html[data-theme] .service-tabs .service-tab.is-active:hover,
-html[data-theme] .brand-mark,
-html[data-theme] .dashboard-visual-card,
-html[data-theme] thead th {
-  color: var(--ink) !important;
-  border-color: var(--line) !important;
-  background: var(--white) !important;
-  box-shadow: none !important;
-}
-
-html[data-theme] .primary-button:hover,
-html[data-theme] .secondary-button:hover,
-html[data-theme] .danger-button:hover,
-html[data-theme] .topbar-icon-button:hover,
-html[data-theme] .icon-button:hover,
-html[data-theme] .nav-item:hover,
-html[data-theme] .nav-item.is-active:hover,
-html[data-theme] .service-tabs .service-tab:hover,
-html[data-theme] .designer-palette-item:hover,
-html[data-theme] tbody tr:hover {
-  color: var(--ink) !important;
-  border-color: var(--ink) !important;
-  background: var(--white) !important;
-}
-
-html[data-theme] .designer-palette-item,
-html[data-theme] .designer-flow-node,
-html[data-theme] .service-form-builder-row,
-html[data-theme] .workflow-step-row,
-html[data-theme] .update-version-item,
-html[data-theme] .backup-download-file {
-  color: var(--ink) !important;
-  border-color: var(--line) !important;
-  background: var(--white) !important;
-}
-
-html[data-theme] *,
-html[data-theme] *::before,
-html[data-theme] *::after {
-  color: var(--ink) !important;
-}
-
-html[data-theme] ::placeholder {
-  color: var(--ink) !important;
   opacity: 1;
 }
 

@@ -3293,6 +3293,22 @@ function renderUpdatePanel(canUpdate) {
   </section>`;
 }
 
+function syncSettingsTabsAndContent() {
+  const appContent = document.querySelector("#appContent");
+  if (!appContent) return false;
+  const currentTabs = appContent.querySelector(".settings-tabs");
+  const currentContent = appContent.querySelector(".settings-view-content");
+  if (!currentTabs || !currentContent) return false;
+  const template = document.createElement("template");
+  template.innerHTML = renderSettingsPage().trim();
+  const nextTabs = template.content.querySelector(".settings-tabs");
+  const nextContent = template.content.querySelector(".settings-view-content");
+  if (!nextTabs || !nextContent) return false;
+  currentTabs.replaceWith(nextTabs);
+  currentContent.replaceWith(nextContent);
+  return true;
+}
+
 function renderSettingsPage() {
   if (!settingsState.loaded) {
     return `<div class="page-intro"><div><h2>系统设置</h2><p>正在加载设置数据。</p></div></div>
@@ -7548,7 +7564,9 @@ document.addEventListener("click", (event) => {
 
   if (action === "settings-view") {
     settingsState.view = actionElement.dataset.view || "system";
-    render();
+    if (!syncSettingsTabsAndContent()) {
+      render();
+    }
     return;
   }
 
