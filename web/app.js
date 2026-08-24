@@ -39,7 +39,7 @@ function applyTheme(theme) {
   const isDark = theme === "dark";
   document.documentElement.dataset.theme = isDark ? "dark" : "light";
   const metaThemeColor = document.querySelector('meta[name="theme-color"]');
-  if (metaThemeColor) metaThemeColor.setAttribute("content", isDark ? "#0b1117" : "#ffffff");
+  if (metaThemeColor) metaThemeColor.setAttribute("content", isDark ? "#000000" : "#ffffff");
   const toggle = document.querySelector('[data-action="toggle-theme"]');
   if (toggle) {
     toggle.textContent = isDark ? "☀" : "☾";
@@ -204,6 +204,10 @@ let settingsState = {
     loading: false,
   },
 };
+let lastRenderedPage = "";
+let controlIdSequence = 0;
+let asyncRequestSequence = 0;
+const latestAsyncRequests = new Map();
 let authBootPromise = null;
 let operationsState = {
   tickets: [],
@@ -301,6 +305,20 @@ function canViewPage(page) {
     settings: "system_settings",
   };
   return hasPermission(modules[page] || "dashboard", "view");
+}
+
+function beginAsyncRequest(key) {
+  const requestId = ++asyncRequestSequence;
+  latestAsyncRequests.set(key, requestId);
+  return requestId;
+}
+
+function isLatestAsyncRequest(key, requestId) {
+  return latestAsyncRequests.get(key) === requestId;
+}
+
+function invalidateAsyncRequests() {
+  latestAsyncRequests.clear();
 }
 
 function createId(prefix) {
@@ -776,6 +794,7 @@ function requestJson(url, options = {}) {
             loading: false,
           },
         };
+        invalidateAsyncRequests();
         authBootPromise = null;
         startAuth();
       }
@@ -1050,14 +1069,25 @@ async function loadAccessControlTarget() {
   const access = accessControlState();
   if (!access.targetId) {
     access.permissions = [];
-    return;
+    return true;
   }
+  const requestId = beginAsyncRequest("access-control-target");
+  const targetType = access.targetType;
+  const targetId = access.targetId;
   const endpoint =
-    access.targetType === "role"
-      ? `${API_ROLES_URL}/${encodeURIComponent(access.targetId)}/permissions`
-      : `${API_USERS_URL}/${encodeURIComponent(access.targetId)}/permissions`;
+    targetType === "role"
+      ? `${API_ROLES_URL}/${encodeURIComponent(targetId)}/permissions`
+      : `${API_USERS_URL}/${encodeURIComponent(targetId)}/permissions`;
   const payload = await requestJson(endpoint);
+  if (
+    !isLatestAsyncRequest("access-control-target", requestId) ||
+    access.targetType !== targetType ||
+    access.targetId !== targetId
+  ) {
+    return false;
+  }
   access.permissions = Array.isArray(payload.permissions) ? payload.permissions : [];
+  return true;
 }
 
 async function enterAuthenticatedSession(payload) {
@@ -1160,6 +1190,8 @@ async function logout() {
       loading: false,
     },
   };
+  invalidateAsyncRequests();
+  lastRenderedPage = "";
   document.querySelector("#modalRoot").innerHTML = "";
   authBootPromise = null;
   startAuth();
@@ -1199,10 +1231,12 @@ function buildAuditLogsUrl(limit = 5000) {
 }
 
 async function refreshAuditLogs(options = {}) {
+  const requestId = beginAsyncRequest("audit-logs");
   const payload = await requestJson(buildAuditLogsUrl(options.limit || 5000));
+  if (!isLatestAsyncRequest("audit-logs", requestId)) return null;
   state.auditLogs = normalizeState({ auditLogs: payload.logs || [], auditLogTotal: payload.total || 0 }).auditLogs;
   state.auditLogTotal = Math.max(0, Number(payload.total || state.auditLogs.length));
-  if (!options.silent) render();
+  if (!options.silent) renderIfCurrentPage("audit");
   return payload;
 }
 
@@ -1215,8 +1249,10 @@ function persistState(syncRemote = false) {
 }
 
 async function hydrateStateFromServer(options = {}) {
+  const requestId = beginAsyncRequest("domain-state");
   try {
     const payload = await requestJson(API_STATE_URL);
+    if (!isLatestAsyncRequest("domain-state", requestId)) return;
     applyRemoteState(payload);
     state.auditLogTotal = state.auditLogs.length;
     window.localStorage.setItem(UI_STORAGE_KEY, JSON.stringify(extractUiState(state)));
@@ -2718,6 +2754,7 @@ function deviceChips(employee) {
 
 function render() {
   if (!authState.authenticated) {
+    lastRenderedPage = "";
     renderAuthScreen();
     return;
   }
@@ -2737,7 +2774,13 @@ function render() {
     item.classList.toggle("is-active", item.dataset.page === state.page);
   });
   updateAuthenticatedChrome();
-  document.querySelector("#appContent").innerHTML = `<div class="page-enter">${renderPage()}</div>`;
+  const isPageTransition = lastRenderedPage !== state.page;
+  lastRenderedPage = state.page;
+  document.querySelector("#appContent").innerHTML = `<div${isPageTransition ? ' class="page-enter"' : ""}>${renderPage()}</div>`;
+}
+
+function renderIfCurrentPage(page) {
+  if (state.page === page) render();
 }
 
 function isDeferredTextFilter(filterName) {
@@ -2897,13 +2940,17 @@ function renderPermissionGrid() {
               )}</small></td>
               ${permissionActions
                 .map(
-                  ([action]) =>
+                  ([action, actionLabel]) =>
                     `<td><input type="checkbox" data-permission="${escapeHtml(
                       `${row.module.code}:${action}`,
-                    )}" ${row.actions[action] ? "checked" : ""} /></td>`,
+                    )}" aria-label="${escapeHtml(`${row.module.name || row.module.code}：${actionLabel}`)}" ${
+                      row.actions[action] ? "checked" : ""
+                    } /></td>`,
                 )
                 .join("")}
-              <td><select data-permission-scope="${escapeHtml(row.module.code)}">
+              <td><select data-permission-scope="${escapeHtml(row.module.code)}" aria-label="${escapeHtml(
+                `${row.module.name || row.module.code}：数据范围`,
+              )}">
         ${["all", "organization", "own", "submitted", "assigned", "none"]
           .map(
             (scope) =>
@@ -2946,13 +2993,15 @@ function renderRoleCreationPermissionGrid() {
             <td><strong>${escapeHtml(module.name || module.code)}</strong><small>${escapeHtml(module.code)}</small></td>
             ${permissionActions
               .map(
-                ([action]) =>
+                ([action, actionLabel]) =>
                   `<td><input type="checkbox" data-role-permission="${escapeHtml(
                     `${module.code}:${action}`,
-                  )}" /></td>`,
+                  )}" aria-label="${escapeHtml(`${module.name || module.code}：${actionLabel}`)}" /></td>`,
               )
               .join("")}
-            <td><select data-role-permission-scope="${escapeHtml(module.code)}">
+            <td><select data-role-permission-scope="${escapeHtml(module.code)}" aria-label="${escapeHtml(
+              `${module.name || module.code}：数据范围`,
+            )}">
               ${[
                 ["all", "全部数据"],
                 ["organization", "所属部门及下属部门"],
@@ -2984,11 +3033,11 @@ function renderAccessControlPanel() {
         <div><h2>权限配置</h2><span>按角色或用户配置模块可见性、操作权限和数据范围。</span></div>
       </div>
       <div class="form-grid">
-        <div class="form-field"><label>配置对象</label><select data-access-target-type>
+        <div class="form-field"><label for="access-target-type">配置对象</label><select id="access-target-type" data-access-target-type>
           <option value="role" ${access.targetType === "role" ? "selected" : ""}>角色</option>
           <option value="user" ${access.targetType === "user" ? "selected" : ""}>用户覆盖</option>
         </select></div>
-        <div class="form-field"><label>目标对象</label><select data-access-target-id>
+        <div class="form-field"><label for="access-target-id">目标对象</label><select id="access-target-id" data-access-target-id>
           ${
             access.targetType === "role"
               ? (access.roles || [])
@@ -5679,7 +5728,8 @@ function inventoryModelOptions(brandId, selectedId = "", currentName = "") {
 }
 
 function inventorySelectField(label, name, options, required = false) {
-  return `<div class="form-field"><label>${escapeHtml(label)}${required ? " *" : ""}</label><select name="${escapeHtml(
+  const controlId = createControlId(name);
+  return `<div class="form-field"><label for="${controlId}">${escapeHtml(label)}${required ? " *" : ""}</label><select id="${controlId}" name="${escapeHtml(
     name,
   )}" data-inventory-select="${escapeHtml(name)}" ${required ? "required" : ""}>${options
     .map(
@@ -6033,6 +6083,7 @@ function inputField(
   min = "",
   extraAttributes = "",
 ) {
+  const controlId = createControlId(name);
   const numericConstraint = type !== "password" && min ? `min="${escapeHtml(min)}"` : "";
   const passwordConstraint =
     type === "password"
@@ -6042,7 +6093,7 @@ function inputField(
     type === "password"
       ? '<small class="form-hint password-hint">8-256 位，不允许首尾空格。</small>'
       : "";
-  return `<div class="form-field"><label>${escapeHtml(label)}${required ? " *" : ""}</label><input type="${type}" name="${escapeHtml(
+  return `<div class="form-field"><label for="${controlId}">${escapeHtml(label)}${required ? " *" : ""}</label><input id="${controlId}" type="${type}" name="${escapeHtml(
     name,
   )}" value="${escapeHtml(value)}" placeholder="${escapeHtml(placeholder)}" ${required ? "required" : ""} ${numericConstraint} ${passwordConstraint} ${extraAttributes} />${passwordHint}</div>`;
 }
@@ -6053,7 +6104,8 @@ function selectField(label, name, value, options, required = false) {
     value = options;
     options = suppliedOptions;
   }
-  return `<div class="form-field"><label>${escapeHtml(label)}${required ? " *" : ""}</label><select name="${escapeHtml(
+  const controlId = createControlId(name);
+  return `<div class="form-field"><label for="${controlId}">${escapeHtml(label)}${required ? " *" : ""}</label><select id="${controlId}" name="${escapeHtml(
     name,
   )}" ${required ? "required" : ""}>${options
     .map(
@@ -6066,11 +6118,22 @@ function selectField(label, name, value, options, required = false) {
 }
 
 function textareaField(label, name, value, required = false, placeholder = "", rows = 3, extraAttributes = "") {
-  return `<div class="form-field"><label>${escapeHtml(label)}${required ? " *" : ""}</label><textarea name="${escapeHtml(
+  const controlId = createControlId(name);
+  return `<div class="form-field"><label for="${controlId}">${escapeHtml(label)}${required ? " *" : ""}</label><textarea id="${controlId}" name="${escapeHtml(
     name,
   )}" rows="${rows}" placeholder="${escapeHtml(placeholder)}" ${required ? "required" : ""} ${extraAttributes}>${escapeHtml(
     value,
   )}</textarea></div>`;
+}
+
+function createControlId(name) {
+  controlIdSequence += 1;
+  const normalizedName =
+    String(name || "control")
+      .toLowerCase()
+      .replace(/[^a-z0-9_-]+/g, "-")
+      .replace(/^-+|-+$/g, "") || "control";
+  return `field-${normalizedName}-${controlIdSequence}`;
 }
 
 async function handleSystemSettingsSubmit(form) {
@@ -7472,12 +7535,13 @@ document.addEventListener("click", (event) => {
       showToast("当前账号没有查看消息提醒权限。", true);
       return;
     }
-    state.page = "serviceManagement";
+    const page = "serviceManagement";
+    state.page = page;
     serviceState().view = "notifications";
     persistState(false);
     render();
     loadServiceManagement()
-      .then(render)
+      .then(() => renderIfCurrentPage(page))
       .catch((error) => showToast(`消息提醒加载失败：${error.message}`, true));
     return;
   }
@@ -7674,12 +7738,14 @@ document.addEventListener("click", (event) => {
   }
 
   if (action === "navigate") {
-    state.page = actionElement.dataset.page;
+    const targetPage = actionElement.dataset.page || "dashboard";
+    if (targetPage === state.page) return;
+    state.page = targetPage;
     persistState(false);
     render();
-    if (state.page === "settings") {
+    if (state.page === "settings" && !settingsState.loaded) {
       loadSettingsState({ users: isAdminUser() })
-        .then(() => render())
+        .then(() => renderIfCurrentPage(targetPage))
         .catch((error) => {
           console.error("Unable to load settings", error);
           showToast(`设置加载失败：${error.message}`, true);
@@ -7687,7 +7753,7 @@ document.addEventListener("click", (event) => {
     }
     if (state.page === "audit") {
       refreshAuditLogs({ silent: true })
-        .then(() => render())
+        .then(() => renderIfCurrentPage(targetPage))
         .catch((error) => {
           console.error("Unable to load audit logs", error);
           showToast(`日志加载失败：${error.message}`, true);
@@ -7695,7 +7761,7 @@ document.addEventListener("click", (event) => {
     }
     if (state.page === "tickets") {
       loadTickets()
-        .then(() => render())
+        .then(() => renderIfCurrentPage(targetPage))
         .catch((error) => {
           console.error("Unable to load tickets", error);
           showToast(`工单加载失败：${error.message}`, true);
@@ -7703,7 +7769,7 @@ document.addEventListener("click", (event) => {
     }
     if (state.page === "serviceManagement") {
       loadServiceManagement()
-        .then(() => render())
+        .then(() => renderIfCurrentPage(targetPage))
         .catch((error) => {
           console.error("Unable to load service management", error);
           showToast(`服务管理加载失败：${error.message}`, true);
@@ -7711,7 +7777,7 @@ document.addEventListener("click", (event) => {
     }
     if (state.page === "governance") {
       loadGovernance()
-        .then(() => render())
+        .then(() => renderIfCurrentPage(targetPage))
         .catch((error) => {
           console.error("Unable to load governance data", error);
           showToast(`治理数据加载失败：${error.message}`, true);
@@ -8306,28 +8372,38 @@ function renderGovernancePage() {
 }
 
 async function loadTickets() {
+  const requestId = beginAsyncRequest("tickets");
   operationsState.ticketLoading = true;
-  render();
+  renderIfCurrentPage("tickets");
   try {
     const payload = await requestJson(API_TICKETS_URL);
+    if (!isLatestAsyncRequest("tickets", requestId)) return false;
     operationsState.tickets = Array.isArray(payload.tickets) ? payload.tickets : [];
+    return true;
   } finally {
-    operationsState.ticketLoading = false;
+    if (isLatestAsyncRequest("tickets", requestId)) {
+      operationsState.ticketLoading = false;
+    }
   }
 }
 
 async function loadGovernance() {
+  const requestId = beginAsyncRequest("governance");
   operationsState.governanceLoading = true;
-  render();
+  renderIfCurrentPage("governance");
   try {
     const [runsPayload, issuesPayload] = await Promise.all([
       requestJson(API_SYNC_RUNS_URL),
       requestJson(`${API_QUALITY_ISSUES_URL}?status=open`),
     ]);
+    if (!isLatestAsyncRequest("governance", requestId)) return false;
     operationsState.syncRuns = Array.isArray(runsPayload.runs) ? runsPayload.runs : [];
     operationsState.qualityIssues = Array.isArray(issuesPayload.issues) ? issuesPayload.issues : [];
+    return true;
   } finally {
-    operationsState.governanceLoading = false;
+    if (isLatestAsyncRequest("governance", requestId)) {
+      operationsState.governanceLoading = false;
+    }
   }
 }
 
@@ -8338,21 +8414,22 @@ function ticketFormByCode(code) {
 function ticketCustomFieldInput(field) {
   const key = `custom_${field.key}`;
   const label = field.label || field.key;
+  const controlId = createControlId(key);
   const required = field.required ? "required" : "";
   const placeholder = escapeHtml(field.placeholder || "");
   const options = Array.isArray(field.options) ? field.options : [];
   if (field.type === "system") {
     const sourceLabels = Object.fromEntries(designerSystemSources);
-    return `<div class="form-field"><label>${escapeHtml(label)}</label><input type="text" value="${escapeHtml(sourceLabels[(field.config || {}).source] || "系统自动带出")}" readonly tabindex="-1" /></div>`;
+    return `<div class="form-field"><label for="${controlId}">${escapeHtml(label)}</label><input id="${controlId}" type="text" value="${escapeHtml(sourceLabels[(field.config || {}).source] || "系统自动带出")}" readonly tabindex="-1" /></div>`;
   }
   if (field.type === "textarea") {
-    return `<div class="form-field full"><label>${escapeHtml(label)}${field.required ? " *" : ""}</label><textarea name="${escapeHtml(key)}" rows="4" placeholder="${placeholder}" ${required}></textarea></div>`;
+    return `<div class="form-field full"><label for="${controlId}">${escapeHtml(label)}${field.required ? " *" : ""}</label><textarea id="${controlId}" name="${escapeHtml(key)}" rows="4" placeholder="${placeholder}" ${required}></textarea></div>`;
   }
   if (field.type === "select" || field.type === "multiselect") {
-    return `<div class="form-field"><label>${escapeHtml(label)}${field.required ? " *" : ""}</label><select name="${escapeHtml(key)}" ${field.type === "multiselect" ? "multiple" : ""} ${required}><option value="">请选择</option>${options.map((option) => `<option value="${escapeHtml(option.value)}">${escapeHtml(option.label || option.value)}</option>`).join("")}</select></div>`;
+    return `<div class="form-field"><label for="${controlId}">${escapeHtml(label)}${field.required ? " *" : ""}</label><select id="${controlId}" name="${escapeHtml(key)}" ${field.type === "multiselect" ? "multiple" : ""} ${required}><option value="">请选择</option>${options.map((option) => `<option value="${escapeHtml(option.value)}">${escapeHtml(option.label || option.value)}</option>`).join("")}</select></div>`;
   }
   if (field.type === "checkbox") {
-    return `<label class="form-field"><span>${escapeHtml(label)}</span><input type="checkbox" name="${escapeHtml(key)}" value="true" /></label>`;
+    return `<label class="form-field"><span>${escapeHtml(label)}</span><input id="${controlId}" type="checkbox" name="${escapeHtml(key)}" value="true" /></label>`;
   }
   if (field.type === "employee") {
     return selectField(label, key, [{ value: "", label: "未选择人员" }].concat(state.employees.map((employee) => ({ value: employee.id, label: `${employee.name} (${employee.employeeNo})` }))), "", field.required);
@@ -8364,7 +8441,14 @@ function ticketCustomFieldInput(field) {
     return selectField(label, key, getOrgSelectOptions({ includeBlank: true }), "", field.required);
   }
   const type = field.type === "number" ? "number" : field.type === "date" ? "date" : field.type === "datetime" ? "datetime-local" : "text";
-  return `<div class="form-field"><label>${escapeHtml(label)}${field.required ? " *" : ""}</label><input type="${type}" name="${escapeHtml(key)}" placeholder="${placeholder}" ${required} /></div>`;
+  return `<div class="form-field"><label for="${controlId}">${escapeHtml(label)}${field.required ? " *" : ""}</label><input id="${controlId}" type="${type}" name="${escapeHtml(key)}" placeholder="${placeholder}" ${required} /></div>`;
+}
+
+function readonlyField(label, value) {
+  const controlId = createControlId(`readonly-${label}`);
+  return `<div class="form-field"><label for="${controlId}">${escapeHtml(label)}</label><input id="${controlId}" readonly value="${escapeHtml(
+    value,
+  )}" /></div>`;
 }
 
 function renderTicketModal(selectedCode = "") {
@@ -8444,19 +8528,19 @@ async function openTicketDetail(ticketId) {
       `${modalHeader(ticket.number || "工单", ticket.title || "")}
         <section class="modal-section"><p>${escapeHtml(ticket.description || "")}</p>
           <div class="form-grid">
-            <div class="form-field"><label>状态</label><input readonly value="${escapeHtml(ticketStatusLabel(ticket.status))}" /></div>
-            <div class="form-field"><label>优先级</label><input readonly value="${escapeHtml(ticket.priority || "")}" /></div>
-            <div class="form-field"><label>SLA 状态</label><input readonly value="${escapeHtml(ticketSlaLabel(ticket.slaState))}" /></div>
-            <div class="form-field"><label>SLA 剩余时间</label><input readonly value="${escapeHtml(ticketSlaRemaining(ticket))}" /></div>
-            <div class="form-field"><label>审批状态</label><input readonly value="${escapeHtml(ticketApprovalLabel(ticket.approvalStatus))}" /></div>
-            <div class="form-field"><label>请求人</label><input readonly value="${escapeHtml(ticket.requesterName || "")}" /></div>
-            <div class="form-field"><label>关联终端</label><input readonly value="${escapeHtml(ticket.relatedComputerName || "")}" /></div>
+            ${readonlyField("状态", ticketStatusLabel(ticket.status))}
+            ${readonlyField("优先级", ticket.priority || "")}
+            ${readonlyField("SLA 状态", ticketSlaLabel(ticket.slaState))}
+            ${readonlyField("SLA 剩余时间", ticketSlaRemaining(ticket))}
+            ${readonlyField("审批状态", ticketApprovalLabel(ticket.approvalStatus))}
+            ${readonlyField("请求人", ticket.requesterName || "")}
+            ${readonlyField("关联终端", ticket.relatedComputerName || "")}
           </div>
         </section>
         ${
           Object.keys(ticket.customFields || {}).length
             ? `<section class="modal-section"><h3>业务字段</h3><div class="form-grid">${Object.entries(ticket.customFields || {})
-                .map(([key, value]) => `<div class="form-field"><label>${escapeHtml(key)}</label><input readonly value="${escapeHtml(Array.isArray(value) ? value.join("、") : String(value ?? ""))}" /></div>`)
+                .map(([key, value]) => readonlyField(key, Array.isArray(value) ? value.join("、") : String(value ?? "")))
                 .join("")}</div></section>`
             : ""
         }
@@ -8638,11 +8722,15 @@ document.addEventListener("click", (event) => {
   if (action === "open-ticket") openTicketModal();
   if (action === "open-ticket-detail") openTicketDetail(actionElement.dataset.id || "");
   if (action === "refresh-tickets") {
-    loadTickets().then(render).catch((error) => showToast(`加载工单失败：${error.message}`, true));
+    loadTickets()
+      .then(() => renderIfCurrentPage("tickets"))
+      .catch((error) => showToast(`加载工单失败：${error.message}`, true));
   }
   if (action === "open-sync-stage") openSyncStageModal();
   if (action === "refresh-governance") {
-    loadGovernance().then(render).catch((error) => showToast(`加载治理数据失败：${error.message}`, true));
+    loadGovernance()
+      .then(() => renderIfCurrentPage("governance"))
+      .catch((error) => showToast(`加载治理数据失败：${error.message}`, true));
   }
   if (action === "apply-sync-run") applySyncRun(actionElement.dataset.id || "");
   if (action === "run-data-quality") runDataQuality();
@@ -9198,7 +9286,9 @@ document.addEventListener("change", (event) => {
         ? String(access.roles[0]?.id || "")
         : String(access.users[0]?.id || "");
     loadAccessControlTarget()
-      .then(() => render())
+      .then((loaded) => {
+        if (loaded) renderIfCurrentPage("settings");
+      })
       .catch((error) => showToast(`Unable to load permissions: ${error.message}`, true));
     return;
   }
@@ -9208,7 +9298,9 @@ document.addEventListener("change", (event) => {
     const access = accessControlState();
     access.targetId = accessTargetId.value || "";
     loadAccessControlTarget()
-      .then(() => render())
+      .then((loaded) => {
+        if (loaded) renderIfCurrentPage("settings");
+      })
       .catch((error) => showToast(`Unable to load permissions: ${error.message}`, true));
     return;
   }
@@ -9317,7 +9409,7 @@ document.addEventListener("change", (event) => {
   persistState(false);
   if (String(filterName).startsWith("audit")) {
     refreshAuditLogs({ silent: true })
-      .then(() => render())
+      .then(() => renderIfCurrentPage("audit"))
       .catch((error) => {
         console.error("Unable to refresh audit logs", error);
         showToast(`日志加载失败：${error.message}`, true);
@@ -9468,29 +9560,66 @@ function ensureServiceNavigation() {
 }
 
 async function loadServiceManagement() {
+  const requestId = beginAsyncRequest("service-management");
+  const isCurrentRequest = () => isLatestAsyncRequest("service-management", requestId);
   const service = serviceState();
   service.loading = true;
-  render();
+  renderIfCurrentPage("serviceManagement");
   const jobs = [];
   const view = normalizeServiceView();
   if (view === "tickets" && hasPermission("tickets", "view")) {
-    jobs.push(requestJson(API_TICKETS_URL).then((p) => (operationsState.tickets = p.tickets || [])));
+    jobs.push(
+      requestJson(API_TICKETS_URL).then((payload) => {
+        if (isCurrentRequest()) operationsState.tickets = payload.tickets || [];
+      }),
+    );
   }
-  if (view === "changes" && hasPermission("changes", "view")) jobs.push(requestJson(API_CHANGES_URL).then((p) => (service.changes = p.changes || [])));
-  if (view === "problems" && hasPermission("problems", "view")) jobs.push(requestJson(API_PROBLEMS_URL).then((p) => (service.problems = p.problems || [])));
-  if (view === "knowledge" && hasPermission("knowledge", "view")) jobs.push(requestJson(API_KNOWLEDGE_URL).then((p) => (service.articles = p.articles || [])));
-  if (view === "forms" && hasPermission("forms", "view")) jobs.push(requestJson(API_SERVICE_FORMS_URL).then((p) => (service.forms = p.forms || [])));
-  if (view === "policies" && hasPermission("sla", "view")) jobs.push(requestJson(API_SLA_POLICIES_URL).then((p) => (service.policies = p.policies || [])));
+  if (view === "changes" && hasPermission("changes", "view")) {
+    jobs.push(requestJson(API_CHANGES_URL).then((payload) => {
+      if (isCurrentRequest()) service.changes = payload.changes || [];
+    }));
+  }
+  if (view === "problems" && hasPermission("problems", "view")) {
+    jobs.push(requestJson(API_PROBLEMS_URL).then((payload) => {
+      if (isCurrentRequest()) service.problems = payload.problems || [];
+    }));
+  }
+  if (view === "knowledge" && hasPermission("knowledge", "view")) {
+    jobs.push(requestJson(API_KNOWLEDGE_URL).then((payload) => {
+      if (isCurrentRequest()) service.articles = payload.articles || [];
+    }));
+  }
+  if (view === "forms" && hasPermission("forms", "view")) {
+    jobs.push(requestJson(API_SERVICE_FORMS_URL).then((payload) => {
+      if (isCurrentRequest()) service.forms = payload.forms || [];
+    }));
+  }
+  if (view === "policies" && hasPermission("sla", "view")) {
+    jobs.push(requestJson(API_SLA_POLICIES_URL).then((payload) => {
+      if (isCurrentRequest()) service.policies = payload.policies || [];
+    }));
+  }
   if (view === "approvals" && hasPermission("approvals", "view")) {
-    jobs.push(requestJson(API_APPROVALS_URL).then((p) => (service.approvals = p.approvals || [])));
-    jobs.push(requestJson(API_WORKFLOWS_URL).then((p) => (service.workflows = p.workflows || [])));
+    jobs.push(requestJson(API_APPROVALS_URL).then((payload) => {
+      if (isCurrentRequest()) service.approvals = payload.approvals || [];
+    }));
+    jobs.push(requestJson(API_WORKFLOWS_URL).then((payload) => {
+      if (isCurrentRequest()) service.workflows = payload.workflows || [];
+    }));
   }
-  if (view === "notifications" && hasPermission("notifications", "view")) jobs.push(requestJson(API_NOTIFICATIONS_URL).then((p) => (service.notifications = p.notifications || [])));
+  if (view === "notifications" && hasPermission("notifications", "view")) {
+    jobs.push(requestJson(API_NOTIFICATIONS_URL).then((payload) => {
+      if (isCurrentRequest()) service.notifications = payload.notifications || [];
+    }));
+  }
   try {
     await Promise.all(jobs);
+    return isCurrentRequest();
   } finally {
-    service.loading = false;
-    updateAuthenticatedChrome();
+    if (isCurrentRequest()) {
+      service.loading = false;
+      updateAuthenticatedChrome();
+    }
   }
 }
 
@@ -10078,26 +10207,34 @@ function renderServiceFormDesignerPage() {
 }
 
 async function openFormDesigner(formId = "") {
+  const requestId = beginAsyncRequest("form-designer");
   formDesignerState = { formId: String(formId || ""), form: designerNormalizeForm(formId ? null : { recordType: "ticket", fields: [] }), selectedFieldKey: "", selectedWorkflowStepIndex: -1, activePanel: "form", permissions: [], loading: Boolean(formId), dirty: false };
   state.page = "formDesigner";
   render();
   try {
     await loadWorkflowOptions();
+    if (!isLatestAsyncRequest("form-designer", requestId)) return;
     if (formId) {
       const [formPayload, permissionPayload] = await Promise.all([
         requestJson(`${API_SERVICE_FORMS_URL}/${encodeURIComponent(formId)}`),
         requestJson(`${API_SERVICE_FORMS_URL}/${encodeURIComponent(formId)}${API_SERVICE_FORM_PERMISSIONS_URL}`),
       ]);
+      if (!isLatestAsyncRequest("form-designer", requestId)) return;
       formDesignerState.form = designerNormalizeForm(formPayload.form);
       formDesignerState.permissions = Array.isArray(permissionPayload.permissions) ? permissionPayload.permissions : [];
     }
   } catch (error) {
+    if (!isLatestAsyncRequest("form-designer", requestId)) return;
     showToast(`加载表单设计失败：${error.message}`, true);
-    state.page = "serviceManagement";
-    serviceState().view = "forms";
+    if (state.page === "formDesigner") {
+      state.page = "serviceManagement";
+      serviceState().view = "forms";
+      render();
+    }
   } finally {
+    if (!isLatestAsyncRequest("form-designer", requestId)) return;
     formDesignerState.loading = false;
-    render();
+    renderIfCurrentPage("formDesigner");
   }
 }
 
@@ -10504,12 +10641,14 @@ document.addEventListener("click", (event) => {
     }
     service.view = view;
     loadServiceManagement()
-      .then(render)
+      .then(() => renderIfCurrentPage("serviceManagement"))
       .catch((error) => showToast(`加载服务管理失败：${error.message}`, true));
     return;
   }
   if (action === "refresh-service") {
-    loadServiceManagement().then(render).catch((error) => showToast(`刷新服务管理失败：${error.message}`, true));
+    loadServiceManagement()
+      .then(() => renderIfCurrentPage("serviceManagement"))
+      .catch((error) => showToast(`刷新服务管理失败：${error.message}`, true));
     return;
   }
   if (action === "open-service-change") return openServiceChangeModal();
@@ -10629,7 +10768,7 @@ document.addEventListener("click", (event) => {
   if (action === "read-notification") {
     requestJson(`${API_NOTIFICATIONS_URL}/${encodeURIComponent(item.dataset.id)}/read`, { method: "POST", body: "{}" })
       .then(() => loadServiceManagement())
-      .then(render)
+      .then(() => renderIfCurrentPage("serviceManagement"))
       .catch((error) => showToast(`通知更新失败：${error.message}`, true));
   }
 });

@@ -470,6 +470,73 @@ class MigrationBaselineTests(TestCase):
         self.assertIn("prefers-reduced-motion", styles)
 
 
+class FrontendAccessibilityAndThemeTests(TestCase):
+    def test_settings_navigation_uses_cached_state_and_only_animates_page_changes(self):
+        app = (ROOT / "web" / "app.js").read_text(encoding="utf-8")
+
+        self.assertIn("let lastRenderedPage = \"\";", app)
+        self.assertIn("const isPageTransition = lastRenderedPage !== state.page;", app)
+        self.assertIn(
+            '<div${isPageTransition ? \' class="page-enter"\' : ""}>${renderPage()}</div>',
+            app,
+        )
+        self.assertIn('if (state.page === "settings" && !settingsState.loaded)', app)
+        self.assertIn("function renderIfCurrentPage(page)", app)
+        self.assertIn('const targetPage = actionElement.dataset.page || "dashboard";', app)
+        self.assertIn("if (targetPage === state.page) return;", app)
+        for page in ("settings", "audit", "tickets", "serviceManagement", "governance", "formDesigner"):
+            self.assertIn(f'renderIfCurrentPage("{page}")', app)
+
+    def test_async_page_loads_ignore_stale_responses(self):
+        app = (ROOT / "web" / "app.js").read_text(encoding="utf-8")
+
+        self.assertIn("const latestAsyncRequests = new Map();", app)
+        self.assertIn("function beginAsyncRequest(key)", app)
+        self.assertIn("function isLatestAsyncRequest(key, requestId)", app)
+        self.assertIn("function invalidateAsyncRequests()", app)
+        for request_key in (
+            "audit-logs",
+            "access-control-target",
+            "tickets",
+            "governance",
+            "service-management",
+            "form-designer",
+        ):
+            self.assertIn(f'beginAsyncRequest("{request_key}")', app)
+        self.assertNotIn(".then(render)", app)
+
+    def test_form_controls_expose_label_associations_and_permission_names(self):
+        app = (ROOT / "web" / "app.js").read_text(encoding="utf-8")
+
+        self.assertIn("function createControlId(name)", app)
+        self.assertIn('<label for="${controlId}">', app)
+        self.assertIn('<select id="${controlId}" name="${escapeHtml(', app)
+        self.assertIn('id="access-target-type" data-access-target-type', app)
+        self.assertIn('id="access-target-id" data-access-target-id', app)
+        self.assertIn('aria-label="${escapeHtml(`${row.module.name || row.module.code}', app)
+        self.assertIn("function readonlyField(label, value)", app)
+        labels_without_for = re.findall(
+            r"<label(?![^>]*\bfor=)[^>]*>(?:(?!</label>)[\s\S])*?</label>",
+            app,
+        )
+        self.assertTrue(labels_without_for)
+        for label in labels_without_for:
+            self.assertRegex(label, r"<(?:input|select|textarea)\b")
+
+    def test_theme_uses_black_dark_surfaces_and_dark_text_on_light_surfaces(self):
+        styles = (ROOT / "web" / "styles.css").read_text(encoding="utf-8")
+
+        self.assertIn("--canvas: #000000;", styles)
+        self.assertIn("--ink: #f5f5f5;", styles)
+        self.assertIn("html[data-theme=\"dark\"] .sidebar", styles)
+        self.assertIn("background: #000000 !important;", styles)
+        self.assertNotIn("#252336", styles)
+        self.assertNotIn("#2b293d", styles)
+        self.assertNotIn("#322f47", styles)
+        self.assertIn("html:not([data-theme=\"dark\"]) .form-field label", styles)
+        self.assertIn("color: var(--ink) !important;", styles)
+
+
 class FlowRecordUiTests(TestCase):
     def test_flow_page_has_filters_export_classification_and_inline_notes(self):
         app = (ROOT / "web" / "app.js").read_text(encoding="utf-8")
