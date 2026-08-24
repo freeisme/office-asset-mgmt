@@ -19,7 +19,7 @@ HISTORICAL_FIXED_USE_MIGRATIONS = {
 LEGACY_BASELINE_VERSION = "legacy-20260813"
 LEGACY_BASELINE_REQUIRED_TABLES = (
     "audit_log",
-    "auth_bootstrap_guard",
+    "auth_session",
     "computer_asset",
     "database_backup",
     "employee",
