@@ -339,6 +339,22 @@ class DeploymentScriptTests(TestCase):
         self.assertIn("ADD COLUMN ip_address VARCHAR(64)", migration)
         self.assertIn("ADD COLUMN user_agent VARCHAR(500)", migration)
 
+    def test_legacy_security_compatibility_migration_is_first_and_idempotent(self):
+        migration_path = (
+            ROOT
+            / "database"
+            / "migrations"
+            / "20260813_001_legacy_security_compatibility.sql"
+        )
+        migration = migration_path.read_text(encoding="utf-8")
+        discovered = migration_runner.discover_migrations()
+
+        self.assertEqual(migration_path, discovered[0].path)
+        self.assertIn("CREATE TABLE IF NOT EXISTS auth_bootstrap_guard", migration)
+        self.assertIn("ADD COLUMN ip_address VARCHAR(64)", migration)
+        self.assertIn("ADD COLUMN user_agent VARCHAR(500)", migration)
+        self.assertIn("table_name = 'auth_session') = 1", migration)
+
     def test_update_repository_setting_migration_exists(self):
         migration = (
             ROOT / "database" / "bootstrap" / "22_update_repository_setting.sql"
@@ -380,7 +396,7 @@ class MigrationBaselineTests(TestCase):
             mock.patch.object(
                 migration_runner,
                 "missing_tables",
-                return_value=["auth_bootstrap_guard"],
+                return_value=["auth_session"],
             ),
             mock.patch.object(migration_runner, "ensure_registry") as ensure_registry,
             mock.patch.object(migration_runner, "mark_baseline") as mark_baseline,
@@ -392,6 +408,13 @@ class MigrationBaselineTests(TestCase):
                 )
             ensure_registry.assert_not_called()
             mark_baseline.assert_not_called()
+
+    def test_legacy_baseline_does_not_require_compatible_security_guard(self):
+        self.assertIn("auth_session", migration_runner.LEGACY_BASELINE_REQUIRED_TABLES)
+        self.assertNotIn(
+            "auth_bootstrap_guard",
+            migration_runner.LEGACY_BASELINE_REQUIRED_TABLES,
+        )
 
     def test_baseline_adoption_records_only_verified_legacy_baseline(self):
         with (
