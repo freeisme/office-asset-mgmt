@@ -517,7 +517,12 @@ class FrontendAccessibilityAndThemeTests(TestCase):
         self.assertIn('<select id="${controlId}" name="${escapeHtml(', app)
         self.assertIn('id="access-target-type" data-access-target-type', app)
         self.assertIn('id="access-target-id" data-access-target-id', app)
-        self.assertIn('aria-label="${escapeHtml(`${row.module.name || row.module.code}', app)
+        self.assertIn("const permissionModuleLabels =", app)
+        self.assertIn("function normalizePermissionModuleName(rawName, code)", app)
+        self.assertIn("function permissionModuleLabel(module)", app)
+        self.assertIn("const mapped = permissionModuleLabels[code];", app)
+        self.assertIn("return normalized || code;", app)
+        self.assertIn('aria-label="${escapeHtml(`${permissionModuleLabel(row.module)}', app)
         self.assertIn("function readonlyField(label, value)", app)
         labels_without_for = re.findall(
             r"<label(?![^>]*\bfor=)[^>]*>(?:(?!</label>)[\s\S])*?</label>",
@@ -527,21 +532,23 @@ class FrontendAccessibilityAndThemeTests(TestCase):
         for label in labels_without_for:
             self.assertRegex(label, r"<(?:input|select|textarea)\b")
 
-    def test_theme_uses_black_dark_surfaces_and_dark_text_on_light_surfaces(self):
+    def test_theme_preserves_existing_accents_with_targeted_contrast_repairs(self):
         styles = (ROOT / "web" / "styles.css").read_text(encoding="utf-8")
 
+        self.assertIn("v2.0.5 targeted visual repairs", styles)
         self.assertIn("--canvas: #000000;", styles)
-        self.assertIn("--ink: #f5f5f5;", styles)
         self.assertIn("html[data-theme=\"dark\"] .sidebar", styles)
         self.assertIn("background: #000000 !important;", styles)
         self.assertIn("html[data-theme=\"dark\"] .device-chip {", styles)
-        self.assertIn("background: #111111 !important;", styles)
+        self.assertIn("background: #0b0b0b !important;", styles)
         self.assertIn("html[data-theme=\"dark\"] .device-chip small {", styles)
+        self.assertIn("html:not([data-theme=\"dark\"]) .inventory-node-main strong,", styles)
+        self.assertIn("html:not([data-theme=\"dark\"]) .inventory-node-main span,", styles)
+        self.assertIn("html[data-theme=\"dark\"] .inventory-panel,", styles)
+        self.assertIn("html[data-theme=\"dark\"] .inventory-node-main strong,", styles)
         self.assertIn("html[data-theme=\"dark\"] .designer-workspace,", styles)
-        self.assertNotIn("#252336", styles)
-        self.assertNotIn("#2b293d", styles)
-        self.assertNotIn("#322f47", styles)
-        self.assertNotIn("Enforce one readable foreground/background contract", styles)
+        self.assertIn("background: #7367f0 !important;", styles)
+        self.assertIn("background: #252336 !important;", styles)
         self.assertIn("html:not([data-theme=\"dark\"]) .form-field label", styles)
         self.assertIn("color: var(--ink) !important;", styles)
 

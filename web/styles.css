@@ -4374,35 +4374,29 @@ tbody tr:hover {
 }
 
 html[data-theme="dark"] {
-  --navy-950: #000000;
-  --navy-900: #0b0b0b;
-  --navy-700: #d2d2d2;
-  --ink: #f5f5f5;
-  --muted: #b8b8b8;
-  --line: #343434;
-  --line-soft: #242424;
-  --canvas: #000000;
-  --white: #0b0b0b;
-  --teal: #e30613;
-  --teal-soft: #3a0c10;
-  --amber: #f0bf5c;
-  --amber-soft: #38290f;
-  --red: #ff6b75;
-  --red-soft: #3d1117;
-  --green: #6fd092;
-  --green-soft: #12301c;
+  --navy-950: #0b1117;
+  --navy-900: #111a24;
+  --navy-700: #b2c0cc;
+  --ink: #e7eef5;
+  --muted: #9aa9b8;
+  --line: #344352;
+  --line-soft: #293745;
+  --canvas: #0b1117;
+  --white: #151f2a;
+  --teal: #68d3cf;
+  --teal-soft: #173b3e;
+  --amber: #e0b36d;
+  --amber-soft: #3b2d1d;
+  --red: #ff7b8a;
+  --red-soft: #3b2028;
+  --green: #7bd6a4;
+  --green-soft: #173727;
 }
 
 html[data-theme="dark"],
 html[data-theme="dark"] body,
-html[data-theme="dark"] .app-shell,
 html[data-theme="dark"] .main-content,
 html[data-theme="dark"] .page-content,
-html[data-theme="dark"] .form-designer-page,
-html[data-theme="dark"] .form-designer-layout,
-html[data-theme="dark"] .designer-workspace,
-html[data-theme="dark"] .designer-workflow-layout,
-html[data-theme="dark"] .designer-workflow-canvas,
 html[data-theme="dark"] .auth-page {
   color: var(--ink);
   background: var(--canvas) !important;
@@ -4447,7 +4441,7 @@ html[data-theme="dark"] .select-box,
 html[data-theme="dark"] .update-version-item,
 html[data-theme="dark"] .backup-download-file {
   color: var(--ink);
-  background: #111111 !important;
+  background: #101821 !important;
   border-color: var(--line) !important;
 }
 
@@ -4459,7 +4453,7 @@ html[data-theme="dark"] .select-box select,
 html[data-theme="dark"] .update-target-field input,
 html[data-theme="dark"] .update-target-field select {
   color: var(--ink);
-  background: #141414 !important;
+  background: #0f161e !important;
   border-color: var(--line) !important;
 }
 
@@ -4467,7 +4461,7 @@ html[data-theme="dark"] .form-field input::placeholder,
 html[data-theme="dark"] .form-field textarea::placeholder,
 html[data-theme="dark"] .select-box input::placeholder,
 html[data-theme="dark"] .update-target-field input::placeholder {
-  color: #a8a8a8;
+  color: #718293;
 }
 
 html[data-theme="dark"] .form-field input:focus,
@@ -4475,7 +4469,7 @@ html[data-theme="dark"] .form-field select:focus,
 html[data-theme="dark"] .form-field textarea:focus,
 html[data-theme="dark"] .select-box:focus-within {
   border-color: var(--teal) !important;
-  box-shadow: 0 0 0 3px rgba(227, 6, 19, 0.24) !important;
+  box-shadow: 0 0 0 3px rgba(104, 211, 207, 0.16) !important;
 }
 
 html[data-theme="dark"] table,
@@ -4486,11 +4480,11 @@ html[data-theme="dark"] td {
 
 html[data-theme="dark"] thead th {
   color: var(--muted);
-  background: #151515 !important;
+  background: #1a2632 !important;
 }
 
 html[data-theme="dark"] tbody tr:hover {
-  background: #1b1b1b !important;
+  background: #1c2a36 !important;
 }
 
 html[data-theme="dark"] .modal-backdrop {
@@ -4499,7 +4493,7 @@ html[data-theme="dark"] .modal-backdrop {
 
 html[data-theme="dark"] .modal-panel {
   color: var(--ink);
-  background: #0b0b0b !important;
+  background: #151f2a !important;
   border-color: var(--line) !important;
   box-shadow: -12px 0 32px rgba(0, 0, 0, 0.28) !important;
 }
@@ -4521,51 +4515,33 @@ html[data-theme="dark"] .modal-section-title span {
 }
 
 html[data-theme="dark"] .computer-movement-marker {
-  border-color: #0b0b0b;
+  border-color: #151f2a;
 }
 
 html[data-theme="dark"] .empty-state,
 html[data-theme="dark"] .settings-readonly-note,
 html[data-theme="dark"] .settings-loading {
-  background: #151515 !important;
+  background: #18232e !important;
   border-color: var(--line) !important;
 }
 
 html[data-theme="dark"] .toast {
   color: var(--ink);
-  background: #141414 !important;
+  background: #17232e !important;
   border-color: var(--line) !important;
   box-shadow: 0 12px 28px rgba(0, 0, 0, 0.28) !important;
 }
 
 html[data-theme="dark"] .toast.error {
   color: #ffd7dc;
-  background: #3d1117 !important;
-  border-color: #9d2d36 !important;
+  background: #3b2028 !important;
+  border-color: #8f4652 !important;
 }
 
 html[data-theme="dark"] .nav-item.is-active {
   color: #ffffff;
-  border-color: rgba(227, 6, 19, 0.54);
-  background: #3a0c10;
-}
-
-html[data-theme="dark"] .tag-chip,
-html[data-theme="dark"] .device-chip {
-  color: var(--ink);
-  background: #111111 !important;
-  border-color: var(--line) !important;
-}
-
-html[data-theme="dark"] .device-chip small {
-  color: var(--muted);
-}
-
-html[data-theme="dark"] .device-chip-button:hover,
-html[data-theme="dark"] .tag-chip:hover {
-  color: var(--ink);
-  background: #1a1a1a !important;
-  border-color: var(--ink) !important;
+  border-color: rgba(104, 211, 207, 0.34);
+  background: #193b4a;
 }
 
 .topbar-icon-button {
@@ -6191,8 +6167,8 @@ body,
 }
 
 html[data-theme="dark"] .sidebar {
-  color: #f5f5f5;
-  background: #000000 !important;
+  color: #d7d6e2;
+  background: #252336 !important;
 }
 
 html[data-theme="dark"] .brand small,
@@ -6200,12 +6176,12 @@ html[data-theme="dark"] .sidebar-section-title,
 html[data-theme="dark"] .sidebar-footer,
 html[data-theme="dark"] .sidebar-footer strong,
 html[data-theme="dark"] .nav-item {
-  color: #b8b8b8;
+  color: #aaa7be;
 }
 
 html[data-theme="dark"] .nav-item:hover {
   color: #ffffff;
-  background: #1b1b1b;
+  background: #36334e;
 }
 
 html[data-theme="dark"] .topbar,
@@ -6215,8 +6191,8 @@ html[data-theme="dark"] .settings-panel,
 html[data-theme="dark"] .auth-panel,
 html[data-theme="dark"] .service-tabs,
 html[data-theme="dark"] .toolbar > .toolbar-actions {
-  background: #0b0b0b !important;
-  border-color: #343434 !important;
+  background: #2b293d !important;
+  border-color: #45425e !important;
   box-shadow: 0 2px 10px rgba(0, 0, 0, 0.16) !important;
 }
 
@@ -6233,23 +6209,23 @@ html[data-theme="dark"] .designer-properties,
 html[data-theme="dark"] .designer-workflow-palette,
 html[data-theme="dark"] .designer-workflow-properties {
   color: var(--ink) !important;
-  background: #141414 !important;
-  border-color: #343434 !important;
+  background: #322f47 !important;
+  border-color: #45425e !important;
 }
 
 html[data-theme="dark"] .secondary-button:hover,
 html[data-theme="dark"] .topbar-icon-button:hover,
 html[data-theme="dark"] .service-tabs .service-tab:hover {
   color: #ffffff !important;
-  background: #1e1e1e !important;
-  border-color: #e30613 !important;
+  background: #403c5e !important;
+  border-color: #7367f0 !important;
 }
 
 html[data-theme="dark"] .service-tabs .service-tab.is-active,
 html[data-theme="dark"] .service-tabs .service-tab.is-active:hover {
   color: #ffffff !important;
-  background: #e30613 !important;
-  border-color: #ff5a64 !important;
+  background: #7367f0 !important;
+  border-color: #8f86ff !important;
 }
 
 html[data-theme="dark"] .search-box input,
@@ -6267,12 +6243,12 @@ html[data-theme="dark"] .designer-property-field textarea {
 html[data-theme="dark"] .form-designer-page,
 html[data-theme="dark"] .form-designer-layout,
 html[data-theme="dark"] .designer-workflow-layout {
-  background: #000000 !important;
+  background: #211f30 !important;
 }
 
 html[data-theme="dark"] .dashboard-welcome {
-  border-color: #343434 !important;
-  background: #111111 !important;
+  border-color: #4a456f !important;
+  background: #332f54 !important;
 }
 
 html[data-theme="dark"] .dashboard-welcome h2,
@@ -6287,7 +6263,7 @@ html[data-theme="dark"] .designer-flow-node-copy small {
 }
 
 html[data-theme="dark"] tbody tr:hover {
-  background: #1b1b1b !important;
+  background: #35324c !important;
 }
 
 html[data-theme="dark"] .audit-action-inbound,
@@ -6313,55 +6289,6 @@ html[data-theme="dark"] .audit-action-assignment {
   background: #29385f !important;
 }
 
-html[data-theme="dark"] .brand-mark,
-html[data-theme="dark"] .avatar,
-html[data-theme="dark"] .primary-button,
-html[data-theme="dark"] .danger-button,
-html[data-theme="dark"] .nav-item.is-active,
-html[data-theme="dark"] .nav-item.is-active .nav-icon,
-html[data-theme="dark"] .service-tabs .service-tab.is-active,
-html[data-theme="dark"] .service-tabs .service-tab.is-active:hover,
-html[data-theme="dark"] .notification-count {
-  color: #ffffff !important;
-}
-
-/* Keep readable text on every light surface, including settings and the form designer. */
-html:not([data-theme="dark"]) .data-panel,
-html:not([data-theme="dark"]) .stat-card,
-html:not([data-theme="dark"]) .settings-panel,
-html:not([data-theme="dark"]) .auth-panel,
-html:not([data-theme="dark"]) .form-designer-page,
-html:not([data-theme="dark"]) .designer-workspace,
-html:not([data-theme="dark"]) .designer-workflow-canvas,
-html:not([data-theme="dark"]) .designer-palette,
-html:not([data-theme="dark"]) .designer-properties,
-html:not([data-theme="dark"]) .designer-workflow-palette {
-  color: var(--ink);
-}
-
-html:not([data-theme="dark"]) .form-field label,
-html:not([data-theme="dark"]) .form-field input,
-html:not([data-theme="dark"]) .form-field select,
-html:not([data-theme="dark"]) .form-field textarea,
-html:not([data-theme="dark"]) .designer-property-field,
-html:not([data-theme="dark"]) .designer-property-field > span,
-html:not([data-theme="dark"]) .designer-property-field input,
-html:not([data-theme="dark"]) .designer-property-field select,
-html:not([data-theme="dark"]) .designer-property-field textarea,
-html:not([data-theme="dark"]) .designer-field-card-head,
-html:not([data-theme="dark"]) .designer-flow-node,
-html:not([data-theme="dark"]) .designer-flow-node-copy strong {
-  color: var(--ink) !important;
-}
-
-html:not([data-theme="dark"]) .form-field input::placeholder,
-html:not([data-theme="dark"]) .form-field textarea::placeholder,
-html:not([data-theme="dark"]) .designer-property-field input::placeholder,
-html:not([data-theme="dark"]) .designer-property-field textarea::placeholder {
-  color: #777383 !important;
-  opacity: 1;
-}
-
 @media (max-width: 760px) {
   .service-tabs {
     flex-wrap: nowrap;
@@ -6381,4 +6308,221 @@ html:not([data-theme="dark"]) .designer-property-field textarea::placeholder {
     padding: 8px 2px 0;
     white-space: normal;
   }
+}
+
+/* v2.0.5 targeted visual repairs: preserve the existing Materio layout and accents. */
+html:not([data-theme="dark"]) {
+  --navy-950: #111111;
+  --navy-900: #2b2b2b;
+  --navy-700: #4b465c;
+}
+
+html[data-theme="dark"] {
+  --canvas: #000000;
+}
+
+html[data-theme="dark"],
+html[data-theme="dark"] body,
+html[data-theme="dark"] .app-shell,
+html[data-theme="dark"] .main-content,
+html[data-theme="dark"] .page-content,
+html[data-theme="dark"] .auth-page,
+html[data-theme="dark"] .form-designer-page,
+html[data-theme="dark"] .form-designer-layout,
+html[data-theme="dark"] .designer-workspace,
+html[data-theme="dark"] .designer-workflow-layout,
+html[data-theme="dark"] .designer-workflow-canvas {
+  background: #000000 !important;
+}
+
+html[data-theme="dark"] .sidebar,
+html[data-theme="dark"] .topbar,
+html[data-theme="dark"] .data-panel,
+html[data-theme="dark"] .stat-card,
+html[data-theme="dark"] .settings-panel,
+html[data-theme="dark"] .auth-panel,
+html[data-theme="dark"] .service-tabs,
+html[data-theme="dark"] .toolbar > .toolbar-actions {
+  background: #000000 !important;
+}
+
+html[data-theme="dark"] .secondary-button,
+html[data-theme="dark"] .topbar-icon-button,
+html[data-theme="dark"] .search-box,
+html[data-theme="dark"] .select-box,
+html[data-theme="dark"] .purchase-note-input,
+html[data-theme="dark"] .flow-record-note-input,
+html[data-theme="dark"] .designer-flow-node,
+html[data-theme="dark"] .form-designer-toolbar,
+html[data-theme="dark"] .designer-palette,
+html[data-theme="dark"] .designer-properties,
+html[data-theme="dark"] .designer-workflow-palette,
+html[data-theme="dark"] .designer-workflow-properties,
+html[data-theme="dark"] .dashboard-welcome {
+  background: #0b0b0b !important;
+}
+
+html[data-theme="dark"] .tag-chip,
+html[data-theme="dark"] .device-chip {
+  color: var(--ink) !important;
+  background: #0b0b0b !important;
+  border-color: #45425e !important;
+}
+
+html[data-theme="dark"] .device-chip small {
+  color: var(--muted) !important;
+}
+
+html[data-theme="dark"] .device-chip-button:hover,
+html[data-theme="dark"] .tag-chip:hover {
+  color: var(--ink) !important;
+  background: #151421 !important;
+  border-color: #7367f0 !important;
+}
+
+html:not([data-theme="dark"]) .form-field label,
+html:not([data-theme="dark"]) .form-field input,
+html:not([data-theme="dark"]) .form-field select,
+html:not([data-theme="dark"]) .form-field textarea,
+html:not([data-theme="dark"]) .designer-property-field,
+html:not([data-theme="dark"]) .designer-property-field > span,
+html:not([data-theme="dark"]) .designer-property-field input,
+html:not([data-theme="dark"]) .designer-property-field select,
+html:not([data-theme="dark"]) .designer-property-field textarea,
+html:not([data-theme="dark"]) .designer-field-card-head,
+html:not([data-theme="dark"]) .designer-flow-node,
+html:not([data-theme="dark"]) .designer-flow-node-copy strong,
+html:not([data-theme="dark"]) .tag-chip,
+html:not([data-theme="dark"]) .device-chip {
+  color: var(--ink) !important;
+}
+
+html:not([data-theme="dark"]) .primary-text,
+html:not([data-theme="dark"]) td.primary-text {
+  color: var(--ink) !important;
+}
+
+html:not([data-theme="dark"]) .inventory-node-main strong,
+html:not([data-theme="dark"]) .inventory-model-row span {
+  color: var(--navy-950) !important;
+}
+
+html:not([data-theme="dark"]) .inventory-node-main span,
+html:not([data-theme="dark"]) .inventory-model-row small,
+html:not([data-theme="dark"]) .inventory-empty {
+  color: var(--navy-700) !important;
+}
+
+html[data-theme="dark"] .inventory-panel,
+html[data-theme="dark"] .inventory-brand-node,
+html[data-theme="dark"] .inventory-model-list,
+html[data-theme="dark"] .inventory-empty {
+  background: #000000 !important;
+}
+
+html[data-theme="dark"] .inventory-node-main strong,
+html[data-theme="dark"] .inventory-model-row span {
+  color: #ffffff !important;
+}
+
+html[data-theme="dark"] .inventory-node-main span,
+html[data-theme="dark"] .inventory-model-row small,
+html[data-theme="dark"] .inventory-empty {
+  color: #b8b8b8 !important;
+}
+
+html[data-theme="dark"] .tree-toggle {
+  color: #ffffff !important;
+  background: #0b0b0b !important;
+  border-color: #45425e !important;
+}
+
+html[data-theme="dark"] .toolbar,
+html[data-theme="dark"] .metric-line,
+html[data-theme="dark"] .update-version-item,
+html[data-theme="dark"] .backup-download-file,
+html[data-theme="dark"] .empty-state,
+html[data-theme="dark"] .settings-readonly-note,
+html[data-theme="dark"] .settings-loading,
+html[data-theme="dark"] .modal-panel,
+html[data-theme="dark"] .table-wrap,
+html[data-theme="dark"] .form-field input,
+html[data-theme="dark"] .form-field select,
+html[data-theme="dark"] .form-field textarea,
+html[data-theme="dark"] .update-target-field input,
+html[data-theme="dark"] .update-target-field select,
+html[data-theme="dark"] .designer-property-field input,
+html[data-theme="dark"] .designer-property-field select,
+html[data-theme="dark"] .designer-property-field textarea {
+  background: #000000 !important;
+}
+
+html[data-theme="dark"] .brand-mark,
+html[data-theme="dark"] .auth-brand > .brand-mark {
+  background: #000000 !important;
+  border-color: #45425e !important;
+}
+
+html[data-theme="dark"] .brand strong,
+html[data-theme="dark"] .user-badge strong,
+html[data-theme="dark"] .user-badge small,
+html[data-theme="dark"] .sidebar-footer span,
+html[data-theme="dark"] .section-heading h2,
+html[data-theme="dark"] .section-heading span,
+html[data-theme="dark"] .stat-value,
+html[data-theme="dark"] .modal-header h2,
+html[data-theme="dark"] .modal-section-title h3,
+html[data-theme="dark"] .form-field label,
+html[data-theme="dark"] .update-target-field label,
+html[data-theme="dark"] .designer-title input,
+html[data-theme="dark"] .designer-title span,
+html[data-theme="dark"] .designer-properties-empty span,
+html[data-theme="dark"] .designer-empty-canvas span,
+html[data-theme="dark"] .designer-palette-group h3,
+html[data-theme="dark"] .designer-settings-section h2,
+html[data-theme="dark"] .designer-property-field,
+html[data-theme="dark"] .designer-property-field > span,
+html[data-theme="dark"] .designer-field-card-head,
+html[data-theme="dark"] .designer-simple-panel h2,
+html[data-theme="dark"] .designer-simple-panel p,
+html[data-theme="dark"] .designer-permission-row label,
+html[data-theme="dark"] .designer-permission-add label,
+html[data-theme="dark"] .designer-permission-row select,
+html[data-theme="dark"] .designer-permission-add select,
+html[data-theme="dark"] .update-version-item,
+html[data-theme="dark"] .backup-download-file,
+html[data-theme="dark"] .table-wrap th,
+html[data-theme="dark"] .table-wrap td,
+html[data-theme="dark"] .empty-state,
+html[data-theme="dark"] .dashboard-welcome h2,
+html[data-theme="dark"] .dashboard-welcome p,
+html[data-theme="dark"] .toolbar {
+  color: var(--ink) !important;
+}
+
+html[data-theme="dark"] .primary-text,
+html[data-theme="dark"] td.primary-text,
+html[data-theme="dark"] .dashboard-status-pie-center strong,
+html[data-theme="dark"] .dashboard-status-legend strong,
+html[data-theme="dark"] .dashboard-inbound-main strong,
+html[data-theme="dark"] .dashboard-org-main strong,
+html[data-theme="dark"] .tree-node-title,
+html[data-theme="dark"] .employee-tree-title,
+html[data-theme="dark"] .employee-tree-title-button,
+html[data-theme="dark"] .device-module-header strong,
+html[data-theme="dark"] .recovery-row strong,
+html[data-theme="dark"] .update-channel-description strong,
+html[data-theme="dark"] .auth-brand strong,
+html[data-theme="dark"] .auth-heading h1 {
+  color: #ffffff !important;
+}
+
+html[data-theme="dark"] .dashboard-status-pie::after,
+html[data-theme="dark"] .auth-notice {
+  background: #000000 !important;
+}
+
+html[data-theme="dark"] .auth-notice {
+  color: #ffffff !important;
+  border-color: #45425e !important;
 }

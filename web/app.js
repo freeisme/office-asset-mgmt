@@ -142,6 +142,45 @@ const roleCategoryLabels = {
 
 const roleCategoryOptions = Object.entries(roleCategoryLabels).map(([value, label]) => ({ value, label }));
 
+const permissionModuleLabels = {
+  dashboard: "资产总览",
+  it_assets: "办公终端",
+  employees: "使用人员",
+  organizations: "组织与资产关系",
+  inventory_catalog: "IT物资",
+  inventory_operations: "物资流转记录",
+  audit_logs: "操作日志",
+  backups: "备份",
+  role_management: "角色与权限",
+  system_settings: "系统设置",
+  system_updates: "系统更新",
+  sync: "同步与质量",
+  tickets: "工单",
+  changes: "变更管理",
+  problems: "问题管理",
+  knowledge: "知识库",
+  forms: "表单",
+  sla: "SLA策略",
+  approvals: "审批流程",
+  notifications: "消息提醒",
+  service_management: "服务管理",
+};
+
+function escapeRegExp(value) {
+  return String(value || "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function normalizePermissionModuleName(rawName, code) {
+  const text = String(rawName || "").trim();
+  const moduleCode = String(code || "").trim();
+  if (!text) return "";
+  if (!moduleCode) return text;
+  const cleaned = text
+    .replace(new RegExp(`(?:[\\s·•｜|/\\-]+)?${escapeRegExp(moduleCode)}$`, "i"), "")
+    .trim();
+  return cleaned || text;
+}
+
 const deviceTypeLabels = {
   laptop: "笔记本",
   desktop: "台式机",
@@ -1049,7 +1088,13 @@ async function loadAccessControl() {
   const access = accessControlState();
   access.loading = true;
   const payload = await requestJson(API_ACCESS_CONTROL_URL);
-  access.modules = Array.isArray(payload.modules) ? payload.modules : [];
+  access.modules = Array.isArray(payload.modules)
+    ? payload.modules.map((module) => ({
+        ...module,
+        name: permissionModuleLabel(module),
+        displayName: permissionModuleLabel(module),
+      }))
+    : [];
   access.roles = Array.isArray(payload.roles) ? payload.roles : [];
   access.users = Array.isArray(payload.users) ? payload.users : [];
   access.roles.forEach((role) => {
@@ -2878,6 +2923,15 @@ const permissionActions = [
   ["export", "导出"],
 ];
 
+function permissionModuleLabel(module) {
+  const code = String(typeof module === "string" ? module : module?.code || "").trim();
+  const rawName = String(typeof module === "string" ? "" : module?.name || module?.displayName || "").trim();
+  const mapped = permissionModuleLabels[code];
+  if (mapped) return mapped;
+  const normalized = normalizePermissionModuleName(rawName, code);
+  return normalized || code;
+}
+
 function accessControlState() {
   if (!settingsState.accessControl) {
     settingsState.accessControl = {
@@ -2935,21 +2989,21 @@ function renderPermissionGrid() {
         <tbody>${rows
           .map(
             (row) => `<tr>
-              <td><strong>${escapeHtml(row.module.name || row.module.code)}</strong><small>${escapeHtml(
-                row.module.code,
-              )}</small></td>
+              <td><strong title="${escapeHtml(row.module.code || "")}">${escapeHtml(
+                permissionModuleLabel(row.module),
+              )}</strong></td>
               ${permissionActions
                 .map(
                   ([action, actionLabel]) =>
                     `<td><input type="checkbox" data-permission="${escapeHtml(
                       `${row.module.code}:${action}`,
-                    )}" aria-label="${escapeHtml(`${row.module.name || row.module.code}：${actionLabel}`)}" ${
+                    )}" aria-label="${escapeHtml(`${permissionModuleLabel(row.module)}：${actionLabel}`)}" ${
                       row.actions[action] ? "checked" : ""
                     } /></td>`,
                 )
                 .join("")}
               <td><select data-permission-scope="${escapeHtml(row.module.code)}" aria-label="${escapeHtml(
-                `${row.module.name || row.module.code}：数据范围`,
+                `${permissionModuleLabel(row.module)}：数据范围`,
               )}">
         ${["all", "organization", "own", "submitted", "assigned", "none"]
           .map(
@@ -2990,17 +3044,19 @@ function renderRoleCreationPermissionGrid() {
       <tbody>${modules
         .map(
           (module) => `<tr>
-            <td><strong>${escapeHtml(module.name || module.code)}</strong><small>${escapeHtml(module.code)}</small></td>
+            <td><strong title="${escapeHtml(module.code || "")}">${escapeHtml(
+              permissionModuleLabel(module),
+            )}</strong></td>
             ${permissionActions
               .map(
                 ([action, actionLabel]) =>
                   `<td><input type="checkbox" data-role-permission="${escapeHtml(
                     `${module.code}:${action}`,
-                  )}" aria-label="${escapeHtml(`${module.name || module.code}：${actionLabel}`)}" /></td>`,
+                  )}" aria-label="${escapeHtml(`${permissionModuleLabel(module)}：${actionLabel}`)}" /></td>`,
               )
               .join("")}
             <td><select data-role-permission-scope="${escapeHtml(module.code)}" aria-label="${escapeHtml(
-              `${module.name || module.code}：数据范围`,
+              `${permissionModuleLabel(module)}：数据范围`,
             )}">
               ${[
                 ["all", "全部数据"],
@@ -8275,7 +8331,7 @@ function renderTicketTable() {
                     <td>${escapeHtml(ticket.number || "")}</td>
                     <td>${ticket.type === "incident" ? "事件" : "请求"}</td>
                     <td>${escapeHtml(ticket.title || "")}</td>
-                    <td>${escapeHtml(ticket.priority || "")}</td>
+                    <td>${escapeHtml(servicePriorityLabel(ticket.priority))}</td>
                     <td>${escapeHtml(ticketStatusLabel(ticket.status))}</td>
                     <td>${escapeHtml(ticketSlaLabel(ticket.slaState))}</td>
                     <td>${escapeHtml(ticket.requesterName || "—")}</td>
@@ -8547,7 +8603,7 @@ async function openTicketDetail(ticketId) {
         <section class="modal-section"><p>${escapeHtml(ticket.description || "")}</p>
           <div class="form-grid">
             ${readonlyField("状态", ticketStatusLabel(ticket.status))}
-            ${readonlyField("优先级", ticket.priority || "")}
+            ${readonlyField("优先级", servicePriorityLabel(ticket.priority))}
             ${readonlyField("SLA 状态", ticketSlaLabel(ticket.slaState))}
             ${readonlyField("SLA 剩余时间", ticketSlaRemaining(ticket))}
             ${readonlyField("审批状态", ticketApprovalLabel(ticket.approvalStatus))}
@@ -9527,6 +9583,24 @@ const serviceViewLabels = {
   notifications: "消息通知",
 };
 
+const serviceRecordTypeLabels = {
+  ticket: "工单",
+  change: "变更管理",
+  problem: "问题管理",
+};
+
+const servicePriorityLabels = {
+  high: "高",
+  medium: "中",
+  low: "低",
+};
+
+const serviceChangeTypeLabels = {
+  standard: "标准变更",
+  normal: "普通变更",
+  emergency: "紧急变更",
+};
+
 const serviceStatusLabels = {
   draft: "草稿",
   submitted: "已提交",
@@ -9563,6 +9637,31 @@ function serviceState() {
     };
   }
   return operationsState.service;
+}
+
+function serviceRecordTypeLabel(recordType) {
+  const code = String(recordType || "").trim();
+  return serviceRecordTypeLabels[code] || code;
+}
+
+function servicePriorityLabel(priority) {
+  const code = String(priority || "").trim();
+  return servicePriorityLabels[code] || code;
+}
+
+function serviceChangeTypeLabel(type) {
+  const code = String(type || "").trim();
+  return serviceChangeTypeLabels[code] || code;
+}
+
+function serviceWorkflowAssigneeLabel(step) {
+  const service = serviceState();
+  if (step?.approverType === "user") {
+    const user = (service.workflowUsers || []).find((item) => String(item.id) === String(step.approverUserId));
+    return user?.displayName || user?.username || `用户 ${step?.approverUserId || "未配置"}`;
+  }
+  const role = (service.workflowRoles || []).find((item) => item.code === step?.approverRoleCode);
+  return role?.name || role?.code || `角色 ${step?.approverRoleCode || "未配置"}`;
 }
 
 function ensureServiceNavigation() {
@@ -9666,7 +9765,7 @@ function renderServiceChanges() {
       ? `<div class="table-wrap"><table><thead><tr><th>编号</th><th>标题</th><th>类型</th><th>状态</th><th>风险</th><th>处理人</th><th>更新时间</th><th>操作</th></tr></thead><tbody>${service.changes
           .map(
             (item) =>
-              `<tr><td>${escapeHtml(item.number || "")}</td><td>${escapeHtml(item.title || "")}</td><td>${escapeHtml(item.type || "")}</td><td>${escapeHtml(serviceStatusLabels[item.status] || item.status || "")}</td><td>${escapeHtml(item.risk || "")}</td><td>${escapeHtml(item.assignedToName || "—")}</td><td>${escapeHtml(formatDateTime(item.updatedAt || ""))}</td><td>${hasPermission("changes", "update") ? `<button class="text-button" data-action="open-service-transition" data-record-type="change" data-id="${escapeHtml(item.id)}" data-status="${escapeHtml(item.status)}">流转</button>` : "—"}</td></tr>`,
+              `<tr><td>${escapeHtml(item.number || "")}</td><td>${escapeHtml(item.title || "")}</td><td>${escapeHtml(serviceChangeTypeLabel(item.type))}</td><td>${escapeHtml(serviceStatusLabels[item.status] || item.status || "")}</td><td>${escapeHtml(servicePriorityLabel(item.risk))}</td><td>${escapeHtml(item.assignedToName || "—")}</td><td>${escapeHtml(formatDateTime(item.updatedAt || ""))}</td><td>${hasPermission("changes", "update") ? `<button class="text-button" data-action="open-service-transition" data-record-type="change" data-id="${escapeHtml(item.id)}" data-status="${escapeHtml(item.status)}">流转</button>` : "—"}</td></tr>`,
           )
           .join("")}</tbody></table></div>`
       : serviceTableEmpty("暂无变更记录")
@@ -9683,7 +9782,7 @@ function renderServiceProblems() {
       ? `<div class="table-wrap"><table><thead><tr><th>编号</th><th>标题</th><th>状态</th><th>影响</th><th>处理人</th><th>更新时间</th><th>操作</th></tr></thead><tbody>${service.problems
           .map(
             (item) =>
-              `<tr><td>${escapeHtml(item.number || "")}</td><td>${escapeHtml(item.title || "")}</td><td>${escapeHtml(serviceStatusLabels[item.status] || item.status || "")}</td><td>${escapeHtml(item.impact || "")}</td><td>${escapeHtml(item.assignedToName || "—")}</td><td>${escapeHtml(formatDateTime(item.updatedAt || ""))}</td><td>${hasPermission("problems", "update") ? `<button class="text-button" data-action="open-service-transition" data-record-type="problem" data-id="${escapeHtml(item.id)}" data-status="${escapeHtml(item.status)}">流转</button>` : "—"}</td></tr>`,
+              `<tr><td>${escapeHtml(item.number || "")}</td><td>${escapeHtml(item.title || "")}</td><td>${escapeHtml(serviceStatusLabels[item.status] || item.status || "")}</td><td>${escapeHtml(servicePriorityLabel(item.impact))}</td><td>${escapeHtml(item.assignedToName || "—")}</td><td>${escapeHtml(formatDateTime(item.updatedAt || ""))}</td><td>${hasPermission("problems", "update") ? `<button class="text-button" data-action="open-service-transition" data-record-type="problem" data-id="${escapeHtml(item.id)}" data-status="${escapeHtml(item.status)}">流转</button>` : "—"}</td></tr>`,
           )
           .join("")}</tbody></table></div>`
       : serviceTableEmpty("暂无问题记录")
@@ -9717,7 +9816,7 @@ function renderServiceForms() {
       ? `<div class="table-wrap"><table><thead><tr><th>编码</th><th>名称</th><th>业务类型</th><th>版本</th><th>字段数</th><th>更新时间</th><th>操作</th></tr></thead><tbody>${service.forms
           .map(
             (item) =>
-              `<tr><td>${escapeHtml(item.code || "")}</td><td>${escapeHtml(item.name || "")}</td><td>${escapeHtml(item.recordType || "")}</td><td>${escapeHtml(item.version || 1)}</td><td>${escapeHtml((item.fields || []).length)}</td><td>${escapeHtml(formatDateTime(item.updatedAt || ""))}</td><td>${hasPermission("forms", "update") ? `<button class="text-button" data-action="open-service-form" data-id="${escapeHtml(item.id)}">编辑</button>` : "—"}</td></tr>`,
+              `<tr><td>${escapeHtml(item.code || "")}</td><td>${escapeHtml(item.name || "")}</td><td>${escapeHtml(serviceRecordTypeLabel(item.recordType))}</td><td>${escapeHtml(item.version || 1)}</td><td>${escapeHtml((item.fields || []).length)}</td><td>${escapeHtml(formatDateTime(item.updatedAt || ""))}</td><td>${hasPermission("forms", "update") ? `<button class="text-button" data-action="open-service-form" data-id="${escapeHtml(item.id)}">编辑</button>` : "—"}</td></tr>`,
           )
           .join("")}</tbody></table></div>`
       : serviceTableEmpty("暂无表单")
@@ -9732,7 +9831,7 @@ function renderServicePolicies() {
       ? `<div class="table-wrap"><table><thead><tr><th>编码</th><th>名称</th><th>优先级</th><th>响应时限</th><th>解决时限</th><th>状态</th><th>操作</th></tr></thead><tbody>${service.policies
           .map(
             (item) =>
-              `<tr><td>${escapeHtml(item.code || "")}</td><td>${escapeHtml(item.name || "")}</td><td>${escapeHtml(item.priority || "")}</td><td>${escapeHtml(item.responseMinutes || 0)} 分钟</td><td>${escapeHtml(item.resolutionMinutes || 0)} 分钟</td><td>${item.isActive ? "启用" : "停用"}</td><td>${hasPermission("sla", "update") ? `<button class="text-button" data-action="open-sla-policy" data-id="${escapeHtml(item.id)}">编辑</button>` : "—"}</td></tr>`,
+              `<tr><td>${escapeHtml(item.code || "")}</td><td>${escapeHtml(item.name || "")}</td><td>${escapeHtml(servicePriorityLabel(item.priority))}</td><td>${escapeHtml(item.responseMinutes || 0)} 分钟</td><td>${escapeHtml(item.resolutionMinutes || 0)} 分钟</td><td>${item.isActive ? "启用" : "停用"}</td><td>${hasPermission("sla", "update") ? `<button class="text-button" data-action="open-sla-policy" data-id="${escapeHtml(item.id)}">编辑</button>` : "—"}</td></tr>`,
           )
           .join("")}</tbody></table></div>`
       : serviceTableEmpty("暂无 SLA 策略")
@@ -9747,9 +9846,9 @@ function renderServiceApprovals() {
       ? `<div class="table-wrap"><table><thead><tr><th>编码</th><th>名称</th><th>业务类型</th><th>步骤</th><th>状态</th><th>操作</th></tr></thead><tbody>${service.workflows
           .map((workflow) => {
             const stepText = (workflow.steps || [])
-              .map((step) => `${step.order}. ${step.name}（${step.approverRoleCode || `用户 ${step.approverUserId}`}）`)
+              .map((step) => `${step.order}. ${step.name}（${serviceWorkflowAssigneeLabel(step)}）`)
               .join("；");
-            return `<tr><td>${escapeHtml(workflow.code || "")}</td><td>${escapeHtml(workflow.name || "")}</td><td>${escapeHtml(workflow.recordType || "")}</td><td>${escapeHtml(stepText)}</td><td>${workflow.isActive ? "启用" : "停用"}</td><td>${hasPermission("approvals", "update") ? `<button class="text-button" data-action="open-approval-workflow" data-id="${escapeHtml(workflow.id)}">编辑</button>` : "—"}</td></tr>`;
+            return `<tr><td>${escapeHtml(workflow.code || "")}</td><td>${escapeHtml(workflow.name || "")}</td><td>${escapeHtml(serviceRecordTypeLabel(workflow.recordType))}</td><td>${escapeHtml(stepText)}</td><td>${workflow.isActive ? "启用" : "停用"}</td><td>${hasPermission("approvals", "update") ? `<button class="text-button" data-action="open-approval-workflow" data-id="${escapeHtml(workflow.id)}">编辑</button>` : "—"}</td></tr>`;
           })
           .join("")}</tbody></table></div>`
       : serviceTableEmpty("暂无审批流程")
@@ -9760,7 +9859,7 @@ function renderServiceApprovals() {
       ? `<div class="table-wrap"><table><thead><tr><th>业务类型</th><th>记录编号</th><th>流程</th><th>当前步骤</th><th>申请人</th><th>创建时间</th><th>操作</th></tr></thead><tbody>${service.approvals
           .map(
             (item) =>
-              `<tr><td>${escapeHtml(item.recordType || "")}</td><td>${escapeHtml(item.recordId || "")}</td><td>${escapeHtml(item.workflowName || "")}</td><td>${escapeHtml(item.currentStepOrder || 1)}</td><td>${escapeHtml(item.requestedBy || "—")}</td><td>${escapeHtml(formatDateTime(item.createdAt || ""))}</td><td>${hasPermission("approvals", "approve") ? `<button class="text-button" data-action="open-approval-decision" data-id="${escapeHtml(item.id)}">审批</button>` : "—"}</td></tr>`,
+              `<tr><td>${escapeHtml(serviceRecordTypeLabel(item.recordType))}</td><td>${escapeHtml(item.recordId || "")}</td><td>${escapeHtml(item.workflowName || "")}</td><td>${escapeHtml(item.currentStepOrder || 1)}</td><td>${escapeHtml(item.requestedBy || "—")}</td><td>${escapeHtml(formatDateTime(item.createdAt || ""))}</td><td>${hasPermission("approvals", "approve") ? `<button class="text-button" data-action="open-approval-decision" data-id="${escapeHtml(item.id)}">审批</button>` : "—"}</td></tr>`,
           )
           .join("")}</tbody></table></div>`
       : serviceTableEmpty("暂无待审批记录")
@@ -9941,7 +10040,7 @@ function renderServiceFormsDesignerList() {
     <tr>
       <td>${escapeHtml(item.code || "")}</td>
       <td>${escapeHtml(item.name || "")}</td>
-      <td>${escapeHtml(item.recordType || "")}</td>
+      <td>${escapeHtml(serviceRecordTypeLabel(item.recordType))}</td>
       <td>${escapeHtml(item.version || 1)}</td>
       <td>${escapeHtml((item.fields || []).length)}</td>
       <td>${escapeHtml(formatDateTime(item.updatedAt || ""))}</td>
