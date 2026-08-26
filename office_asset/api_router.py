@@ -284,6 +284,22 @@ class DomainApiRouter:
                 )
             )
             return True
+        if path.startswith("/api/inventory/usage/") and path.endswith("/return") and method == "POST":
+            parts = path.split("/")
+            if len(parts) != 7 or parts[3] != "usage" or parts[6] != "return":
+                raise self.deps.api_error("Invalid inventory usage return path.")
+            allocation_type, usage_record_id = parts[4], parts[5]
+            context = self._write_context(handler, "inventory_operations", "update")
+            send_json(
+                self.assets.return_usage_inventory(
+                    allocation_type,
+                    usage_record_id,
+                    self._payload(handler),
+                    context,
+                    self._idempotency_key(handler),
+                )
+            )
+            return True
         if path == "/api/inventory/receipts" and method == "POST":
             context = self._write_context(handler, "inventory_operations", "create")
             send_json(

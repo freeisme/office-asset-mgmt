@@ -880,9 +880,9 @@ async function returnUsageAllocations(employeeId, allocationType, usageRecordId,
   const allocations = await activeAllocations();
   const matches = allocations.filter(
     (item) =>
-      item.employeeId === String(employeeId) &&
+      String(item.employeeId || "") === String(employeeId || "") &&
       item.allocationType === allocationType &&
-      item.usageRecordId === String(usageRecordId),
+      String(item.usageRecordId || "") === String(usageRecordId || ""),
   );
   for (const allocation of matches) {
     await runCommand(
@@ -891,7 +891,17 @@ async function returnUsageAllocations(employeeId, allocationType, usageRecordId,
       "inventory-return",
     );
   }
-  return matches.length;
+  if (matches.length) return matches.length;
+
+  // Older usage rows predate allocation history. Return them through the
+  // transactional compatibility command instead of treating a valid row as
+  // an unchecked selection.
+  await runCommand(
+    `/api/inventory/usage/${encodeURIComponent(allocationType)}/${encodeURIComponent(usageRecordId)}/return`,
+    { employeeId: String(employeeId || ""), notes },
+    "inventory-usage-return",
+  );
+  return 1;
 }
 
 async function requestDownload(url, body = {}) {
@@ -1324,12 +1334,18 @@ function compareText(a, b) {
   return String(a || "").localeCompare(String(b || ""), "zh-CN");
 }
 
+function sameRecordId(left, right) {
+  const leftId = String(left ?? "").trim();
+  const rightId = String(right ?? "").trim();
+  return Boolean(leftId && rightId && leftId === rightId);
+}
+
 function getOrg(id) {
   return state.orgs.find((org) => org.id === id);
 }
 
 function getEmployee(id) {
-  return state.employees.find((employee) => employee.id === id);
+  return state.employees.find((employee) => sameRecordId(employee.id, id));
 }
 
 function getLeftEmployee(id) {
@@ -2592,8 +2608,9 @@ function returnDeviceToInventory(device, context = {}) {
 
 function recoveryDeviceFromSelection(employee, kind, id) {
   if (!employee || !id) return null;
+  const selectedId = String(id);
   if (kind === "monitor") {
-    const monitor = (employee.monitors || []).find((item) => item.id === id);
+    const monitor = (employee.monitors || []).find((item) => sameRecordId(item.id, selectedId));
     if (!monitor) return null;
     const typeId = monitor.typeId || defaultMonitorTypeId();
     return {
@@ -2612,7 +2629,7 @@ function recoveryDeviceFromSelection(employee, kind, id) {
     };
   }
   if (kind === "nonasset") {
-    const item = getNonAssetItems(employee).find((entry) => entry.id === id);
+    const item = getNonAssetItems(employee).find((entry) => sameRecordId(entry.id, selectedId));
     if (!item) return null;
     return {
       key: `nonasset:${item.id}`,
@@ -2632,20 +2649,21 @@ function recoveryDeviceFromSelection(employee, kind, id) {
   return null;
 }
 
-function openDeviceRecoveryConfirm(employeeId, kind) {
+function openDeviceRecoveryConfirm(employeeId, kind, selectedDevices = null) {
   const employee = getEmployee(employeeId);
   if (!employee) return;
-  const selectedIds = [...document.querySelectorAll("[data-recovery-select]:checked")]
-    .filter(
-      (input) =>
-        input.dataset.employeeId === employeeId &&
-        input.dataset.recoveryKind === kind &&
-        input.dataset.id,
-    )
-    .map((input) => input.dataset.id);
-  const devices = selectedIds
-    .map((id) => recoveryDeviceFromSelection(employee, kind, id))
-    .filter(Boolean);
+  const devices = Array.isArray(selectedDevices)
+    ? selectedDevices.filter(Boolean)
+    : [...document.querySelectorAll("[data-recovery-select]:checked")]
+        .filter(
+          (input) =>
+            String(input.dataset.employeeId || "") === String(employeeId || "") &&
+            input.dataset.recoveryKind === kind &&
+            input.dataset.id,
+        )
+        .map((input) => input.dataset.id)
+        .map((id) => recoveryDeviceFromSelection(employee, kind, id))
+        .filter(Boolean);
   if (!devices.length) {
     showToast(kind === "monitor" ? "请先勾选要回收的显示屏" : "请先勾选要回收的非资产设备", true);
     return;
@@ -2686,8 +2704,10 @@ async function confirmDeviceRecovery() {
     render();
     return;
   }
+  let remainingDevices = [...pending.devices];
   try {
-    for (const device of pending.devices) {
+    for (let index = 0; index < pending.devices.length; index += 1) {
+      const device = pending.devices[index];
       const returned = await returnUsageAllocations(
         employee.id,
         pending.kind === "monitor" ? "monitor" : "non_asset",
@@ -2697,12 +2717,19 @@ async function confirmDeviceRecovery() {
       if (!returned) {
         throw new Error("This usage record has no tracked allocation. Reconcile it before returning.");
       }
+      remainingDevices = pending.devices.slice(index + 1);
     }
     await reloadDomainState();
   } catch (error) {
+    if (!remainingDevices.length) {
+      closeModal();
+      openDeviceManager(employee.id);
+      showToast("物资已回收，但页面刷新失败，请手动刷新后确认结果。", true);
+      return;
+    }
     showToast(`物资回收失败：${error.message}`, true);
-    pendingDeviceRecovery = pending;
-    openDeviceRecoveryConfirm(pending.employeeId, pending.kind);
+    pendingDeviceRecovery = { ...pending, devices: remainingDevices };
+    openDeviceRecoveryConfirm(pending.employeeId, pending.kind, remainingDevices);
     return;
   }
   closeModal();

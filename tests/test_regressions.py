@@ -602,6 +602,49 @@ class FlowRecordUiTests(TestCase):
         self.assertNotIn("queueAuditLogRefresh", app)
 
 
+class InventoryRecoveryRegressionTests(TestCase):
+    def test_recovery_selection_matches_numeric_and_string_ids(self):
+        app = (ROOT / "web" / "app.js").read_text(encoding="utf-8")
+
+        self.assertIn("function sameRecordId(left, right)", app)
+        self.assertIn("state.employees.find((employee) => sameRecordId(employee.id, id))", app)
+        recovery_source = app.split("function recoveryDeviceFromSelection", 1)[1].split(
+            "\nfunction openDeviceRecoveryConfirm",
+            1,
+        )[0]
+        self.assertGreaterEqual(recovery_source.count("sameRecordId("), 2)
+        self.assertIn("const selectedId = String(id);", recovery_source)
+
+    def test_recovery_keeps_only_unprocessed_devices_after_partial_failure(self):
+        app = (ROOT / "web" / "app.js").read_text(encoding="utf-8")
+        recovery_source = app.split("async function confirmDeviceRecovery", 1)[1].split(
+            "\nfunction openLeaveRecoveryModal",
+            1,
+        )[0]
+
+        self.assertIn("let remainingDevices = [...pending.devices];", recovery_source)
+        self.assertIn("remainingDevices = pending.devices.slice(index + 1);", recovery_source)
+        self.assertIn("devices: remainingDevices", recovery_source)
+        self.assertIn("if (!remainingDevices.length)", recovery_source)
+        self.assertIn("openDeviceRecoveryConfirm(pending.employeeId, pending.kind, remainingDevices)", recovery_source)
+
+    def test_legacy_usage_return_has_compatibility_route_and_transactional_guards(self):
+        app = (ROOT / "web" / "app.js").read_text(encoding="utf-8")
+        router = (ROOT / "office_asset" / "api_router.py").read_text(encoding="utf-8")
+        service = (ROOT / "office_asset" / "asset_service.py").read_text(encoding="utf-8")
+
+        self.assertIn("/api/inventory/usage/${encodeURIComponent(allocationType)}/", app)
+        self.assertIn("if (matches.length) return matches.length;", app)
+        self.assertIn('if path.startswith("/api/inventory/usage/")', router)
+        self.assertIn("len(parts) != 7", router)
+        self.assertIn("def return_usage_inventory(", service)
+        self.assertIn("START TRANSACTION;", service)
+        self.assertIn("ORDER BY allocation_id DESC", service)
+        self.assertIn("LIMIT 1", service)
+        self.assertIn("FOR UPDATE;", service)
+        self.assertIn("Legacy usage reconciled during return.", service)
+
+
 if __name__ == "__main__":
     import unittest
 

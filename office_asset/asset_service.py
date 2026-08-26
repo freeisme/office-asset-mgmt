@@ -1516,6 +1516,214 @@ class AssetService:
         self._store_idempotency_result("inventory.return", idempotency_key, payload, response)
         return response
 
+    def return_usage_inventory(
+        self,
+        allocation_type: object,
+        usage_record_id: object,
+        payload: dict,
+        context: dict,
+        idempotency_key: str = "",
+    ) -> dict:
+        """Return a legacy usage row that predates allocation history.
+
+        The v2 allocation command registers every issue in
+        ``inventory_allocation_history``. Older rows can legitimately exist
+        without that record. This compatibility path writes an auditable
+        returned allocation and removes the usage row in one transaction,
+        without re-deducting stock.
+        """
+        cached = self._idempotency_result("inventory.usage-return", idempotency_key, payload)
+        if cached:
+            return cached
+
+        normalized_type = self.db.text(allocation_type)
+        if normalized_type not in {"monitor", "non_asset"}:
+            raise self.api_error("Inventory usage type must be monitor or non_asset.")
+        usage_id = self.db.integer(usage_record_id, 0)
+        employee_id = self.db.integer(payload.get("employeeId"), 0)
+        if usage_id <= 0 or employee_id <= 0:
+            raise self.api_error("Inventory usage return requires an employee and usage record.")
+
+        employee = self._employee(employee_id)
+        self.scope.assert_org_access(context, employee.get("orgId"))
+        permission_scope = self._permission_scope(context)
+        if permission_scope == "own":
+            self._assert_employee_scope(context, employee.get("id"))
+        elif permission_scope in {"submitted", "assigned", "none"}:
+            raise self.forbidden_error(
+                "A legacy inventory usage can only be reconciled with own, organization, or all-data permission scope."
+            )
+
+        usage_table = "employee_monitor_usage" if normalized_type == "monitor" else "employee_non_asset_usage"
+        usage_pk = "monitor_usage_id" if normalized_type == "monitor" else "non_asset_usage_id"
+        usage = self.db.json(
+            f"""
+            SELECT JSON_OBJECT(
+              'id', usage_row.{usage_pk},
+              'employeeId', usage_row.employee_id,
+              'typeId', COALESCE(usage_row.non_asset_type_id, 0),
+              'modelId', COALESCE(usage_row.inventory_model_id, 0),
+              'quantity', usage_row.quantity,
+              'stockAdjusted', usage_row.stock_adjusted,
+              'typeName', COALESCE(type_row.type_name, ''),
+              'brandName', COALESCE(brand.brand_name, ''),
+              'modelName', COALESCE(model.model_name, '')
+            )
+            FROM {usage_table} usage_row
+            LEFT JOIN non_asset_type type_row ON type_row.non_asset_type_id = usage_row.non_asset_type_id
+            LEFT JOIN it_inventory_model model ON model.model_id = usage_row.inventory_model_id
+            LEFT JOIN it_inventory_brand brand ON brand.brand_id = model.brand_id
+            WHERE usage_row.{usage_pk} = {usage_id}
+              AND usage_row.employee_id = {employee_id}
+              AND usage_row.is_active = 1
+            """,
+            None,
+        )
+        if not usage:
+            raise self.api_error("Inventory usage record does not exist.")
+
+        quantity = self.db.integer(usage.get("quantity"), 0)
+        stock_adjusted = self.db.integer(usage.get("stockAdjusted"), 0) == 1
+        model_id = self.db.integer(usage.get("modelId"), 0)
+        type_id = self.db.integer(usage.get("typeId"), 0)
+        if quantity <= 0:
+            raise self.conflict_error("Inventory usage has no quantity left to return.")
+        if stock_adjusted and model_id <= 0:
+            raise self.conflict_error(
+                "This legacy usage has no linked inventory model. Reconcile its catalog link before returning it."
+            )
+
+        existing_allocation_id = self.db.scalar(
+            f"""
+            SELECT COALESCE(MAX(allocation_id), 0)
+            FROM inventory_allocation_history
+            WHERE allocation_type = {self.db.quote(normalized_type)}
+              AND employee_id = {employee_id}
+              AND usage_record_id = {usage_id}
+              AND status = 'active';
+            """
+        )
+        if existing_allocation_id > 0:
+            return self.return_inventory(existing_allocation_id, payload, context, idempotency_key)
+
+        actor_id = self._actor_id(context)
+        actor_sql = str(actor_id) if actor_id > 0 else "NULL"
+        type_sql = str(type_id) if type_id > 0 else "NULL"
+        model_sql = str(model_id) if model_id > 0 else "NULL"
+        note = self.db.text(payload.get("notes"))[:420]
+        reconciliation_note = f"Legacy usage reconciled during return. {note}".strip()
+
+        output = self.db.execute(
+            f"""
+            START TRANSACTION;
+            SET @usage_quantity = 0;
+            SET @usage_stock_adjusted = 0;
+            SET @usage_model_id = 0;
+            SET @active_allocation_id = 0;
+            SELECT quantity, stock_adjusted, COALESCE(inventory_model_id, 0)
+            INTO @usage_quantity, @usage_stock_adjusted, @usage_model_id
+            FROM {usage_table}
+            WHERE {usage_pk} = {usage_id}
+              AND employee_id = {employee_id}
+              AND is_active = 1
+            FOR UPDATE;
+            SELECT allocation_id
+            INTO @active_allocation_id
+            FROM inventory_allocation_history
+            WHERE allocation_type = {self.db.quote(normalized_type)}
+              AND employee_id = {employee_id}
+              AND usage_record_id = {usage_id}
+              AND status = 'active'
+            ORDER BY allocation_id DESC
+            LIMIT 1
+            FOR UPDATE;
+            SET @usage_model_ready = IF(
+              @usage_stock_adjusted = 0,
+              1,
+              (
+                SELECT COUNT(*)
+                FROM it_inventory_model
+                WHERE model_id = @usage_model_id
+                  AND is_active = 1
+              )
+            );
+            SET @return_allowed = IF(
+              @usage_quantity > 0
+              AND (@usage_stock_adjusted = 0 OR @usage_model_id > 0)
+              AND @usage_model_ready = 1
+              AND @active_allocation_id = 0,
+              1,
+              0
+            );
+            INSERT INTO inventory_allocation_history (
+              allocation_type, employee_id, non_asset_type_id, inventory_model_id,
+              usage_record_id, quantity, stock_adjusted, status, issued_at, returned_at,
+              notes, issued_by, returned_by
+            )
+            SELECT
+              {self.db.quote(normalized_type)}, {employee_id}, {type_sql}, {model_sql},
+              {usage_id}, @usage_quantity, @usage_stock_adjusted, 'returned', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP,
+              {self.db.quote(reconciliation_note)}, {actor_sql}, {actor_sql}
+            FROM DUAL
+            WHERE @return_allowed = 1;
+            SET @allocation_id = IF(@return_allowed = 1, LAST_INSERT_ID(), 0);
+            UPDATE {usage_table}
+            SET quantity = quantity - @usage_quantity
+            WHERE {usage_pk} = {usage_id}
+              AND employee_id = {employee_id}
+              AND quantity = @usage_quantity
+              AND @return_allowed = 1;
+            DELETE FROM {usage_table}
+            WHERE {usage_pk} = {usage_id}
+              AND employee_id = {employee_id}
+              AND quantity <= 0
+              AND @return_allowed = 1;
+            UPDATE it_inventory_model
+            SET quantity = quantity + @usage_quantity
+            WHERE model_id = @usage_model_id
+              AND @usage_stock_adjusted = 1
+              AND @return_allowed = 1;
+            INSERT INTO inventory_movement_log (
+              movement_direction, type_name, brand_name, model_name, quantity,
+              source_label, target_label, note, related_employee_no, related_employee_name, trigger_action
+            )
+            SELECT
+              'increase', {self.db.quote(self.db.text(usage.get('typeName')))},
+              {self.db.quote(self.db.text(usage.get('brandName')))}, {self.db.quote(self.db.text(usage.get('modelName')))},
+              @usage_quantity, {self.db.quote(self.db.text(employee.get('name')))}, 'IT Inventory',
+              {self.db.quote(reconciliation_note)}, {self.db.quote(self.db.text(employee.get('employeeNo')))},
+              {self.db.quote(self.db.text(employee.get('name')))}, 'inventory_return'
+            FROM DUAL
+            WHERE @return_allowed = 1 AND @usage_stock_adjusted = 1;
+            {self._conditional_audit_sql(
+                'inventory_returned',
+                'inventory_allocation',
+                'CAST(@allocation_id AS CHAR)',
+                self.db.text(usage.get('modelName')),
+                'Legacy inventory usage reconciled and returned',
+                context,
+                '@return_allowed = 1',
+                {'status': 'active', 'legacyUsage': True},
+                {'status': 'returned', 'quantity': quantity, 'stockAdjusted': stock_adjusted},
+            )};
+            SELECT @return_allowed, @allocation_id;
+            COMMIT;
+            """
+        )
+        lines = [line.strip() for line in output.splitlines() if line.strip()]
+        result = (lines[-1] if lines else "").split("\t")
+        returned = self.db.integer(result[0] if result else 0, 0)
+        allocation_id = self.db.integer(result[1] if len(result) > 1 else 0, 0)
+        if returned != 1 or allocation_id <= 0:
+            raise self.conflict_error("Inventory usage changed before it could be returned. Refresh and try again.")
+        response = {
+            "allocationId": str(allocation_id),
+            "status": "returned",
+            "legacyUsageReconciled": True,
+        }
+        self._store_idempotency_result("inventory.usage-return", idempotency_key, payload, response)
+        return response
+
     def list_allocations(self, context: dict, active_only: bool = True) -> list[dict]:
         where = "WHERE allocation.status = 'active'" if active_only else ""
         rows = list(
