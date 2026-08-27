@@ -878,6 +878,8 @@ def request_update_service(
         except json.JSONDecodeError:
             payload = {}
         print(f"Update service returned HTTP {exc.code}: {payload.get('error') or raw[:256]}")
+        if payload.get("error") == "repository_fetch_failed":
+            raise ApiError("更新项目暂时无法通过 HTTPS 获取，请稍后重试。") from exc
         raise ApiError(f"服务器更新服务返回 HTTP {exc.code}。") from exc
     except (URLError, TimeoutError) as exc:
         print(f"Unable to connect to update service: {exc}")

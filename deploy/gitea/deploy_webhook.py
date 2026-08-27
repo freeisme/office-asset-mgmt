@@ -14,6 +14,7 @@ import ssl
 import subprocess
 import sys
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse, urlsplit
@@ -38,6 +39,11 @@ DEFAULT_RELEASE_CHANNEL = "beta"
 RELEASE_NOTES_MAX_CHARS = max(
     1000,
     min(20000, int(os.environ.get("DEPLOY_RELEASE_NOTES_MAX_CHARS", "10000"))),
+)
+GIT_FETCH_ATTEMPTS = max(1, min(5, int(os.environ.get("DEPLOY_GIT_FETCH_ATTEMPTS", "3"))))
+GIT_FETCH_RETRY_SECONDS = max(
+    1,
+    min(30, int(os.environ.get("DEPLOY_GIT_FETCH_RETRY_SECONDS", "2"))),
 )
 CONTROL_TOKEN = os.environ.get("DEPLOY_CONTROL_TOKEN", "").strip()
 CONTROL_PATH = os.environ.get("DEPLOY_CONTROL_PATH", "/control/update").rstrip("/") or "/"
@@ -77,6 +83,10 @@ class InvalidTargetVersionError(ValueError):
 
 
 class InvalidRepositoryUrlError(ValueError):
+    pass
+
+
+class RepositoryFetchError(RuntimeError):
     pass
 
 
@@ -250,32 +260,95 @@ def _candidate_branch_ref() -> str:
     return f"refs/remotes/update-candidate/{DEPLOY_BRANCH}"
 
 
+def _git_failure_text(error: BaseException) -> str:
+    values = [
+        getattr(error, "stderr", ""),
+        getattr(error, "stdout", ""),
+        str(error),
+    ]
+    return "\n".join(str(value) for value in values if value).strip()
+
+
+def _is_transient_git_failure(error: BaseException) -> bool:
+    message = _git_failure_text(error).lower()
+    return any(
+        marker in message
+        for marker in (
+            "couldn't connect",
+            "connection reset",
+            "connection timed out",
+            "failure when receiving data from the peer",
+            "gnutls recv error",
+            "rpc failed",
+            "tls connection was non-properly terminated",
+            "the remote end hung up unexpectedly",
+            "network is unreachable",
+            "temporary failure",
+            "timed out",
+        )
+    )
+
+
+def _fetch_repository(remote: str, branch_ref: str) -> None:
+    command = [
+        "git",
+        "-C",
+        str(APP_DIR),
+        "-c",
+        "http.version=HTTP/1.1",
+        "-c",
+        "http.lowSpeedLimit=1",
+        "-c",
+        "http.lowSpeedTime=120",
+        "fetch",
+        "--prune",
+        "--no-tags",
+        remote,
+        f"+refs/heads/{DEPLOY_BRANCH}:{branch_ref}",
+        "+refs/tags/v*:refs/tags/v*",
+    ]
+    last_error: BaseException | None = None
+    for attempt in range(1, GIT_FETCH_ATTEMPTS + 1):
+        try:
+            subprocess.run(
+                command,
+                check=True,
+                capture_output=True,
+                text=True,
+                timeout=90,
+            )
+            return
+        except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
+            last_error = exc
+            retryable = _is_transient_git_failure(exc)
+            if not retryable or attempt == GIT_FETCH_ATTEMPTS:
+                break
+            delay = GIT_FETCH_RETRY_SECONDS * attempt
+            LOG.warning(
+                "Git fetch failed for %s (attempt %s/%s); retrying in %ss: %s",
+                remote,
+                attempt,
+                GIT_FETCH_ATTEMPTS,
+                delay,
+                _git_failure_text(exc)[:512],
+            )
+            time.sleep(delay)
+    detail = _git_failure_text(last_error or RuntimeError("unknown fetch error"))
+    LOG.error(
+        "Git fetch failed for %s after %s attempt(s): %s",
+        remote,
+        GIT_FETCH_ATTEMPTS,
+        detail[:1024],
+    )
+    raise RepositoryFetchError("repository fetch failed") from last_error
+
+
 def _fetch_update_source(repository_url: str = "") -> str:
     repository_url = _normalize_repository_url(repository_url)
     if repository_url:
-        subprocess.run(
-            [
-                "git",
-                "-C",
-                str(APP_DIR),
-                "fetch",
-                "--tags",
-                repository_url,
-                f"+refs/heads/{DEPLOY_BRANCH}:{_candidate_branch_ref()}",
-            ],
-            check=True,
-            capture_output=True,
-            text=True,
-            timeout=90,
-        )
+        _fetch_repository(repository_url, _candidate_branch_ref())
         return _candidate_branch_ref()
-    subprocess.run(
-        ["git", "-C", str(APP_DIR), "fetch", "--prune", "--tags", "origin", DEPLOY_BRANCH],
-        check=True,
-        capture_output=True,
-        text=True,
-        timeout=60,
-    )
+    _fetch_repository("origin", f"refs/remotes/origin/{DEPLOY_BRANCH}")
     return f"origin/{DEPLOY_BRANCH}"
 
 
@@ -609,6 +682,9 @@ class WebhookHandler(BaseHTTPRequestHandler):
             except ValueError:
                 self._reply_json(400, {"ok": False, "error": "invalid_release_channel"})
                 return
+            except RepositoryFetchError:
+                self._reply_json(503, {"ok": False, "error": "repository_fetch_failed"})
+                return
             except Exception as exc:
                 LOG.exception("Unable to inspect update status")
                 self._reply_json(502, {"ok": False, "error": "update_status_unavailable"})
@@ -667,6 +743,9 @@ class WebhookHandler(BaseHTTPRequestHandler):
                 return
             except InvalidRepositoryUrlError:
                 self._reply_json(400, {"ok": False, "error": "invalid_repository_url"})
+                return
+            except RepositoryFetchError:
+                self._reply_json(503, {"ok": False, "error": "repository_fetch_failed"})
                 return
             except Exception as exc:
                 LOG.exception("Unable to check or queue an update")

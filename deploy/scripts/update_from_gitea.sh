@@ -9,6 +9,8 @@ COMPOSE_FILE="${COMPOSE_FILE:-${APP_DIR}/compose.yaml}"
 ENV_FILE="${ENV_FILE:-${APP_DIR}/.env}"
 HEALTH_URL="${HEALTH_URL:-http://127.0.0.1:8000/api/health}"
 LOCK_FILE="${DEPLOY_LOCK_FILE:-${APP_DIR}/.deploy.lock}"
+GIT_FETCH_ATTEMPTS="${DEPLOY_GIT_FETCH_ATTEMPTS:-3}"
+GIT_FETCH_RETRY_SECONDS="${DEPLOY_GIT_FETCH_RETRY_SECONDS:-2}"
 
 exec 9>"${LOCK_FILE}"
 if ! flock -n 9; then
@@ -28,6 +30,52 @@ if [[ ! -f "${ENV_FILE}" ]]; then
 fi
 
 export GIT_TERMINAL_PROMPT=0
+
+if ! [[ "${GIT_FETCH_ATTEMPTS}" =~ ^[1-5]$ ]]; then
+  echo "DEPLOY_GIT_FETCH_ATTEMPTS must be an integer between 1 and 5." >&2
+  exit 1
+fi
+if ! [[ "${GIT_FETCH_RETRY_SECONDS}" =~ ^[1-9][0-9]?$ ]] || (( GIT_FETCH_RETRY_SECONDS > 30 )); then
+  echo "DEPLOY_GIT_FETCH_RETRY_SECONDS must be an integer between 1 and 30." >&2
+  exit 1
+fi
+
+is_transient_fetch_failure() {
+  grep -Eqi \
+    "couldn't connect|connection reset|connection timed out|failure when receiving data from the peer|gnutls recv error|rpc failed|tls connection was non-properly terminated|remote end hung up unexpectedly|network is unreachable|temporary failure|timed out"
+}
+
+fetch_repository() {
+  local remote="$1"
+  local branch_ref="$2"
+  local attempt=1
+  local status=0
+  local output=""
+
+  while (( attempt <= GIT_FETCH_ATTEMPTS )); do
+    if output="$(
+      git -c http.version=HTTP/1.1 \
+        -c http.lowSpeedLimit=1 \
+        -c http.lowSpeedTime=120 \
+        fetch --prune --no-tags "${remote}" \
+        "+refs/heads/${DEPLOY_BRANCH}:${branch_ref}" \
+        "+refs/tags/v*:refs/tags/v*" 2>&1
+    )"; then
+      [[ -z "${output}" ]] || printf '%s\n' "${output}"
+      return 0
+    else
+      status=$?
+    fi
+    printf '%s\n' "${output}" >&2
+    if (( attempt == GIT_FETCH_ATTEMPTS )) || ! printf '%s' "${output}" | is_transient_fetch_failure; then
+      return "${status}"
+    fi
+    echo "Git fetch attempt ${attempt}/${GIT_FETCH_ATTEMPTS} failed; retrying in $(( GIT_FETCH_RETRY_SECONDS * attempt ))s." >&2
+    sleep "$(( GIT_FETCH_RETRY_SECONDS * attempt ))"
+    ((attempt += 1))
+  done
+}
+
 if [[ -n "${DEPLOY_REPOSITORY_URL}" ]]; then
   case "${DEPLOY_REPOSITORY_URL}" in
     https://*|http://*|ssh://*|*@*:*) ;;
@@ -37,12 +85,13 @@ if [[ -n "${DEPLOY_REPOSITORY_URL}" ]]; then
       ;;
   esac
   echo "Fetching selected repository branch ${DEPLOY_BRANCH} ..."
-  git fetch --tags "${DEPLOY_REPOSITORY_URL}" "${DEPLOY_BRANCH}"
-  remote_sha="$(git rev-parse FETCH_HEAD)"
+  candidate_ref="refs/remotes/update-candidate/${DEPLOY_BRANCH}"
+  fetch_repository "${DEPLOY_REPOSITORY_URL}" "${candidate_ref}"
+  remote_sha="$(git rev-parse "${candidate_ref}")"
   remote_label="${DEPLOY_REPOSITORY_URL}"
 else
   echo "Fetching origin/${DEPLOY_BRANCH} ..."
-  git fetch --prune --tags origin "${DEPLOY_BRANCH}"
+  fetch_repository "origin" "refs/remotes/origin/${DEPLOY_BRANCH}"
   remote_sha="$(git rev-parse "origin/${DEPLOY_BRANCH}")"
   remote_label="origin/${DEPLOY_BRANCH}"
 fi

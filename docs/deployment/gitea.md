@@ -241,7 +241,10 @@ then check published SemVer tags, select a higher version, and confirm the updat
 成功部署后会重新加载当前工作目录中的新代码，以加载所选版本中的版本筛选逻辑。服务验证
 所选标签为注释标签、属于目标仓库 `main` 历史、包含匹配的 `VERSION_NOTES.md` 条目，并且
 版本号高于当前版本。HTTP 项目地址只接受内网、本机或私有网络主机，且不能包含账号、密码或
-令牌。
+令牌。对 GitHub 等 HTTPS 仓库，更新控制服务与部署脚本固定使用 HTTP/1.1，并在连接重置、
+TLS 对端提前关闭等短暂传输失败时自动重试三次。可在服务环境中按需设置
+`DEPLOY_GIT_FETCH_ATTEMPTS=1-5` 和 `DEPLOY_GIT_FETCH_RETRY_SECONDS=1-30`；最终失败会向
+界面返回“更新项目暂时无法通过 HTTPS 获取”，不会误报为更新服务 HTTP 502。
 
 Each release must add a corresponding entry to `VERSION_NOTES.md`, including database
 migrations, backup requirements, configuration changes, and rollback notes.

@@ -1,5 +1,7 @@
 import importlib.util
+import io
 import re
+import subprocess
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -263,6 +265,104 @@ class ReleaseSelectionTests(TestCase):
                     deploy_webhook._normalize_repository_url(repository_url)
 
 
+class UpdateFetchTests(TestCase):
+    def test_fetch_retries_transient_https_failure_and_syncs_release_tags(self):
+        original_attempts = deploy_webhook.GIT_FETCH_ATTEMPTS
+        original_retry_seconds = deploy_webhook.GIT_FETCH_RETRY_SECONDS
+        transient_error = subprocess.CalledProcessError(
+            128,
+            ["git", "fetch"],
+            stderr="fatal: Failure when receiving data from the peer",
+        )
+        try:
+            deploy_webhook.GIT_FETCH_ATTEMPTS = 3
+            deploy_webhook.GIT_FETCH_RETRY_SECONDS = 2
+            with (
+                mock.patch.object(
+                    deploy_webhook.subprocess,
+                    "run",
+                    side_effect=[
+                        transient_error,
+                        subprocess.CompletedProcess(["git", "fetch"], 0),
+                    ],
+                ) as run,
+                mock.patch.object(deploy_webhook.time, "sleep") as sleep,
+            ):
+                deploy_webhook._fetch_repository(
+                    "https://github.com/freeisme/office-asset-mgmt.git",
+                    "refs/remotes/update-candidate/main",
+                )
+        finally:
+            deploy_webhook.GIT_FETCH_ATTEMPTS = original_attempts
+            deploy_webhook.GIT_FETCH_RETRY_SECONDS = original_retry_seconds
+
+        self.assertEqual(2, run.call_count)
+        command = run.call_args_list[0].args[0]
+        self.assertIn("http.version=HTTP/1.1", command)
+        self.assertIn("http.lowSpeedLimit=1", command)
+        self.assertIn("http.lowSpeedTime=120", command)
+        self.assertIn("+refs/tags/v*:refs/tags/v*", command)
+        self.assertIn(
+            "+refs/heads/main:refs/remotes/update-candidate/main",
+            command,
+        )
+        sleep.assert_called_once_with(2)
+
+    def test_fetch_does_not_retry_non_transient_failure(self):
+        original_attempts = deploy_webhook.GIT_FETCH_ATTEMPTS
+        non_transient_error = subprocess.CalledProcessError(
+            128,
+            ["git", "fetch"],
+            stderr="fatal: repository access denied",
+        )
+        try:
+            deploy_webhook.GIT_FETCH_ATTEMPTS = 3
+            with (
+                mock.patch.object(
+                    deploy_webhook.subprocess,
+                    "run",
+                    side_effect=non_transient_error,
+                ) as run,
+                mock.patch.object(deploy_webhook.time, "sleep") as sleep,
+            ):
+                with self.assertRaises(deploy_webhook.RepositoryFetchError):
+                    deploy_webhook._fetch_repository(
+                        "https://github.com/freeisme/office-asset-mgmt.git",
+                        "refs/remotes/update-candidate/main",
+                    )
+        finally:
+            deploy_webhook.GIT_FETCH_ATTEMPTS = original_attempts
+
+        self.assertEqual(1, run.call_count)
+        sleep.assert_not_called()
+
+    def test_update_service_maps_repository_fetch_failure_to_readable_message(self):
+        original_url = server.UPDATE_SERVICE_URL
+        original_token = server.UPDATE_CONTROL_TOKEN
+        try:
+            server.UPDATE_SERVICE_URL = "https://update-service.example.test"
+            server.UPDATE_CONTROL_TOKEN = "test-token"
+            response = io.BytesIO(
+                b'{"ok": false, "error": "repository_fetch_failed"}'
+            )
+            error = server.HTTPError(
+                "https://update-service.example.test/control/status",
+                503,
+                "Service Unavailable",
+                None,
+                response,
+            )
+            with mock.patch.object(server, "urlopen", side_effect=error):
+                with self.assertRaisesRegex(
+                    server.ApiError,
+                    "更新项目暂时无法通过 HTTPS 获取",
+                ):
+                    server.request_update_service()
+        finally:
+            server.UPDATE_SERVICE_URL = original_url
+            server.UPDATE_CONTROL_TOKEN = original_token
+
+
 class DeploymentScriptTests(TestCase):
     def test_repository_layout_has_canonical_paths_and_compatibility_entries(self):
         self.assertTrue((ROOT / "database" / "bootstrap").is_dir())
@@ -371,7 +471,13 @@ class DeploymentScriptTests(TestCase):
         )
 
         self.assertIn("DEPLOY_REPOSITORY_URL", script)
-        self.assertIn('git fetch --tags "${DEPLOY_REPOSITORY_URL}" "${DEPLOY_BRANCH}"', script)
+        self.assertIn("fetch_repository()", script)
+        self.assertIn("http.version=HTTP/1.1", script)
+        self.assertIn("http.lowSpeedLimit=1", script)
+        self.assertIn("http.lowSpeedTime=120", script)
+        self.assertIn('"+refs/tags/v*:refs/tags/v*"', script)
+        self.assertIn("DEPLOY_GIT_FETCH_ATTEMPTS", script)
+        self.assertIn("DEPLOY_GIT_FETCH_RETRY_SECONDS", script)
         self.assertIn('build --pull app migrate', script)
         self.assertIn('up -d --wait --no-deps db', script)
         self.assertIn('stop app || true', script)
