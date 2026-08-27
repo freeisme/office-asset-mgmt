@@ -9,6 +9,27 @@ from datetime import datetime
 from .sql import SqlGateway
 
 
+QUALITY_SEVERITY_LABELS = {
+    "high": "高",
+    "medium": "中",
+    "low": "低",
+}
+QUALITY_RULE_LABELS = {
+    "computer_assigned_to_inactive_employee": "设备分配给非在职人员",
+    "computer_missing_identity": "办公终端缺少唯一标识",
+    "resolved_ticket_missing_resolution": "已解决工单缺少解决方案",
+}
+QUALITY_ENTITY_TYPE_LABELS = {
+    "computer": "办公终端",
+    "itil_ticket": "工单",
+}
+QUALITY_STATUS_LABELS = {
+    "open": "待处理",
+    "resolved": "已解决",
+    "ignored": "已忽略",
+}
+
+
 @dataclass
 class SyncService:
     db: SqlGateway
@@ -660,6 +681,13 @@ class DataQualityService:
     db: SqlGateway
     api_error: type[Exception]
 
+    def _actor_name(self, context: dict) -> str:
+        return self.db.text(context.get("username")) or "web"
+
+    def _label(self, labels: dict[str, str], value: object) -> str:
+        code = self.db.text(value)
+        return labels.get(code, code)
+
     def _upsert_issue(self, issue: dict) -> None:
         fingerprint = hashlib.sha256(
             f"{issue['rule']}:{issue['entityType']}:{issue.get('entityId') or ''}".encode("utf-8")
@@ -684,7 +712,8 @@ class DataQualityService:
               status = 'open',
               last_detected_at = CURRENT_TIMESTAMP,
               resolved_at = NULL,
-              resolved_by = NULL;
+              resolved_by = NULL,
+              resolution_result = NULL;
             """
         )
 
@@ -694,7 +723,7 @@ class DataQualityService:
             """
             SELECT COALESCE(JSON_ARRAYAGG(JSON_OBJECT(
               'entityId', asset.computer_id,
-              'title', CONCAT('Computer assigned to inactive employee: ', asset.device_name),
+              'title', CONCAT('设备已分配给非在职人员：', asset.device_name),
               'details', JSON_OBJECT('employeeId', employee.employee_id, 'employeeStatus', employee.employment_status)
             )), JSON_ARRAY())
             FROM computer_asset asset
@@ -709,7 +738,7 @@ class DataQualityService:
             """
             SELECT COALESCE(JSON_ARRAYAGG(JSON_OBJECT(
               'entityId', computer_id,
-              'title', CONCAT('Computer lacks serial number and fixed asset code: ', device_name),
+              'title', CONCAT('办公终端缺少序列号和固定资产编号：', device_name),
               'details', JSON_OBJECT('deviceName', device_name)
             )), JSON_ARRAY())
             FROM computer_asset
@@ -720,7 +749,7 @@ class DataQualityService:
             """
             SELECT COALESCE(JSON_ARRAYAGG(JSON_OBJECT(
               'entityId', ticket_id,
-              'title', CONCAT('Resolved ticket has no resolution: ', ticket_number),
+              'title', CONCAT('已解决工单缺少解决方案：', ticket_number),
               'details', JSON_OBJECT('ticketNumber', ticket_number)
             )), JSON_ARRAY())
             FROM itil_ticket
@@ -763,9 +792,9 @@ class DataQualityService:
 
     def list_issues(self, status: str = "open") -> list[dict]:
         if status not in {"open", "resolved", "ignored", "all"}:
-            raise self.api_error("Unsupported quality issue status.")
+            raise self.api_error("不支持的数据质量问题状态。")
         condition = "" if status == "all" else f"WHERE issue.status = {self.db.quote(status)}"
-        return list(
+        issues = list(
             self.db.json(
                 f"""
                 SELECT COALESCE(JSON_ARRAYAGG(JSON_OBJECT(
@@ -779,7 +808,8 @@ class DataQualityService:
                   'status', issue.status,
                   'firstDetectedAt', CAST(issue.first_detected_at AS CHAR),
                   'lastDetectedAt', CAST(issue.last_detected_at AS CHAR),
-                  'resolvedAt', COALESCE(CAST(issue.resolved_at AS CHAR), '')
+                  'resolvedAt', COALESCE(CAST(issue.resolved_at AS CHAR), ''),
+                  'resolutionResult', COALESCE(issue.resolution_result, '')
                 )), JSON_ARRAY())
                 FROM (
                   SELECT *
@@ -793,17 +823,85 @@ class DataQualityService:
             )
             or []
         )
+        for issue in issues:
+            issue["severityLabel"] = self._label(QUALITY_SEVERITY_LABELS, issue.get("severity"))
+            issue["ruleLabel"] = self._label(QUALITY_RULE_LABELS, issue.get("ruleCode"))
+            issue["entityTypeLabel"] = self._label(QUALITY_ENTITY_TYPE_LABELS, issue.get("entityType"))
+            issue["statusLabel"] = self._label(QUALITY_STATUS_LABELS, issue.get("status"))
+        return issues
 
-    def resolve(self, issue_id: object, actor_id: object, ignored: bool = False) -> dict:
+    def resolve(self, issue_id: object, payload: dict, context: dict, ignored: bool = False) -> dict:
         issue_id_int = self.db.integer(issue_id, 0)
+        if issue_id_int <= 0:
+            raise self.api_error("数据质量问题不存在。")
+        resolution_result = self.db.text(payload.get("resolutionResult")).strip()
+        if not ignored and not resolution_result:
+            raise self.api_error("请填写处理结果后再解决问题。")
+        if len(resolution_result) > 2000:
+            raise self.api_error("处理结果不能超过 2000 个字符。")
+        issue = self.db.json(
+            f"""
+            SELECT JSON_OBJECT(
+              'ruleCode', rule_code,
+              'title', title,
+              'status', status,
+              'resolutionResult', COALESCE(resolution_result, '')
+            )
+            FROM data_quality_issue
+            WHERE issue_id = {issue_id_int}
+            """,
+            None,
+        )
+        if not issue:
+            raise self.api_error("数据质量问题不存在。")
+        if self.db.text(issue.get("status")) != "open":
+            raise self.api_error("数据质量问题已经处理，无需重复提交。")
+
         status = "ignored" if ignored else "resolved"
-        self.db.execute(
+        actor_id = self.db.integer(context.get("id"), 0)
+        statements = [
+            "START TRANSACTION",
             f"""
             UPDATE data_quality_issue
             SET status = {self.db.quote(status)},
                 resolved_at = CURRENT_TIMESTAMP,
-                resolved_by = {self.db.integer(actor_id, 0)}
-            WHERE issue_id = {issue_id_int};
-            """
-        )
-        return {"id": str(issue_id_int), "status": status}
+                resolved_by = {actor_id if actor_id > 0 else "NULL"},
+                resolution_result = {self.db.quote(resolution_result) if not ignored else "NULL"}
+            WHERE issue_id = {issue_id_int}
+              AND status = 'open'
+            """,
+            "SET @quality_issue_changed = ROW_COUNT()",
+        ]
+        if not ignored:
+            statements.append(
+                f"""
+                INSERT INTO audit_log (
+                  action_type, entity_type, entity_id, entity_name,
+                  old_value, new_value, summary, actor, source
+                )
+                SELECT
+                  'data_quality_issue_resolved',
+                  'data_quality_issue',
+                  {self.db.quote(str(issue_id_int))},
+                  {self.db.quote(self.db.text(issue.get("title")) or f"数据质量问题 #{issue_id_int}")},
+                  {self.db.json_value({"status": "open", "ruleCode": self.db.text(issue.get("ruleCode"))})},
+                  {self.db.json_value({"status": "resolved", "resolutionResult": resolution_result})},
+                  {self.db.quote(f"数据质量问题已解决：{self._label(QUALITY_RULE_LABELS, issue.get('ruleCode'))}。")},
+                  {self.db.quote(self._actor_name(context))},
+                  'api'
+                FROM DUAL
+                WHERE @quality_issue_changed = 1
+                """
+            )
+        statements.extend(["COMMIT", "SELECT @quality_issue_changed"])
+        output = self.db.execute(";\n".join(statement.strip() for statement in statements) + ";")
+        lines = [line.strip() for line in output.splitlines() if line.strip()]
+        changed = self.db.integer(lines[-1] if lines else 0, 0)
+        if changed != 1:
+            raise self.api_error("数据质量问题已经被其他操作处理。")
+        return {
+            "id": str(issue_id_int),
+            "status": status,
+            "statusLabel": self._label(QUALITY_STATUS_LABELS, status),
+            "resolutionResult": resolution_result,
+        }

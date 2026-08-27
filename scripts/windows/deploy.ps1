@@ -64,7 +64,11 @@ function Invoke-MySqlScalar {
   if ($LASTEXITCODE -ne 0) {
     throw "MySQL command failed."
   }
-  return (($result | Select-Object -Last 1).ToString().Trim())
+  $lastLine = $result | Select-Object -Last 1
+  if ($null -eq $lastLine) {
+    return ""
+  }
+  return $lastLine.ToString().Trim()
 }
 
 function Invoke-SqlFile {

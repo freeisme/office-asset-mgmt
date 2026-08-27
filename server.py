@@ -1780,7 +1780,10 @@ def normalize_inventory_movement_logs(logs: list[dict]) -> list[dict]:
                 "quantity": max(1, sql_int(log.get("quantity"), 1)),
                 "sourceLabel": text_value(log.get("sourceLabel")),
                 "targetLabel": text_value(log.get("targetLabel")),
-                "note": text_value(log.get("note")),
+                "note": text_value(log.get("effectiveNote")) or text_value(log.get("note")),
+                "originalNote": text_value(log.get("originalNote")) or text_value(log.get("note")),
+                "effectiveNote": text_value(log.get("effectiveNote")) or text_value(log.get("note")),
+                "noteCorrections": list(log.get("noteCorrections") or []),
                 "relatedEmployeeNo": text_value(log.get("relatedEmployeeNo")),
                 "relatedEmployeeName": text_value(log.get("relatedEmployeeName")),
                 "triggerAction": text_value(log.get("triggerAction")) or "manual",
@@ -3644,18 +3647,52 @@ def build_state_payload() -> dict:
            'quantity', quantity,
           'sourceLabel', COALESCE(source_label, ''),
           'targetLabel', COALESCE(target_label, ''),
-          'note', COALESCE(note, ''),
+           'note', COALESCE(effective_note, ''),
+           'originalNote', COALESCE(original_note, ''),
+           'effectiveNote', COALESCE(effective_note, ''),
+           'noteCorrections', COALESCE(note_corrections, JSON_ARRAY()),
           'relatedEmployeeNo', COALESCE(related_employee_no, ''),
           'relatedEmployeeName', COALESCE(related_employee_name, ''),
           'triggerAction', COALESCE(trigger_action, 'manual'),
           'occurredAt', DATE_FORMAT(occurred_at, '%Y-%m-%d %H:%i:%s')
         )), JSON_ARRAY())
         FROM (
-          SELECT movement_log_id, movement_direction, type_name, brand_name, model_name, quantity,
-                 source_label, target_label, note, related_employee_no, related_employee_name,
-                 trigger_action, occurred_at
-          FROM inventory_movement_log
-          ORDER BY occurred_at DESC, movement_log_id DESC
+          SELECT
+            movement.movement_log_id,
+            movement.movement_direction,
+            movement.type_name,
+            movement.brand_name,
+            movement.model_name,
+            movement.quantity,
+            movement.source_label,
+            movement.target_label,
+            COALESCE(movement.note, '') AS original_note,
+            COALESCE((
+              SELECT correction.corrected_note
+              FROM inventory_movement_note_correction correction
+              WHERE correction.movement_log_id = movement.movement_log_id
+              ORDER BY correction.created_at DESC, correction.correction_id DESC
+              LIMIT 1
+            ), movement.note, '') AS effective_note,
+            (
+              SELECT COALESCE(JSON_ARRAYAGG(JSON_OBJECT(
+                'id', CAST(correction.correction_id AS CHAR),
+                'correctedNote', correction.corrected_note,
+                'correctionReason', correction.correction_reason,
+                'createdBy', COALESCE(correction_user.display_name, correction_user.username, ''),
+                'createdAt', DATE_FORMAT(correction.created_at, '%Y-%m-%d %H:%i:%s')
+              )), JSON_ARRAY())
+              FROM inventory_movement_note_correction correction
+              LEFT JOIN user_account correction_user
+                ON correction_user.user_id = correction.created_by
+              WHERE correction.movement_log_id = movement.movement_log_id
+            ) AS note_corrections,
+            movement.related_employee_no,
+            movement.related_employee_name,
+            movement.trigger_action,
+            movement.occurred_at
+          FROM inventory_movement_log movement
+          ORDER BY movement.occurred_at DESC, movement.movement_log_id DESC
         ) AS ordered_inventory_movement_logs
         """,
         """

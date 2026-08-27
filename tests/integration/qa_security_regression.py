@@ -160,7 +160,30 @@ def cleanup() -> None:
         DELETE FROM audit_log
           WHERE (entity_type = 'computer' AND entity_name LIKE '{PREFIX}%')
              OR (entity_type = 'employee' AND entity_name LIKE '{PREFIX}%')
-             OR (entity_type = 'org_unit' AND entity_name LIKE '{PREFIX}%');
+             OR (entity_type = 'org_unit' AND entity_name LIKE '{PREFIX}%')
+             OR (entity_type = 'inventory_movement_log' AND entity_name LIKE '{PREFIX}%')
+             OR (entity_type = 'data_quality_issue' AND entity_name LIKE '[QA v2.0.8]%')
+             OR (entity_type = 'inventory_model' AND entity_name LIKE '{PREFIX}%')
+             OR (entity_type = 'it_inventory_brand' AND entity_name LIKE '{PREFIX}%')
+             OR (entity_type = 'non_asset_type' AND entity_name LIKE '{PREFIX}%');
+        DELETE FROM inventory_purchase_log
+          WHERE type_name LIKE '{PREFIX}%';
+        DELETE FROM inventory_movement_note_correction
+          WHERE movement_log_id IN (
+            SELECT movement_log_id
+            FROM inventory_movement_log
+            WHERE type_name LIKE '{PREFIX}%'
+          );
+        DELETE FROM inventory_movement_log
+          WHERE type_name LIKE '{PREFIX}%';
+        DELETE FROM data_quality_issue
+          WHERE title LIKE '[QA v2.0.8]%';
+        DELETE FROM it_inventory_model
+          WHERE model_name LIKE '{PREFIX}%';
+        DELETE FROM it_inventory_brand
+          WHERE brand_name LIKE '{PREFIX}%';
+        DELETE FROM non_asset_type
+          WHERE type_name LIKE '{PREFIX}%';
         DELETE FROM user_org_scope
           WHERE user_id IN (SELECT user_id FROM user_account WHERE username LIKE '{PREFIX}%');
         DELETE FROM user_account WHERE username = 'qa_verify_admin';
@@ -316,17 +339,38 @@ def main() -> int:
         admin = login("qa_verify_admin")
         status, permissions = admin.request("GET", "/api/auth/permissions", expected=200)
         assert permissions["isSuperAdmin"] is True
-        employee_ids = sql_rows(
-            """
-            SELECT e.employee_id
-            FROM employee e
-            LEFT JOIN user_account ua ON ua.employee_id = e.employee_id
-            WHERE e.is_active = 1 AND ua.user_id IS NULL
-            ORDER BY e.employee_id
-            LIMIT 2;
-            """
+        bootstrap_org_code = f"QAB{suffix[-6:]}"
+        _, bootstrap_org_payload = admin.request(
+            "POST",
+            "/api/resources/organization",
+            {
+                "code": bootstrap_org_code,
+                "name": f"{PREFIX}account_org_{suffix}",
+                "sortOrder": 8999,
+            },
+            201,
         )
-        assert len(employee_ids) >= 2, "test database must contain two unbound active employees for account binding"
+        bootstrap_org_id = bootstrap_org_payload["organization"]["id"]
+
+        def create_bootstrap_employee(key: str) -> str:
+            _, employee_payload = admin.request(
+                "POST",
+                "/api/resources/employee",
+                {
+                    "employeeNo": f"{PREFIX}account_{key}_{suffix}",
+                    "name": f"{PREFIX}account_{key}_{suffix}",
+                    "orgId": bootstrap_org_id,
+                    "department": "QA",
+                    "status": "active",
+                },
+                201,
+            )
+            return employee_payload["employee"]["id"]
+
+        employee_ids = [
+            create_bootstrap_employee("none"),
+            create_bootstrap_employee("formview"),
+        ]
 
         status, _ = admin.request("PUT", "/api/state", {"stateRevision": 1})
         assert status == 405
@@ -825,13 +869,208 @@ def main() -> int:
             for item in final_history["events"]
         ), final_history
 
+        inventory_type_code = f"{PREFIX}type_{suffix}"
+        inventory_type_name = f"{PREFIX}inventory_type_{suffix}"
+        inventory_brand_name = f"{PREFIX}inventory_brand_{suffix}"
+        inventory_model_name = f"{PREFIX}inventory_model_{suffix}"
+        _, inventory_type_payload = admin.request(
+            "POST",
+            "/api/resources/inventory-type",
+            {
+                "code": inventory_type_code,
+                "name": inventory_type_name,
+                "unit": "件",
+            },
+            201,
+        )
+        inventory_type_id = inventory_type_payload["inventoryType"]["id"]
+        _, inventory_brand_payload = admin.request(
+            "POST",
+            "/api/resources/inventory-brand",
+            {
+                "typeId": inventory_type_id,
+                "name": inventory_brand_name,
+                "sortOrder": 9000,
+            },
+            201,
+        )
+        _, inventory_model_payload = admin.request(
+            "POST",
+            "/api/resources/inventory-model",
+            {
+                "typeId": inventory_type_id,
+                "brandId": inventory_brand_payload["inventoryBrand"]["id"],
+                "name": inventory_model_name,
+                "batchKey": f"qa-{suffix}",
+                "sortOrder": 9000,
+            },
+            201,
+        )
+        inventory_model_id = inventory_model_payload["inventoryModel"]["id"]
+        original_note = "[QA v2.0.8] 原始入库备注"
+        _, receipt = admin.request(
+            "POST",
+            "/api/inventory/receipts",
+            {
+                "modelId": inventory_model_id,
+                "quantity": 1,
+                "inboundDate": "2026-08-27",
+                "sourceLabel": "QA 安全回归",
+                "note": original_note,
+            },
+            201,
+        )
+        assert receipt["modelId"] == inventory_model_id
+        movement_log_id = sql_scalar(
+            f"""
+            SELECT movement_log_id
+            FROM inventory_movement_log
+            WHERE type_name = '{inventory_type_name}'
+              AND model_name = '{inventory_model_name}'
+              AND note = '{original_note}'
+            ORDER BY movement_log_id DESC
+            LIMIT 1
+            """
+        )
+        assert movement_log_id
+        assert reader.request(
+            "POST",
+            f"/api/inventory/movement-logs/{movement_log_id}/note-corrections",
+            {
+                "correctedNote": "[QA v2.0.8] 越权更正",
+                "correctionReason": "应被权限控制拒绝",
+            },
+        )[0] == 403
+        corrected_note = "[QA v2.0.8] 已核验的更正备注"
+        _, correction = admin.request(
+            "POST",
+            f"/api/inventory/movement-logs/{movement_log_id}/note-corrections",
+            {
+                "correctedNote": corrected_note,
+                "correctionReason": "QA 验证追加式更正和审计",
+            },
+            201,
+        )
+        assert correction["movementLogId"] == movement_log_id
+        assert sql_scalar(
+            f"SELECT note FROM inventory_movement_log WHERE movement_log_id = {movement_log_id}"
+        ) == original_note
+        assert sql_scalar(
+            f"""
+            SELECT corrected_note
+            FROM inventory_movement_note_correction
+            WHERE movement_log_id = {movement_log_id}
+            ORDER BY correction_id DESC
+            LIMIT 1
+            """
+        ) == corrected_note
+        assert sql_scalar(
+            f"""
+            SELECT COUNT(*)
+            FROM audit_log
+            WHERE action_type = 'inventory_movement_note_corrected'
+              AND entity_id = '{movement_log_id}'
+            """
+        ) == "1"
+        _, inventory_state = admin.request("GET", "/api/state", expected=200)
+        movement = next(
+            item
+            for item in inventory_state["inventoryMovementLogs"]
+            if item["id"] == movement_log_id
+        )
+        assert movement["originalNote"] == original_note, movement
+        assert movement["effectiveNote"] == corrected_note, movement
+        assert len(movement["noteCorrections"]) == 1, movement
+
+        quality_issue_title = "[QA v2.0.8] 办公终端唯一标识核验"
+        quality_issue_fingerprint = hashlib.sha256(
+            f"{quality_issue_title}:{suffix}".encode("utf-8")
+        ).hexdigest()
+        sql_run(
+            f"""
+            INSERT INTO data_quality_issue (
+              fingerprint, rule_code, severity, entity_type, entity_id,
+              title, details, status
+            )
+            VALUES (
+              '{quality_issue_fingerprint}',
+              'computer_missing_identity',
+              'medium',
+              'computer',
+              {computer_a},
+              '{quality_issue_title}',
+              JSON_OBJECT('source', 'qa_security_regression'),
+              'open'
+            );
+            """
+        )
+        quality_issue_id = sql_scalar(
+            f"""
+            SELECT issue_id
+            FROM data_quality_issue
+            WHERE fingerprint = '{quality_issue_fingerprint}'
+            """
+        )
+        assert quality_issue_id
+        assert reader.request(
+            "POST",
+            f"/api/data-quality/issues/{quality_issue_id}/resolve",
+            {"resolutionResult": "越权处理"},
+        )[0] == 403
+        assert admin.request(
+            "POST",
+            f"/api/data-quality/issues/{quality_issue_id}/resolve",
+            {},
+        )[0] == 400
+        resolution_result = "QA 已核验并补充处理结果审计。"
+        _, resolved_issue = admin.request(
+            "POST",
+            f"/api/data-quality/issues/{quality_issue_id}/resolve",
+            {"resolutionResult": resolution_result},
+            200,
+        )
+        assert resolved_issue["status"] == "resolved", resolved_issue
+        assert resolved_issue["statusLabel"] == "已解决", resolved_issue
+        assert resolved_issue["resolutionResult"] == resolution_result, resolved_issue
+        assert sql_scalar(
+            f"""
+            SELECT resolution_result
+            FROM data_quality_issue
+            WHERE issue_id = {quality_issue_id}
+            """
+        ) == resolution_result
+        assert sql_scalar(
+            f"""
+            SELECT COUNT(*)
+            FROM audit_log
+            WHERE action_type = 'data_quality_issue_resolved'
+              AND entity_id = '{quality_issue_id}'
+            """
+        ) == "1"
+        _, resolved_issues = admin.request(
+            "GET",
+            "/api/data-quality/issues?status=resolved",
+            expected=200,
+        )
+        listed_quality_issue = next(
+            item for item in resolved_issues["issues"] if item["id"] == quality_issue_id
+        )
+        assert listed_quality_issue["severityLabel"] == "中", listed_quality_issue
+        assert listed_quality_issue["ruleLabel"] == "办公终端缺少唯一标识", listed_quality_issue
+        assert listed_quality_issue["entityTypeLabel"] == "办公终端", listed_quality_issue
+        assert listed_quality_issue["statusLabel"] == "已解决", listed_quality_issue
+        assert listed_quality_issue["resolutionResult"] == resolution_result, listed_quality_issue
+
         print("QA_REGRESSION_PASS")
         print(
             "checks=role_creation,none_scope,csrf,state_write_retired,"
             "form_visibility,form_permission_endpoint,form_workflow_binding,"
             "approval_gate,approval_status_sync,computer_movement_history,"
             "assignment_idempotency,assignment_reassignment_audit,own_asset_scope,"
-            "org_asset_scope,cross_org_denied,readonly_write_denied"
+            "org_asset_scope,cross_org_denied,readonly_write_denied,"
+            "inventory_note_correction_append_only,inventory_note_correction_permission,"
+            "quality_resolution_required,quality_resolution_audit,quality_resolution_permission,"
+            "quality_chinese_labels"
         )
         return 0
     finally:

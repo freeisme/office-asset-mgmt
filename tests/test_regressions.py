@@ -385,6 +385,8 @@ class DeploymentScriptTests(TestCase):
         self.assertIn('scripts\\windows\\deploy.ps1', root_deploy)
         self.assertIn('[Alias("DbName")][string]$Database', windows_deploy)
         self.assertNotIn('[Alias("DbName")][string]$DbName', windows_deploy)
+        self.assertIn("$lastLine = $result | Select-Object -Last 1", windows_deploy)
+        self.assertIn("if ($null -eq $lastLine)", windows_deploy)
 
     def test_backup_script_uses_atomic_private_output(self):
         script = (ROOT / "deploy" / "scripts" / "backup_database.sh").read_text(
@@ -676,7 +678,10 @@ class FlowRecordUiTests(TestCase):
         self.assertIn('data-filter="flowEmployee"', app)
         self.assertIn('data-filter="flowStartDate"', app)
         self.assertIn('data-filter="flowEndDate"', app)
-        self.assertIn('data-form="inventory-log-note"', app)
+        self.assertIn('data-form="inventory-log-note-correction"', app)
+        self.assertIn("/api/inventory/movement-logs/${encodeURIComponent(log.id)}/note-corrections", app)
+        self.assertIn("correctionReason", app)
+        self.assertNotIn("流转日志为事务结果，只能通过新的业务命令产生，暂不支持单独改写。", app)
         self.assertIn('  return: { label: "归还回收"', app)
         self.assertIn('category: "库存入库"', app)
         self.assertIn('category: "领用发放"', app)
@@ -706,6 +711,53 @@ class FlowRecordUiTests(TestCase):
         self.assertIn("refreshAuditLogs({ silent: true })", app)
         self.assertNotIn("renderPreservingFilterInput", app)
         self.assertNotIn("queueAuditLogRefresh", app)
+
+    def test_movement_note_corrections_are_append_only_and_audited(self):
+        router = (ROOT / "office_asset" / "api_router.py").read_text(encoding="utf-8")
+        service = (ROOT / "office_asset" / "asset_service.py").read_text(encoding="utf-8")
+        state_reader = (ROOT / "server.py").read_text(encoding="utf-8")
+
+        self.assertIn("/api/inventory/movement-logs/", router)
+        self.assertIn("/note-corrections", router)
+        self.assertIn("add_inventory_movement_note_correction", service)
+        self.assertIn("START TRANSACTION", service)
+        self.assertIn("inventory_movement_note_correction", service)
+        self.assertIn("inventory_movement_note_corrected", service)
+        self.assertNotIn("UPDATE inventory_movement_log SET note", service)
+        self.assertIn("'originalNote'", state_reader)
+        self.assertIn("'effectiveNote'", state_reader)
+        self.assertIn("'noteCorrections'", state_reader)
+
+
+class DataQualityRegressionTests(TestCase):
+    def test_quality_outputs_are_chinese_and_resolution_requires_a_result(self):
+        operations = (ROOT / "office_asset" / "operations.py").read_text(encoding="utf-8")
+        router = (ROOT / "office_asset" / "api_router.py").read_text(encoding="utf-8")
+        app = (ROOT / "web" / "app.js").read_text(encoding="utf-8")
+
+        self.assertIn('"high": "高"', operations)
+        self.assertIn('"computer": "办公终端"', operations)
+        self.assertIn('"resolved": "已解决"', operations)
+        self.assertIn("请填写处理结果后再解决问题。", operations)
+        self.assertIn("resolution_result", operations)
+        self.assertIn("data_quality_issue_resolved", operations)
+        self.assertIn('self._write_context(handler, "quality", "approve")', router)
+        self.assertIn('data-form="quality-issue-resolution"', app)
+        self.assertIn("处理结果", app)
+        self.assertIn('{ resolutionResult }', app)
+        self.assertIn('hasPermission("quality", "approve")', app)
+
+    def test_quality_resolution_migration_is_retry_safe(self):
+        migration = (
+            ROOT
+            / "database"
+            / "migrations"
+            / "20260827_001_flow_note_corrections_and_quality_resolution.sql"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn("CREATE TABLE IF NOT EXISTS inventory_movement_note_correction", migration)
+        self.assertIn("information_schema.columns", migration)
+        self.assertIn("resolution_result", migration)
 
 
 class InventoryRecoveryRegressionTests(TestCase):

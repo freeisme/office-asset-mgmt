@@ -106,8 +106,8 @@ const pageMeta = {
     description: "配置业务字段、流程、列表和表单权限。",
   },
   governance: {
-    title: "Sync and Quality",
-    description: "Stage external data for validation before applying it, and review asset data quality.",
+    title: "同步与质量",
+    description: "外部数据先在暂存区校验，再由授权人员应用，并持续检查资产数据质量。",
   },
   settings: {
     title: "设置",
@@ -540,10 +540,13 @@ function normalizeState(value) {
           brandName: log.brandName || "",
           modelName: log.modelName || "",
           quantity: Math.max(1, Number(log.quantity || 1)),
-          sourceLabel: log.sourceLabel || "",
-          targetLabel: log.targetLabel || "",
-          note: log.note || "",
-          relatedEmployeeNo: log.relatedEmployeeNo || "",
+           sourceLabel: log.sourceLabel || "",
+           targetLabel: log.targetLabel || "",
+           note: log.effectiveNote || log.note || "",
+           originalNote: log.originalNote || log.note || "",
+           effectiveNote: log.effectiveNote || log.note || "",
+           noteCorrections: Array.isArray(log.noteCorrections) ? log.noteCorrections : [],
+           relatedEmployeeNo: log.relatedEmployeeNo || "",
           relatedEmployeeName: log.relatedEmployeeName || "",
           triggerAction: log.triggerAction || "manual",
           occurredAt: log.occurredAt || "",
@@ -4741,19 +4744,23 @@ function renderInventoryPage() {
 }
 
 function renderFlowRecordNoteEditor(log) {
+  const effectiveNote = String(log.effectiveNote || log.note || "").trim();
+  const originalNote = String(log.originalNote || log.note || "").trim();
+  const correctionCount = Array.isArray(log.noteCorrections) ? log.noteCorrections.length : 0;
   return `
-    <form class="flow-record-note-editor" data-form="inventory-log-note" data-id="${escapeHtml(log.id)}">
-      <input
-        class="flow-record-note-input"
-        type="text"
-        name="note"
-        maxlength="500"
-        value="${escapeHtml(log.note || "")}"
-        placeholder="填写备注"
-        aria-label="物资流转备注"
-      />
-      <button class="text-button flow-record-note-save" type="submit">保存</button>
-    </form>
+    <div class="flow-record-note-editor">
+      <div>${escapeHtml(effectiveNote || "—")}</div>
+      ${
+        correctionCount
+          ? `<div class="secondary-text">已更正 ${escapeHtml(correctionCount)} 次${
+              originalNote && originalNote !== effectiveNote ? ` · 原始：${escapeHtml(originalNote)}` : ""
+            }</div>`
+          : ""
+      }
+      <button class="text-button flow-record-note-save" type="button" data-action="edit-inventory-log-note" data-id="${escapeHtml(
+        log.id,
+      )}">更正备注</button>
+    </div>
   `;
 }
 
@@ -5158,28 +5165,79 @@ function openInventoryImportModal() {
 function openInventoryMovementNoteModal(id) {
   const log = state.inventoryMovementLogs.find((item) => item.id === id);
   if (!log) return;
+  const originalNote = String(log.originalNote || log.note || "").trim();
+  const effectiveNote = String(log.effectiveNote || log.note || "").trim();
+  const corrections = [...(Array.isArray(log.noteCorrections) ? log.noteCorrections : [])].sort((left, right) =>
+    String(right.createdAt || "").localeCompare(String(left.createdAt || "")),
+  );
+  const history = corrections.length
+    ? `<section class="modal-section">
+        <div class="modal-section-title"><h3>更正历史</h3><span>每次更正均保留原始事务记录和审计日志。</span></div>
+        <div class="audit-list">${corrections
+          .map(
+            (correction) => `<div class="audit-item">
+              <div><strong>${escapeHtml(correction.correctedNote || "—")}</strong><span>${escapeHtml(
+                correction.correctionReason || "",
+              )}</span></div>
+              <small>${escapeHtml(correction.createdBy || "系统")} · ${escapeHtml(
+                formatDateTime(correction.createdAt || ""),
+              )}</small>
+            </div>`,
+          )
+          .join("")}</div>
+      </section>`
+    : '<section class="modal-section"><div class="empty-state">尚无备注更正记录</div></section>';
   openModal(
-    `${modalHeader("编辑物资标注", `${log.typeName} / ${[log.brandName, log.modelName].filter(Boolean).join(" / ")}`)}
-      <form data-form="inventory-log-note" data-id="${escapeHtml(log.id)}">
-        ${textareaField("标注", "note", log.note || "", false, "补充来源、流向或处理说明", 4)}
+    `${modalHeader("更正物资流转备注", `${log.typeName} / ${[log.brandName, log.modelName].filter(Boolean).join(" / ")}`)}
+      <form data-form="inventory-log-note-correction" data-id="${escapeHtml(log.id)}">
+        <section class="modal-section">
+          <div class="form-grid">
+            ${textareaField("原始备注", "originalNote", originalNote || "—", false, "", 3, 'readonly tabindex="-1"')}
+            ${textareaField("当前有效备注", "currentNote", effectiveNote || "—", false, "", 3, 'readonly tabindex="-1"')}
+          </div>
+        </section>
+        <section class="modal-section">
+          <div class="form-grid">
+            ${textareaField("更正后的备注", "correctedNote", effectiveNote, true, "填写更正后的说明", 4)}
+            ${textareaField("更正原因", "correctionReason", "", true, "说明为什么需要更正，以及核验依据", 4)}
+          </div>
+        </section>
+        ${history}
         <div class="modal-footer">
           <button type="button" class="secondary-button" data-action="close-modal">取消</button>
-          <button class="primary-button" type="submit">保存标注</button>
+          <button class="primary-button" type="submit">提交更正</button>
         </div>
       </form>`,
   );
 }
 
-function handleInventoryMovementNoteSubmit(form) {
+async function handleInventoryMovementNoteSubmit(form) {
   const log = state.inventoryMovementLogs.find((item) => item.id === form.dataset.id);
   if (!log) return;
   const data = Object.fromEntries(new FormData(form).entries());
-  const note = String(data.note || "").trim();
-  if (note === String(log.note || "").trim()) {
+  const correctedNote = String(data.correctedNote || "").trim();
+  const correctionReason = String(data.correctionReason || "").trim();
+  if (!correctedNote || !correctionReason) {
+    showToast("请填写更正后的备注和更正原因。", true);
+    return;
+  }
+  if (correctedNote === String(log.effectiveNote || log.note || "").trim()) {
     showToast("备注未发生变化");
     return;
   }
-  showToast("流转日志为事务结果，只能通过新的业务命令产生，暂不支持单独改写。", true);
+  try {
+    await runCommand(
+      `/api/inventory/movement-logs/${encodeURIComponent(log.id)}/note-corrections`,
+      { correctedNote, correctionReason },
+      "inventory-movement-note-correction",
+    );
+    closeModal();
+    await reloadDomainState();
+    render();
+    showToast("流转备注已更正，原始事务记录和更正历史已保留。");
+  } catch (error) {
+    showToast(`更正流转备注失败：${error.message}`, true);
+  }
 }
 
 function handleInventoryPurchaseNoteSubmit(form) {
@@ -8398,6 +8456,28 @@ function renderServiceTickets() {
   </section>`;
 }
 
+function syncSourceLabel(sourceCode) {
+  return (
+    {
+      manual: "手工维护",
+      excel: "Excel 导入",
+      hr: "人事目录",
+    }[String(sourceCode || "")] || String(sourceCode || "")
+  );
+}
+
+function syncRunStatusLabel(status) {
+  return (
+    {
+      staged: "已暂存",
+      validated: "校验通过",
+      applied: "已应用",
+      failed: "失败",
+      cancelled: "已取消",
+    }[String(status || "")] || String(status || "")
+  );
+}
+
 function renderGovernancePage() {
   const runs = Array.isArray(operationsState.syncRuns) ? operationsState.syncRuns : [];
   const issues = Array.isArray(operationsState.qualityIssues) ? operationsState.qualityIssues : [];
@@ -8420,8 +8500,8 @@ function renderGovernancePage() {
                 <tbody>${runs
                   .map(
                     (run) => `<tr>
-                      <td>${escapeHtml(run.sourceCode || "")}</td>
-                      <td>${escapeHtml(run.status || "")}</td>
+                      <td>${escapeHtml(syncSourceLabel(run.sourceCode))}</td>
+                      <td>${escapeHtml(syncRunStatusLabel(run.status))}</td>
                       <td>${escapeHtml(run.recordsTotal || 0)}</td>
                       <td>${escapeHtml(run.recordsValid || 0)}</td>
                       <td>${escapeHtml(run.recordsInvalid || 0)}</td>
@@ -8450,13 +8530,13 @@ function renderGovernancePage() {
                 <tbody>${issues
                   .map(
                     (issue) => `<tr>
-                      <td>${escapeHtml(issue.severity || "")}</td>
-                      <td>${escapeHtml(issue.ruleCode || "")}</td>
-                      <td>${escapeHtml(`${issue.entityType || ""} ${issue.entityId || ""}`)}</td>
+                      <td>${escapeHtml(issue.severityLabel || issue.severity || "")}</td>
+                      <td>${escapeHtml(issue.ruleLabel || issue.ruleCode || "")}</td>
+                      <td>${escapeHtml(`${issue.entityTypeLabel || issue.entityType || ""} ${issue.entityId || ""}`)}</td>
                       <td>${escapeHtml(issue.title || "")}</td>
                       <td>${escapeHtml(formatDateTime(issue.lastDetectedAt || ""))}</td>
                       <td>${
-                        canWriteState()
+                        hasPermission("quality", "approve")
                           ? `<button class="text-button" data-action="resolve-quality-issue" data-id="${escapeHtml(issue.id)}">解决</button>
                              <button class="text-button" data-action="ignore-quality-issue" data-id="${escapeHtml(issue.id)}">忽略</button>`
                           : "—"
@@ -8740,9 +8820,9 @@ function openSyncStageModal() {
       <form data-form="sync-stage">
         <div class="form-grid">
           ${selectField("来源", "sourceCode", [
-            { value: "manual", label: "Manual maintenance" },
-            { value: "excel", label: "Excel import" },
-            { value: "hr", label: "HR directory" },
+            { value: "manual", label: "手工维护" },
+            { value: "excel", label: "Excel 导入" },
+            { value: "hr", label: "人事目录" },
           ], "manual", true)}
           ${inputField("来源批次标识", "sourceReference", "", false, "例如 HR-20260814")}
         </div>
@@ -8802,17 +8882,52 @@ async function runDataQuality() {
   }
 }
 
-async function resolveQualityIssue(issueId, ignored) {
+function openQualityIssueResolveModal(issueId) {
+  const issue = operationsState.qualityIssues.find((item) => String(item.id) === String(issueId));
+  if (!issue) return;
+  openModal(
+    `${modalHeader("解决数据质量问题", issue.ruleLabel || issue.title || "数据质量问题")}
+      <form data-form="quality-issue-resolution" data-id="${escapeHtml(issue.id)}">
+        <section class="modal-section">
+          <div class="form-grid">
+            ${inputField("严重性", "severityLabel", issue.severityLabel || issue.severity || "", false, "", "text", "", 'readonly tabindex="-1"')}
+            ${inputField("对象", "entityLabel", `${issue.entityTypeLabel || issue.entityType || ""} ${issue.entityId || ""}`.trim(), false, "", "text", "", 'readonly tabindex="-1"')}
+          </div>
+          ${textareaField("问题说明", "issueTitle", issue.title || "", false, "", 3, 'readonly tabindex="-1"')}
+        </section>
+        <section class="modal-section">
+          ${textareaField("处理结果", "resolutionResult", "", true, "说明已采取的修正、核验结果或后续措施", 5)}
+        </section>
+        <div class="modal-footer"><button type="button" class="secondary-button" data-action="close-modal">取消</button><button class="primary-button" type="submit">确认解决</button></div>
+      </form>`,
+  );
+}
+
+async function resolveQualityIssue(issueId, ignored, resolutionResult = "") {
   try {
     await runCommand(
       `/api/data-quality/issues/${encodeURIComponent(issueId)}/${ignored ? "ignore" : "resolve"}`,
-      {},
+      ignored ? {} : { resolutionResult },
       ignored ? "quality-ignore" : "quality-resolve",
     );
     await loadGovernance();
     render();
+    return true;
   } catch (error) {
     showToast(`更新质量问题失败：${error.message}`, true);
+    return false;
+  }
+}
+
+async function handleQualityIssueResolutionSubmit(form) {
+  const data = Object.fromEntries(new FormData(form).entries());
+  const resolutionResult = String(data.resolutionResult || "").trim();
+  if (!resolutionResult) {
+    showToast("请填写处理结果。", true);
+    return;
+  }
+  if (await resolveQualityIssue(form.dataset.id || "", false, resolutionResult)) {
+    closeModal();
   }
 }
 
@@ -8835,7 +8950,7 @@ document.addEventListener("click", (event) => {
   }
   if (action === "apply-sync-run") applySyncRun(actionElement.dataset.id || "");
   if (action === "run-data-quality") runDataQuality();
-  if (action === "resolve-quality-issue") resolveQualityIssue(actionElement.dataset.id || "", false);
+  if (action === "resolve-quality-issue") openQualityIssueResolveModal(actionElement.dataset.id || "");
   if (action === "ignore-quality-issue") resolveQualityIssue(actionElement.dataset.id || "", true);
 });
 
@@ -9366,8 +9481,9 @@ document.addEventListener("submit", (event) => {
   if (type === "inventory-brand") handleInventoryBrandSubmit(form);
   if (type === "inventory-model") handleInventoryModelSubmit(form);
   if (type === "inventory-import") handleInventoryImportSubmit(form);
-  if (type === "inventory-log-note") handleInventoryMovementNoteSubmit(form);
+  if (type === "inventory-log-note-correction") handleInventoryMovementNoteSubmit(form);
   if (type === "inventory-purchase-note") handleInventoryPurchaseNoteSubmit(form);
+  if (type === "quality-issue-resolution") handleQualityIssueResolutionSubmit(form);
 });
 
 document.addEventListener("change", (event) => {

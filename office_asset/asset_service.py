@@ -349,6 +349,114 @@ class AssetService:
             reverse=True,
         )
 
+    def add_inventory_movement_note_correction(
+        self, movement_log_id: object, payload: dict, context: dict
+    ) -> dict:
+        movement_log_id_int = self.db.integer(movement_log_id, 0)
+        corrected_note = self.db.text(payload.get("correctedNote")).strip()
+        correction_reason = self.db.text(payload.get("correctionReason")).strip()
+        if movement_log_id_int <= 0:
+            raise self.api_error("物资流转记录不存在。")
+        if not corrected_note:
+            raise self.api_error("请填写更正后的备注。")
+        if not correction_reason:
+            raise self.api_error("请填写更正原因。")
+        if len(corrected_note) > 500 or len(correction_reason) > 500:
+            raise self.api_error("更正备注和更正原因不能超过 500 个字符。")
+
+        movement = self.db.json(
+            f"""
+            SELECT JSON_OBJECT(
+              'id', CAST(movement_log_id AS CHAR),
+              'typeName', COALESCE(type_name, ''),
+              'brandName', COALESCE(brand_name, ''),
+              'modelName', COALESCE(model_name, ''),
+              'originalNote', COALESCE(note, '')
+            )
+            FROM inventory_movement_log
+            WHERE movement_log_id = {movement_log_id_int}
+            """,
+            None,
+        )
+        if not movement:
+            raise self.api_error("物资流转记录不存在。")
+
+        entity_name = " / ".join(
+            item
+            for item in (
+                self.db.text(movement.get("typeName")),
+                self.db.text(movement.get("brandName")),
+                self.db.text(movement.get("modelName")),
+            )
+            if item
+        ) or f"流转记录 #{movement_log_id_int}"
+        actor_id = self._actor_id(context)
+        actor_name = self._actor_name(context)
+        output = self.db.execute(
+            f"""
+            START TRANSACTION;
+            SET @movement_exists = 0;
+            SET @original_note = '';
+            SELECT 1, COALESCE(note, '') INTO @movement_exists, @original_note
+            FROM inventory_movement_log
+            WHERE movement_log_id = {movement_log_id_int}
+            FOR UPDATE;
+            SET @previous_corrected_note = NULL;
+            SELECT corrected_note INTO @previous_corrected_note
+            FROM inventory_movement_note_correction
+            WHERE movement_log_id = {movement_log_id_int}
+            ORDER BY created_at DESC, correction_id DESC
+            LIMIT 1
+            FOR UPDATE;
+            INSERT INTO inventory_movement_note_correction (
+              movement_log_id, corrected_note, correction_reason, created_by
+            )
+            SELECT
+              {movement_log_id_int},
+              {self.db.quote(corrected_note)},
+              {self.db.quote(correction_reason)},
+              {actor_id if actor_id > 0 else "NULL"}
+            FROM DUAL
+            WHERE @movement_exists = 1;
+            SET @correction_id = IF(@movement_exists = 1, LAST_INSERT_ID(), 0);
+            INSERT INTO audit_log (
+              action_type, entity_type, entity_id, entity_name,
+              old_value, new_value, summary, actor, source
+            )
+            SELECT
+              'inventory_movement_note_corrected',
+              'inventory_movement_log',
+              {self.db.quote(str(movement_log_id_int))},
+              {self.db.quote(entity_name)},
+              JSON_OBJECT(
+                'originalNote', COALESCE(@original_note, ''),
+                'previousEffectiveNote', COALESCE(@previous_corrected_note, @original_note, '')
+              ),
+              JSON_OBJECT(
+                'correctionId', @correction_id,
+                'correctedNote', {self.db.quote(corrected_note)},
+                'correctionReason', {self.db.quote(correction_reason)}
+              ),
+              {self.db.quote("已更正物资流转记录备注。")},
+              {self.db.quote(actor_name)},
+              'api'
+            FROM DUAL
+            WHERE @correction_id > 0;
+            COMMIT;
+            SELECT @correction_id;
+            """
+        )
+        lines = [line.strip() for line in output.splitlines() if line.strip()]
+        correction_id = self.db.integer(lines[-1] if lines else 0, 0)
+        if correction_id <= 0:
+            raise self.conflict_error("物资流转记录已不存在或无法更正。")
+        return {
+            "id": str(correction_id),
+            "movementLogId": str(movement_log_id_int),
+            "correctedNote": corrected_note,
+            "correctionReason": correction_reason,
+        }
+
     def _audit_sql(
         self,
         action: str,

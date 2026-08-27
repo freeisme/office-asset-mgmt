@@ -317,6 +317,18 @@ class DomainApiRouter:
                 )
             )
             return True
+        if path.startswith("/api/inventory/movement-logs/") and path.endswith("/note-corrections") and method == "POST":
+            parts = path.split("/")
+            if len(parts) != 6 or parts[3] != "movement-logs" or parts[5] != "note-corrections":
+                raise self.deps.api_error("Invalid inventory movement note correction path.")
+            context = self._write_context(handler, "inventory_operations", "update")
+            send_json(
+                self.assets.add_inventory_movement_note_correction(
+                    parts[4], self._payload(handler), context
+                ),
+                status=201,
+            )
+            return True
 
         if path.startswith("/api/computers/") and path.endswith("/movement-history") and method == "GET":
             computer_id = path.split("/")[-2]
@@ -407,12 +419,12 @@ class DomainApiRouter:
         if path.startswith("/api/data-quality/issues/") and path.endswith("/resolve") and method == "POST":
             context = self._write_context(handler, "quality", "approve")
             issue_id = path.split("/")[-2]
-            send_json(self.quality.resolve(issue_id, context.get("id"), ignored=False))
+            send_json(self.quality.resolve(issue_id, self._payload(handler), context, ignored=False))
             return True
         if path.startswith("/api/data-quality/issues/") and path.endswith("/ignore") and method == "POST":
             context = self._write_context(handler, "quality", "approve")
             issue_id = path.split("/")[-2]
-            send_json(self.quality.resolve(issue_id, context.get("id"), ignored=True))
+            send_json(self.quality.resolve(issue_id, self._payload(handler), context, ignored=True))
             return True
 
         if path.startswith("/api/user-org-scopes/"):
