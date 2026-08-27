@@ -192,6 +192,10 @@ APP_DIR=/opt/office-asset-mgmt
 DEPLOY_TLS_CERT_FILE=/etc/office-asset-mgmt/tls/update-control.crt
 DEPLOY_TLS_KEY_FILE=/etc/office-asset-mgmt/tls/update-control.key
 DEPLOY_ALLOW_INSECURE_HTTP=false
+# Optional: map this exact private Gitea HTTP origin to the deployment account's SSH read URL.
+# Configure both values together. Do not include user names, passwords, access tokens, paths, or a trailing slash.
+DEPLOY_LOCAL_GITEA_HTTP_ORIGIN=http://192.168.253.25:3001
+DEPLOY_LOCAL_GITEA_SSH_ORIGIN=ssh://git@192.168.253.25:2222
 ```
 
 Set the same `DEPLOY_CONTROL_TOKEN` in `/opt/office-asset-mgmt/.env` as
@@ -244,7 +248,13 @@ then check published SemVer tags, select a higher version, and confirm the updat
 令牌。对 GitHub 等 HTTPS 仓库，更新控制服务与部署脚本固定使用 HTTP/1.1，并在连接重置、
 TLS 对端提前关闭等短暂传输失败时自动重试三次。可在服务环境中按需设置
 `DEPLOY_GIT_FETCH_ATTEMPTS=1-5` 和 `DEPLOY_GIT_FETCH_RETRY_SECONDS=1-30`；最终失败会向
-界面返回“更新项目暂时无法通过 HTTPS 获取”，不会误报为更新服务 HTTP 502。
+界面返回明确的仓库读取失败提示，不会误报为更新服务 HTTP 502。
+
+对于启用了登录认证的私有 Gitea，如果管理员在页面填写的项目地址与
+`DEPLOY_LOCAL_GITEA_HTTP_ORIGIN` 精确匹配，更新控制服务和实际部署脚本会仅在服务器内部
+改用 `DEPLOY_LOCAL_GITEA_SSH_ORIGIN` 读取同一路径。浏览器、数据库、审计日志和项目地址中
+仍保留原始 HTTP 地址，不会保存 Gitea 用户名、密码或访问令牌。两个变量必须同时设置；任何
+其他 HTTP/HTTPS/SSH 地址不会被转换。
 
 Each release must add a corresponding entry to `VERSION_NOTES.md`, including database
 migrations, backup requirements, configuration changes, and rollback notes.

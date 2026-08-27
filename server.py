@@ -879,7 +879,9 @@ def request_update_service(
             payload = {}
         print(f"Update service returned HTTP {exc.code}: {payload.get('error') or raw[:256]}")
         if payload.get("error") == "repository_fetch_failed":
-            raise ApiError("更新项目暂时无法通过 HTTPS 获取，请稍后重试。") from exc
+            raise ApiError(
+                "更新项目无法获取，请检查项目地址、GitHub 网络或本机 Gitea 的部署读取权限。"
+            ) from exc
         raise ApiError(f"服务器更新服务返回 HTTP {exc.code}。") from exc
     except (URLError, TimeoutError) as exc:
         print(f"Unable to connect to update service: {exc}")

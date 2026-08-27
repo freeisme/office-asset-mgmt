@@ -17,7 +17,7 @@ import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import parse_qs, urlparse, urlsplit
+from urllib.parse import parse_qs, urlparse, urlsplit, urlunsplit
 
 
 LOG = logging.getLogger("gitea-deploy")
@@ -69,6 +69,12 @@ ALLOW_INSECURE_HTTP = os.environ.get("DEPLOY_ALLOW_INSECURE_HTTP", "").lower() i
     "true",
     "yes",
 }
+LOCAL_GITEA_HTTP_ORIGIN = os.environ.get(
+    "DEPLOY_LOCAL_GITEA_HTTP_ORIGIN", ""
+).strip()
+LOCAL_GITEA_SSH_ORIGIN = os.environ.get(
+    "DEPLOY_LOCAL_GITEA_SSH_ORIGIN", ""
+).strip()
 
 state_lock = threading.Lock()
 git_lock = threading.Lock()
@@ -156,6 +162,51 @@ def _normalize_repository_url(value: object | None) -> str:
     if not re.fullmatch(r"/[A-Za-z0-9._~/%+-]+(?:\.git)?", parsed.path or ""):
         raise InvalidRepositoryUrlError("invalid repository path")
     return repository_url
+
+
+def _normalize_gitea_origin(value: object | None, allowed_scheme: str) -> str:
+    origin = "" if value is None else str(value).strip().rstrip("/")
+    if not origin:
+        return ""
+    parsed = urlsplit(origin)
+    if parsed.scheme != allowed_scheme or not parsed.netloc:
+        raise ValueError(f"local Gitea {allowed_scheme} origin is invalid")
+    if parsed.username and allowed_scheme != "ssh":
+        raise ValueError("local Gitea HTTP origin must not contain credentials")
+    if parsed.password or parsed.query or parsed.fragment or parsed.path not in {"", "/"}:
+        raise ValueError(f"local Gitea {allowed_scheme} origin is invalid")
+    _validate_repository_host(parsed.hostname or "")
+    if allowed_scheme == "http" and not _repository_host_allows_http(parsed.hostname or ""):
+        raise ValueError("local Gitea HTTP origin must be internal")
+    if allowed_scheme == "ssh" and parsed.username and not re.fullmatch(
+        r"[A-Za-z0-9._-]+", parsed.username
+    ):
+        raise ValueError("local Gitea SSH username is invalid")
+    return urlunsplit((parsed.scheme, parsed.netloc, "", "", ""))
+
+
+def _configured_local_gitea_origins() -> tuple[str, str]:
+    http_origin = _normalize_gitea_origin(LOCAL_GITEA_HTTP_ORIGIN, "http")
+    ssh_origin = _normalize_gitea_origin(LOCAL_GITEA_SSH_ORIGIN, "ssh")
+    if bool(http_origin) != bool(ssh_origin):
+        raise ValueError(
+            "DEPLOY_LOCAL_GITEA_HTTP_ORIGIN and DEPLOY_LOCAL_GITEA_SSH_ORIGIN must be set together"
+        )
+    return http_origin, ssh_origin
+
+
+def _fetch_remote_for_repository(repository_url: str) -> str:
+    repository_url = _normalize_repository_url(repository_url)
+    if not repository_url:
+        return repository_url
+    http_origin, ssh_origin = _configured_local_gitea_origins()
+    if not http_origin:
+        return repository_url
+    parsed = urlsplit(repository_url)
+    repository_origin = urlunsplit((parsed.scheme, parsed.netloc, "", "", ""))
+    if repository_origin != http_origin:
+        return repository_url
+    return f"{ssh_origin}{parsed.path}"
 
 
 def _normalize_release_channel(value: object | None) -> str:
@@ -346,7 +397,7 @@ def _fetch_repository(remote: str, branch_ref: str) -> None:
 def _fetch_update_source(repository_url: str = "") -> str:
     repository_url = _normalize_repository_url(repository_url)
     if repository_url:
-        _fetch_repository(repository_url, _candidate_branch_ref())
+        _fetch_repository(_fetch_remote_for_repository(repository_url), _candidate_branch_ref())
         return _candidate_branch_ref()
     _fetch_repository("origin", f"refs/remotes/origin/{DEPLOY_BRANCH}")
     return f"origin/{DEPLOY_BRANCH}"

@@ -355,12 +355,57 @@ class UpdateFetchTests(TestCase):
             with mock.patch.object(server, "urlopen", side_effect=error):
                 with self.assertRaisesRegex(
                     server.ApiError,
-                    "更新项目暂时无法通过 HTTPS 获取",
+                    "更新项目无法获取，请检查项目地址",
                 ):
                     server.request_update_service()
         finally:
             server.UPDATE_SERVICE_URL = original_url
             server.UPDATE_CONTROL_TOKEN = original_token
+
+    def test_local_gitea_http_repository_maps_to_configured_ssh_origin(self):
+        original_http_origin = deploy_webhook.LOCAL_GITEA_HTTP_ORIGIN
+        original_ssh_origin = deploy_webhook.LOCAL_GITEA_SSH_ORIGIN
+        try:
+            deploy_webhook.LOCAL_GITEA_HTTP_ORIGIN = "http://192.168.253.25:3001/"
+            deploy_webhook.LOCAL_GITEA_SSH_ORIGIN = "ssh://git@192.168.253.25:2222/"
+            self.assertEqual(
+                "ssh://git@192.168.253.25:2222/admin1/office-asset-mgmt.git",
+                deploy_webhook._fetch_remote_for_repository(
+                    "http://192.168.253.25:3001/admin1/office-asset-mgmt.git"
+                ),
+            )
+        finally:
+            deploy_webhook.LOCAL_GITEA_HTTP_ORIGIN = original_http_origin
+            deploy_webhook.LOCAL_GITEA_SSH_ORIGIN = original_ssh_origin
+
+    def test_local_gitea_mapping_does_not_apply_to_another_origin(self):
+        original_http_origin = deploy_webhook.LOCAL_GITEA_HTTP_ORIGIN
+        original_ssh_origin = deploy_webhook.LOCAL_GITEA_SSH_ORIGIN
+        try:
+            deploy_webhook.LOCAL_GITEA_HTTP_ORIGIN = "http://192.168.253.25:3001"
+            deploy_webhook.LOCAL_GITEA_SSH_ORIGIN = "ssh://git@192.168.253.25:2222"
+            repository_url = "http://192.168.253.26:3001/admin1/office-asset-mgmt.git"
+            self.assertEqual(
+                repository_url,
+                deploy_webhook._fetch_remote_for_repository(repository_url),
+            )
+        finally:
+            deploy_webhook.LOCAL_GITEA_HTTP_ORIGIN = original_http_origin
+            deploy_webhook.LOCAL_GITEA_SSH_ORIGIN = original_ssh_origin
+
+    def test_local_gitea_mapping_requires_both_origins(self):
+        original_http_origin = deploy_webhook.LOCAL_GITEA_HTTP_ORIGIN
+        original_ssh_origin = deploy_webhook.LOCAL_GITEA_SSH_ORIGIN
+        try:
+            deploy_webhook.LOCAL_GITEA_HTTP_ORIGIN = "http://192.168.253.25:3001"
+            deploy_webhook.LOCAL_GITEA_SSH_ORIGIN = ""
+            with self.assertRaisesRegex(ValueError, "must be set together"):
+                deploy_webhook._fetch_remote_for_repository(
+                    "http://192.168.253.25:3001/admin1/office-asset-mgmt.git"
+                )
+        finally:
+            deploy_webhook.LOCAL_GITEA_HTTP_ORIGIN = original_http_origin
+            deploy_webhook.LOCAL_GITEA_SSH_ORIGIN = original_ssh_origin
 
 
 class DeploymentScriptTests(TestCase):
@@ -473,7 +518,10 @@ class DeploymentScriptTests(TestCase):
         )
 
         self.assertIn("DEPLOY_REPOSITORY_URL", script)
+        self.assertIn("DEPLOY_LOCAL_GITEA_HTTP_ORIGIN", script)
+        self.assertIn("DEPLOY_LOCAL_GITEA_SSH_ORIGIN", script)
         self.assertIn("fetch_repository()", script)
+        self.assertIn("fetch_remote_for_repository()", script)
         self.assertIn("http.version=HTTP/1.1", script)
         self.assertIn("http.lowSpeedLimit=1", script)
         self.assertIn("http.lowSpeedTime=120", script)

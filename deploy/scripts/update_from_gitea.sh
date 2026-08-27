@@ -5,6 +5,8 @@ APP_DIR="${APP_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
 DEPLOY_BRANCH="${DEPLOY_BRANCH:-main}"
 DEPLOY_TARGET_SHA="${DEPLOY_TARGET_SHA:-${DEPLOY_EXPECTED_SHA:-}}"
 DEPLOY_REPOSITORY_URL="${DEPLOY_REPOSITORY_URL:-}"
+DEPLOY_LOCAL_GITEA_HTTP_ORIGIN="${DEPLOY_LOCAL_GITEA_HTTP_ORIGIN:-}"
+DEPLOY_LOCAL_GITEA_SSH_ORIGIN="${DEPLOY_LOCAL_GITEA_SSH_ORIGIN:-}"
 COMPOSE_FILE="${COMPOSE_FILE:-${APP_DIR}/compose.yaml}"
 ENV_FILE="${ENV_FILE:-${APP_DIR}/.env}"
 HEALTH_URL="${HEALTH_URL:-http://127.0.0.1:8000/api/health}"
@@ -76,6 +78,26 @@ fetch_repository() {
   done
 }
 
+fetch_remote_for_repository() {
+  local repository_url="$1"
+  local http_origin="${DEPLOY_LOCAL_GITEA_HTTP_ORIGIN%/}"
+  local ssh_origin="${DEPLOY_LOCAL_GITEA_SSH_ORIGIN%/}"
+
+  if [[ -z "${http_origin}" && -z "${ssh_origin}" ]]; then
+    printf '%s\n' "${repository_url}"
+    return 0
+  fi
+  if [[ -z "${http_origin}" || -z "${ssh_origin}" ]]; then
+    echo "DEPLOY_LOCAL_GITEA_HTTP_ORIGIN and DEPLOY_LOCAL_GITEA_SSH_ORIGIN must be set together." >&2
+    return 1
+  fi
+  if [[ "${repository_url}" == "${http_origin}/"* ]]; then
+    printf '%s%s\n' "${ssh_origin}" "${repository_url#"${http_origin}"}"
+    return 0
+  fi
+  printf '%s\n' "${repository_url}"
+}
+
 if [[ -n "${DEPLOY_REPOSITORY_URL}" ]]; then
   case "${DEPLOY_REPOSITORY_URL}" in
     https://*|http://*|ssh://*|*@*:*) ;;
@@ -86,7 +108,8 @@ if [[ -n "${DEPLOY_REPOSITORY_URL}" ]]; then
   esac
   echo "Fetching selected repository branch ${DEPLOY_BRANCH} ..."
   candidate_ref="refs/remotes/update-candidate/${DEPLOY_BRANCH}"
-  fetch_repository "${DEPLOY_REPOSITORY_URL}" "${candidate_ref}"
+  fetch_remote="$(fetch_remote_for_repository "${DEPLOY_REPOSITORY_URL}")"
+  fetch_repository "${fetch_remote}" "${candidate_ref}"
   remote_sha="$(git rev-parse "${candidate_ref}")"
   remote_label="${DEPLOY_REPOSITORY_URL}"
 else
