@@ -254,7 +254,10 @@ TLS 对端提前关闭等短暂传输失败时自动重试三次。可在服务�
 `DEPLOY_LOCAL_GITEA_HTTP_ORIGIN` 精确匹配，更新控制服务和实际部署脚本会仅在服务器内部
 改用 `DEPLOY_LOCAL_GITEA_SSH_ORIGIN` 读取同一路径。浏览器、数据库、审计日志和项目地址中
 仍保留原始 HTTP 地址，不会保存 Gitea 用户名、密码或访问令牌。两个变量必须同时设置；任何
-其他 HTTP/HTTPS/SSH 地址不会被转换。
+其他 HTTP/HTTPS/SSH 地址不会被转换。优先在
+`/etc/office-asset-mgmt/gitea-webhook.env` 配置这两个变量；若该服务环境文件由系统管理员
+集中管理，也可将同样的两个非敏感地址写入 `/opt/office-asset-mgmt/.env`，更新服务会在未设置
+对应系统环境变量时读取它们。`.env` 中不得写入 Gitea 账号、密码或访问令牌。
 
 Each release must add a corresponding entry to `VERSION_NOTES.md`, including database
 migrations, backup requirements, configuration changes, and rollback notes.

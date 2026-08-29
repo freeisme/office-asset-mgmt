@@ -1,8 +1,10 @@
 import importlib.util
 import io
+import os
 import re
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 from types import SimpleNamespace
 from unittest import TestCase, mock
@@ -406,6 +408,34 @@ class UpdateFetchTests(TestCase):
         finally:
             deploy_webhook.LOCAL_GITEA_HTTP_ORIGIN = original_http_origin
             deploy_webhook.LOCAL_GITEA_SSH_ORIGIN = original_ssh_origin
+
+    def test_local_gitea_mapping_can_load_non_secret_origins_from_app_env_file(self):
+        original_app_dir = deploy_webhook.APP_DIR
+        original_environment = os.environ.get("DEPLOY_LOCAL_GITEA_HTTP_ORIGIN")
+        try:
+            with tempfile.TemporaryDirectory() as temporary_directory:
+                env_path = Path(temporary_directory) / ".env"
+                env_path.write_text(
+                    "DEPLOY_LOCAL_GITEA_HTTP_ORIGIN=http://192.168.253.25:3001\n"
+                    "DEPLOY_LOCAL_GITEA_SSH_ORIGIN=ssh://git@192.168.253.25:2222\n",
+                    encoding="utf-8",
+                )
+                deploy_webhook.APP_DIR = Path(temporary_directory)
+                os.environ.pop("DEPLOY_LOCAL_GITEA_HTTP_ORIGIN", None)
+                self.assertEqual(
+                    "http://192.168.253.25:3001",
+                    deploy_webhook._deployment_setting("DEPLOY_LOCAL_GITEA_HTTP_ORIGIN"),
+                )
+                self.assertEqual(
+                    "ssh://git@192.168.253.25:2222",
+                    deploy_webhook._deployment_setting("DEPLOY_LOCAL_GITEA_SSH_ORIGIN"),
+                )
+        finally:
+            deploy_webhook.APP_DIR = original_app_dir
+            if original_environment is None:
+                os.environ.pop("DEPLOY_LOCAL_GITEA_HTTP_ORIGIN", None)
+            else:
+                os.environ["DEPLOY_LOCAL_GITEA_HTTP_ORIGIN"] = original_environment
 
 
 class DeploymentScriptTests(TestCase):

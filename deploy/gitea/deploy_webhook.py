@@ -69,12 +69,26 @@ ALLOW_INSECURE_HTTP = os.environ.get("DEPLOY_ALLOW_INSECURE_HTTP", "").lower() i
     "true",
     "yes",
 }
-LOCAL_GITEA_HTTP_ORIGIN = os.environ.get(
-    "DEPLOY_LOCAL_GITEA_HTTP_ORIGIN", ""
-).strip()
-LOCAL_GITEA_SSH_ORIGIN = os.environ.get(
-    "DEPLOY_LOCAL_GITEA_SSH_ORIGIN", ""
-).strip()
+
+
+def _deployment_setting(name: str) -> str:
+    environment_value = os.environ.get(name, "").strip()
+    if environment_value:
+        return environment_value
+
+    environment_file = APP_DIR / ".env"
+    try:
+        for line in environment_file.read_text(encoding="utf-8").splitlines():
+            key, separator, value = line.partition("=")
+            if separator and key.strip() == name:
+                return value.strip().strip("\"'")
+    except OSError:
+        pass
+    return ""
+
+
+LOCAL_GITEA_HTTP_ORIGIN = _deployment_setting("DEPLOY_LOCAL_GITEA_HTTP_ORIGIN")
+LOCAL_GITEA_SSH_ORIGIN = _deployment_setting("DEPLOY_LOCAL_GITEA_SSH_ORIGIN")
 
 state_lock = threading.Lock()
 git_lock = threading.Lock()
