@@ -255,6 +255,29 @@ def _enqueue_deployment(commit_sha: str, repository_url: str = "") -> None:
     threading.Thread(target=_deployment_worker, name="gitea-deploy", daemon=True).start()
 
 
+def _deployment_environment(commit_sha: str, repository_url: str) -> dict[str, str]:
+    """Build the child process environment from validated deployment settings."""
+    env = os.environ.copy()
+    env["DEPLOY_BRANCH"] = DEPLOY_BRANCH
+    env["DEPLOY_TARGET_SHA"] = commit_sha
+    if repository_url:
+        env["DEPLOY_REPOSITORY_URL"] = repository_url
+    else:
+        env.pop("DEPLOY_REPOSITORY_URL", None)
+
+    # The controller can read these non-secret values from APP_DIR/.env, while the
+    # deployment shell only receives its inherited process environment.
+    if LOCAL_GITEA_HTTP_ORIGIN:
+        env["DEPLOY_LOCAL_GITEA_HTTP_ORIGIN"] = LOCAL_GITEA_HTTP_ORIGIN
+    else:
+        env.pop("DEPLOY_LOCAL_GITEA_HTTP_ORIGIN", None)
+    if LOCAL_GITEA_SSH_ORIGIN:
+        env["DEPLOY_LOCAL_GITEA_SSH_ORIGIN"] = LOCAL_GITEA_SSH_ORIGIN
+    else:
+        env.pop("DEPLOY_LOCAL_GITEA_SSH_ORIGIN", None)
+    return env
+
+
 def _deployment_worker() -> None:
     global deployment_pending, deployment_running, pending_sha, pending_repository_url
 
@@ -267,13 +290,7 @@ def _deployment_worker() -> None:
             commit_sha = pending_sha
             repository_url = pending_repository_url
 
-        env = os.environ.copy()
-        env["DEPLOY_BRANCH"] = DEPLOY_BRANCH
-        env["DEPLOY_TARGET_SHA"] = commit_sha
-        if repository_url:
-            env["DEPLOY_REPOSITORY_URL"] = repository_url
-        else:
-            env.pop("DEPLOY_REPOSITORY_URL", None)
+        env = _deployment_environment(commit_sha, repository_url)
         LOG.info("Starting deployment for commit %s", commit_sha)
         try:
             with git_lock:

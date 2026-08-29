@@ -437,6 +437,34 @@ class UpdateFetchTests(TestCase):
             else:
                 os.environ["DEPLOY_LOCAL_GITEA_HTTP_ORIGIN"] = original_environment
 
+    def test_deployment_environment_passes_local_gitea_mapping_to_update_script(self):
+        original_http_origin = deploy_webhook.LOCAL_GITEA_HTTP_ORIGIN
+        original_ssh_origin = deploy_webhook.LOCAL_GITEA_SSH_ORIGIN
+        try:
+            deploy_webhook.LOCAL_GITEA_HTTP_ORIGIN = "http://192.168.253.25:3001"
+            deploy_webhook.LOCAL_GITEA_SSH_ORIGIN = "ssh://git@192.168.253.25:2222"
+            environment = deploy_webhook._deployment_environment(
+                "a" * 40,
+                "http://192.168.253.25:3001/admin1/office-asset-mgmt.git",
+            )
+        finally:
+            deploy_webhook.LOCAL_GITEA_HTTP_ORIGIN = original_http_origin
+            deploy_webhook.LOCAL_GITEA_SSH_ORIGIN = original_ssh_origin
+
+        self.assertEqual("a" * 40, environment["DEPLOY_TARGET_SHA"])
+        self.assertEqual(
+            "http://192.168.253.25:3001/admin1/office-asset-mgmt.git",
+            environment["DEPLOY_REPOSITORY_URL"],
+        )
+        self.assertEqual(
+            "http://192.168.253.25:3001",
+            environment["DEPLOY_LOCAL_GITEA_HTTP_ORIGIN"],
+        )
+        self.assertEqual(
+            "ssh://git@192.168.253.25:2222",
+            environment["DEPLOY_LOCAL_GITEA_SSH_ORIGIN"],
+        )
+
 
 class DeploymentScriptTests(TestCase):
     def test_repository_layout_has_canonical_paths_and_compatibility_entries(self):
