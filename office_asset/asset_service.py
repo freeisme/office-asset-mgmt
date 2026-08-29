@@ -1563,6 +1563,14 @@ class AssetService:
         output = self.db.execute(
             f"""
             START TRANSACTION;
+            SET @usage_quantity = 0;
+            SELECT quantity
+            INTO @usage_quantity
+            FROM {usage_table}
+            WHERE {usage_pk} = {usage_id}
+              AND is_active = 1
+            FOR UPDATE;
+            SET @return_allowed = IF(@usage_quantity >= {quantity}, 1, 0);
             SELECT allocation_id
             FROM inventory_allocation_history
             WHERE allocation_id = {allocation_id_int} AND status = 'active'
@@ -1572,16 +1580,17 @@ class AssetService:
                 returned_at = CURRENT_TIMESTAMP,
                 returned_by = {self._actor_id(context)}
             WHERE allocation_id = {allocation_id_int}
-              AND status = 'active';
+              AND status = 'active'
+              AND @return_allowed = 1;
             SET @returned_count = ROW_COUNT();
             UPDATE {usage_table}
             SET quantity = quantity - {quantity}
             WHERE {usage_pk} = {usage_id}
-              AND quantity >= {quantity}
+              AND quantity > {quantity}
               AND @returned_count = 1;
             DELETE FROM {usage_table}
             WHERE {usage_pk} = {usage_id}
-              AND quantity <= 0
+              AND quantity = {quantity}
               AND @returned_count = 1;
             UPDATE it_inventory_model
             SET quantity = quantity + {quantity}
@@ -1775,16 +1784,11 @@ class AssetService:
             FROM DUAL
             WHERE @return_allowed = 1;
             SET @allocation_id = IF(@return_allowed = 1, LAST_INSERT_ID(), 0);
-            UPDATE {usage_table}
-            SET quantity = quantity - @usage_quantity
-            WHERE {usage_pk} = {usage_id}
-              AND employee_id = {employee_id}
-              AND quantity = @usage_quantity
-              AND @return_allowed = 1;
             DELETE FROM {usage_table}
             WHERE {usage_pk} = {usage_id}
               AND employee_id = {employee_id}
-              AND quantity <= 0
+              AND is_active = 1
+              AND quantity = @usage_quantity
               AND @return_allowed = 1;
             UPDATE it_inventory_model
             SET quantity = quantity + @usage_quantity

@@ -880,6 +880,24 @@ class InventoryRecoveryRegressionTests(TestCase):
         self.assertIn("FOR UPDATE;", service)
         self.assertIn("Legacy usage reconciled during return.", service)
 
+    def test_inventory_returns_do_not_write_zero_quantity_usage_rows(self):
+        service = (ROOT / "office_asset" / "asset_service.py").read_text(encoding="utf-8")
+        allocation_return = service.split("    def return_inventory(", 1)[1].split(
+            "\n    def return_usage_inventory(",
+            1,
+        )[0]
+        legacy_return = service.split("    def return_usage_inventory(", 1)[1].split(
+            "\n    def list_allocations(",
+            1,
+        )[0]
+
+        self.assertIn("SET @usage_quantity = 0;", allocation_return)
+        self.assertIn("AND quantity > {quantity}", allocation_return)
+        self.assertIn("AND quantity = {quantity}", allocation_return)
+        self.assertNotIn("SET quantity = quantity - @usage_quantity", legacy_return)
+        self.assertIn("DELETE FROM {usage_table}", legacy_return)
+        self.assertIn("AND quantity = @usage_quantity", legacy_return)
+
 
 if __name__ == "__main__":
     import unittest
