@@ -355,6 +355,18 @@ class DomainApiRouter:
             )
             return True
 
+        if path.startswith("/api/employees/") and path.endswith("/offboard") and method == "POST":
+            parts = path.split("/")
+            if len(parts) != 5 or parts[2] != "employees" or parts[4] != "offboard":
+                raise self.deps.api_error("Invalid employee offboarding path.")
+            context = self._write_context(handler, "employees", "update")
+            send_json(
+                self.assets.offboard_employee(
+                    parts[3], self._payload(handler), context, self._idempotency_key(handler)
+                )
+            )
+            return True
+
         if path.startswith("/api/resources/"):
             parts = path.split("/")
             resource_modules = {

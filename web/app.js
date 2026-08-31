@@ -16,6 +16,7 @@ const API_BACKUPS_URL = "/api/backups";
 const API_UPDATE_CHECK_URL = "/api/updates/check";
 const API_UPDATE_APPLY_URL = "/api/updates/apply";
 const API_RESOURCES_URL = "/api/resources";
+const API_EMPLOYEES_URL = "/api/employees";
 const API_TICKETS_URL = "/api/tickets";
 const API_SERVICE_FORMS_URL = "/api/service/forms";
 const API_SERVICE_FORM_PERMISSIONS_URL = "/permissions";
@@ -124,6 +125,12 @@ const statusLabels = {
   active: "在职",
   inactive: "停用",
   left: "离职",
+};
+
+const offboardActionLabels = {
+  recover: "回收",
+  transfer: "转交他人",
+  exception: "异常待处理",
 };
 
 const roleLabels = {
@@ -676,6 +683,12 @@ function normalizeState(value) {
                 modelId: device.modelId || "",
                 brand: device.brand || "",
                 model: device.model || "",
+                action: device.action || "",
+                actionLabel: device.actionLabel || "",
+                targetEmployeeId: device.targetEmployeeId || "",
+                targetEmployeeNo: device.targetEmployeeNo || "",
+                targetEmployeeName: device.targetEmployeeName || "",
+                handlingNote: device.handlingNote || "",
               }))
             : [],
         }))
@@ -2504,15 +2517,22 @@ function employeeRecoveryDevices(employee) {
     .forEach((computer) => {
       devices.push({
         key: `computer:${computer.id}`,
+        id: computer.id,
+        sourceId: computer.id,
+        itemType: "computer",
         category: "computer",
         label: computer.deviceName,
         detail: [computer.brand, computer.model].filter(Boolean).join(" ") || computer.deviceType,
         quantity: 1,
+        status: computer.status || "in_use",
       });
     });
   (employee.monitors || []).forEach((monitor) => {
     devices.push({
       key: `monitor:${monitor.id}`,
+      id: monitor.id,
+      sourceId: monitor.id,
+      itemType: "monitor",
       category: "monitor",
       label: "\u663e\u793a\u5c4f",
       detail: [monitor.brand, monitor.model].filter(Boolean).join(" ") || "\u672a\u586b\u5199\u54c1\u724c\u578b\u53f7",
@@ -2530,6 +2550,9 @@ function employeeRecoveryDevices(employee) {
     if (!type || Number(item.quantity || 0) <= 0) return;
     devices.push({
       key: `nonasset:${item.id}`,
+      id: item.id,
+      sourceId: item.id,
+      itemType: "non_asset",
       category: "non-asset",
       label: type.name,
       detail: [item.brand, item.model].filter(Boolean).join(" ") || "\u672a\u586b\u5199\u54c1\u724c\u578b\u53f7",
@@ -2740,64 +2763,197 @@ async function confirmDeviceRecovery() {
   showToast(`已回收 ${pending.devices.length} 条物资并入库`);
 }
 
-function openLeaveRecoveryModal(employee, archiveInput) {
-  const devices = employeeRecoveryDevices(employee);
-  pendingLeaveRecovery = { employee, archiveInput, devices };
-  openModal(
-    `${modalHeader("离职物资回收", `${employee.name || employee.employeeNo} 即将离职`)}
-      <div class="recovery-list">
-        ${
-          devices.length
-            ? devices
-                .map((device) => {
-                  const recoverable = device.category !== "computer";
-                  return `
-                    <label class="recovery-row">
-                      <input type="checkbox" data-recovery-key="${escapeHtml(device.key)}" ${
-                        recoverable ? "checked" : "checked disabled"
-                      } />
-                      <span><strong>${escapeHtml(device.label)}</strong><small>${escapeHtml(
-                        `${device.detail}${device.quantity > 1 ? ` x${device.quantity}` : ""}`,
-                      )}${recoverable ? "" : " / 仅解除办公终端分配"}</small></span>
-                    </label>
-                  `;
-                })
-                .join("")
-            : '<div class="empty-state">当前无已分配设备</div>'
-        }
-      </div>
-      <div class="modal-footer"><button type="button" class="secondary-button" data-action="cancel-leave-recovery">取消</button><button class="primary-button" data-action="confirm-leave-recovery">确认离职并回收</button></div>`,
-    true,
+function offboardActionOptions(selected = "recover") {
+  return Object.entries(offboardActionLabels)
+    .map(
+      ([value, label]) =>
+        `<option value="${escapeHtml(value)}" ${selected === value ? "selected" : ""}>${escapeHtml(label)}</option>`,
+    )
+    .join("");
+}
+
+function offboardTargetEmployeeOptions(employeeId) {
+  return [{ value: "", label: "请选择接收人员" }].concat(
+    sortEmployees(state.employees)
+      .filter((employee) => employee.id !== employeeId && employee.status === "active")
+      .map((employee) => ({
+        value: employee.id,
+        label: `${employee.name} · ${employee.employeeNo} · ${orgName(employee.orgId)}`,
+      })),
   );
 }
 
-function confirmLeaveRecovery() {
-  const pending = pendingLeaveRecovery;
-  pendingLeaveRecovery = null;
-  if (!pending) return;
-  const selected = new Set(
-    [...document.querySelectorAll("[data-recovery-key]")]
-      .filter((input) => input.checked)
-      .map((input) => input.dataset.recoveryKey),
+function offboardItemTypeLabel(item) {
+  if (item.itemType === "computer" || item.category === "computer") return "办公终端";
+  if (item.itemType === "monitor" || item.category === "monitor") return "显示屏";
+  return "非资产物资";
+}
+
+function renderEmployeeOffboardItemRow(employee, item) {
+  const rowKey = `${item.itemType || item.category}:${item.sourceId || item.id}`;
+  const safeRowKey = rowKey.replace(/[^A-Za-z0-9_-]/g, "-");
+  const actionId = createControlId(`offboard-action-${safeRowKey}`);
+  const targetId = createControlId(`offboard-target-${safeRowKey}`);
+  const noteId = createControlId(`offboard-note-${safeRowKey}`);
+  return `
+    <article class="offboard-item-row" data-offboard-item-row data-item-type="${escapeHtml(
+      item.itemType || item.category,
+    )}" data-item-id="${escapeHtml(item.sourceId || item.id || "")}">
+      <div class="offboard-item-main">
+        <span class="status-pill status-idle">${escapeHtml(offboardItemTypeLabel(item))}</span>
+        <div>
+          <strong>${escapeHtml(item.label || "未命名项目")}</strong>
+          <small>${escapeHtml(`${item.detail || "未填写明细"}${item.quantity > 1 ? ` x${item.quantity}` : ""}`)}</small>
+        </div>
+      </div>
+      <div class="form-grid three offboard-item-controls">
+        <div class="form-field">
+          <label for="${actionId}">处理方式 *</label>
+          <select id="${actionId}" data-offboard-action required>${offboardActionOptions("recover")}</select>
+        </div>
+        <div class="form-field" data-offboard-target-field>
+          <label for="${targetId}">接收人员</label>
+          <select id="${targetId}" data-offboard-target>
+            ${offboardTargetEmployeeOptions(employee.id)
+              .map((option) => `<option value="${escapeHtml(option.value)}">${escapeHtml(option.label)}</option>`)
+              .join("")}
+          </select>
+        </div>
+        <div class="form-field">
+          <label for="${noteId}">处理说明</label>
+          <input id="${noteId}" data-offboard-note maxlength="500" placeholder="异常待处理时必填" />
+        </div>
+      </div>
+    </article>`;
+}
+
+function updateOffboardItemRow(row) {
+  if (!row) return;
+  const action = row.querySelector("[data-offboard-action]")?.value || "recover";
+  const targetField = row.querySelector("[data-offboard-target-field]");
+  const target = row.querySelector("[data-offboard-target]");
+  const note = row.querySelector("[data-offboard-note]");
+  if (targetField) targetField.hidden = action !== "transfer";
+  if (target) {
+    target.disabled = action !== "transfer";
+    target.required = action === "transfer";
+    if (action !== "transfer") target.value = "";
+  }
+  if (note) {
+    note.required = action === "exception";
+    note.placeholder = action === "exception" ? "请填写异常原因、后续责任人或处理计划" : "可填写交接或回收说明";
+  }
+}
+
+function refreshOffboardItemRows(root = document) {
+  root.querySelectorAll("[data-offboard-item-row]").forEach((row) => updateOffboardItemRow(row));
+}
+
+function openEmployeeOffboardModal(employeeId) {
+  const employee = getEmployee(employeeId);
+  if (!employee) return;
+  const devices = employeeRecoveryDevices(employee);
+  openModal(
+    `${modalHeader("办理离职", `${employee.name || employee.employeeNo} · 逐项确认资产和物资处理结果`)}
+      <form data-form="employee-offboard" data-id="${escapeHtml(employee.id)}">
+        <section class="modal-section">
+          <div class="form-grid">
+            ${inputField("人员编号", "employeeNo", employee.employeeNo || "", false, "", "text", "", 'readonly tabindex="-1"')}
+            ${inputField("人员姓名", "employeeName", employee.name || "", false, "", "text", "", 'readonly tabindex="-1"')}
+            ${inputField("所属组织", "orgPath", orgPathName(employee.orgId), false, "", "text", "", 'readonly tabindex="-1"')}
+            ${inputField("部门", "department", employee.department || "", false, "", "text", "", 'readonly tabindex="-1"')}
+            ${inputField("离职日期", "leaveDate", currentDateText(), true, "", "date")}
+          </div>
+          ${textareaField("离职原因", "leaveReason", "", true, "例如：合同到期、主动离职、岗位调整等", 3)}
+          ${textareaField("备注", "leaveRemark", "", true, "记录交接范围、资料归档位置或其他说明", 3)}
+        </section>
+        <section class="modal-section">
+          <div class="modal-section-title"><div><h3>资产与物资处理</h3><span>${devices.length} 项，必须逐项选择处理方式</span></div></div>
+          <div class="offboard-item-list">
+            ${
+              devices.length
+                ? devices.map((device) => renderEmployeeOffboardItemRow(employee, device)).join("")
+                : '<div class="empty-state">当前人员名下没有待处理资产或物资。</div>'
+            }
+          </div>
+        </section>
+        <div class="modal-footer"><button type="button" class="secondary-button" data-action="close-modal">取消</button><button class="primary-button" type="submit">确认办理离职</button></div>
+      </form>`,
+    true,
   );
-  const archived = archiveEmployee(pending.employee, pending.archiveInput);
-  pending.devices
-    .filter((device) => device.category !== "computer" && selected.has(device.key))
-    .forEach((device) =>
-      returnDeviceToInventory(device, {
-        sourceLabel: employeeLogLabel(pending.employee.employeeNo, pending.employee.name),
-        targetLabel: "IT物资库存",
-        note: "离职回收入库",
-        relatedEmployeeNo: pending.employee.employeeNo || "",
-        relatedEmployeeName: pending.employee.name || "",
-        triggerAction: "leave_recovery",
-      }),
+  refreshOffboardItemRows(document.querySelector('form[data-form="employee-offboard"]') || document);
+}
+
+function openLeaveRecoveryModal(employee) {
+  openEmployeeOffboardModal(employee?.id || "");
+}
+
+function confirmLeaveRecovery() {
+  pendingLeaveRecovery = null;
+  showToast("请通过“办理离职”表单提交受控离职流程。", true);
+  return null;
+}
+
+function leftEmployeeDeviceActionText(device) {
+  const actionLabel = device.actionLabel || offboardActionLabels[device.action] || "";
+  if (!actionLabel) return "";
+  const target = [device.targetEmployeeName, device.targetEmployeeNo ? `(${device.targetEmployeeNo})` : ""]
+    .filter(Boolean)
+    .join(" ");
+  return [actionLabel, target ? `接收人：${target}` : "", device.handlingNote || ""].filter(Boolean).join(" · ");
+}
+
+async function handleEmployeeOffboardSubmit(form) {
+  if (!hasPermission("employees", "update")) return showToast("当前账号没有办理离职权限。", true);
+  if (form.dataset.submitting === "1") return;
+  const employeeId = form.dataset.id || "";
+  const data = Object.fromEntries(new FormData(form).entries());
+  const leaveDate = String(data.leaveDate || "").trim();
+  const leaveReason = String(data.leaveReason || "").trim();
+  const leaveRemark = String(data.leaveRemark || "").trim();
+  if (!leaveDate || !leaveReason || !leaveRemark) {
+    return showToast("离职日期、离职原因和备注不能为空。", true);
+  }
+  const items = [...form.querySelectorAll("[data-offboard-item-row]")].map((row) => {
+    const action = row.querySelector("[data-offboard-action]")?.value || "";
+    return {
+      itemType: row.dataset.itemType || "",
+      itemId: row.dataset.itemId || "",
+      action,
+      targetEmployeeId: action === "transfer" ? row.querySelector("[data-offboard-target]")?.value || "" : "",
+      note: String(row.querySelector("[data-offboard-note]")?.value || "").trim(),
+    };
+  });
+  if (items.some((item) => !item.action)) return showToast("每项资产或物资都必须选择处理方式。", true);
+  if (items.some((item) => item.action === "transfer" && !item.targetEmployeeId)) {
+    return showToast("转交他人时必须选择接收人员。", true);
+  }
+  if (items.some((item) => item.action === "exception" && !item.note)) {
+    return showToast("异常待处理必须填写说明。", true);
+  }
+  form.dataset.submitting = "1";
+  const submit = form.querySelector('button[type="submit"]');
+  if (submit) submit.disabled = true;
+  try {
+    const result = await runCommand(
+      `${API_EMPLOYEES_URL}/${encodeURIComponent(employeeId)}/offboard`,
+      { leaveDate, leaveReason, leaveRemark, items },
+      "employee-offboard",
     );
-  persistState(true);
-  closeModal();
-  render();
-  showToast(`人员已归档，回收 ${Math.max(0, selected.size - pending.devices.filter((item) => item.category === "computer").length)} 条物资。`);
-  return archived;
+    closeModal();
+    await reloadDomainState();
+    if (settingsState.loaded && isAdminUser()) {
+      const usersPayload = await requestJson(API_USERS_URL);
+      settingsState.users = Array.isArray(usersPayload.users) ? usersPayload.users : [];
+    }
+    render();
+    showToast(`离职办理完成，处理 ${result.processedItems || items.length} 项，解绑账号 ${result.unboundAccounts || 0} 个。`);
+  } catch (error) {
+    showToast(`办理离职失败：${error.message}`, true);
+  } finally {
+    form.dataset.submitting = "0";
+    if (submit?.isConnected) submit.disabled = false;
+  }
 }
 
 function leftEmployeeDeviceChips(devices) {
@@ -2806,7 +2962,9 @@ function leftEmployeeDeviceChips(devices) {
     .map(
       (device) =>
         `<span class="device-chip">${escapeHtml(device.label)}<small>${escapeHtml(
-          [device.detail, device.quantity > 1 ? `x${device.quantity}` : ""].filter(Boolean).join(" · "),
+          [device.detail, device.quantity > 1 ? `x${device.quantity}` : "", leftEmployeeDeviceActionText(device)]
+            .filter(Boolean)
+            .join(" · "),
         )}</small></span>`,
     )
     .join("")}</div>`;
@@ -3587,6 +3745,7 @@ const auditActionLabels = {
   employee_added: "新增人员",
   employee_removed: "删除人员",
   employee_archived: "离职归档",
+  employee_offboarded: "办理离职",
   employee_status_changed: "人员状态变更",
   computer_status_changed: "办公终端状态变更",
   computer_assignment_changed: "办公终端分配变更",
@@ -5374,6 +5533,13 @@ function renderEmployeeTreeRow(employee) {
       <div class="inline-actions">
         <button class="text-button" data-action="manage-devices" data-id="${escapeHtml(employee.id)}">设备</button>
         <button class="text-button" data-action="open-employee" data-id="${escapeHtml(employee.id)}">编辑</button>
+        ${
+          hasPermission("employees", "update") && employee.status !== "left"
+            ? `<button class="text-button danger" data-action="open-employee-offboard" data-id="${escapeHtml(
+                employee.id,
+              )}">办理离职</button>`
+            : ""
+        }
       </div>
     </article>
   `;
@@ -5420,6 +5586,13 @@ function renderEmployeeTable(employees, withActions) {
                     ? `<td><div class="inline-actions">
                         <button class="text-button" data-action="manage-devices" data-id="${escapeHtml(employee.id)}">设备</button>
                         <button class="text-button" data-action="open-employee" data-id="${escapeHtml(employee.id)}">编辑</button>
+                        ${
+                          hasPermission("employees", "update") && employee.status !== "left"
+                            ? `<button class="text-button danger" data-action="open-employee-offboard" data-id="${escapeHtml(
+                                employee.id,
+                              )}">办理离职</button>`
+                            : ""
+                        }
                       </div></td>`
                     : ""
                 }
@@ -7961,6 +8134,10 @@ document.addEventListener("click", (event) => {
 
   if (action === "open-computer") openComputerModal(actionElement.dataset.id || "");
   if (action === "open-employee") openEmployeeModal(actionElement.dataset.id || "", actionElement.dataset.orgId || "");
+  if (action === "open-employee-offboard") {
+    openEmployeeOffboardModal(actionElement.dataset.id || "");
+    return;
+  }
   if (action === "create-database-backup") {
     handleDatabaseBackupCreate(actionElement);
     return;
@@ -9439,6 +9616,7 @@ document.addEventListener("submit", (event) => {
   }
   if (type === "computer") handleComputerSubmit(form);
   if (type === "employee") handleEmployeeSubmit(form);
+  if (type === "employee-offboard") handleEmployeeOffboardSubmit(form);
   if (type === "monitor") handleMonitorSubmit(form);
   if (type === "nonasset") handleNonAssetSubmit(form);
   if (type === "org") handleOrgSubmit(form);
@@ -9530,6 +9708,11 @@ document.addEventListener("change", (event) => {
   const deviceForm = event.target.closest('form[data-form="monitor"], form[data-form="nonasset"]');
   if (deviceForm && ["typeId", "brandId", "modelId"].includes(event.target.name)) {
     updateDeviceInventorySelectors(deviceForm, event.target.name);
+    return;
+  }
+  const offboardForm = event.target.closest('form[data-form="employee-offboard"]');
+  if (offboardForm && event.target.matches("[data-offboard-action]")) {
+    updateOffboardItemRow(event.target.closest("[data-offboard-item-row]"));
     return;
   }
   const employeeForm = event.target.closest('form[data-form="employee"]');

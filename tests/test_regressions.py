@@ -784,6 +784,52 @@ class EmployeeWorkflowUiTests(TestCase):
         self.assertIn("function openLeftEmployeeModal", app)
         self.assertIn("离职时设备快照", app)
 
+    def test_employee_offboarding_is_an_independent_backend_command(self):
+        app = (ROOT / "web" / "app.js").read_text(encoding="utf-8")
+        router = (ROOT / "office_asset" / "api_router.py").read_text(encoding="utf-8")
+        service = (ROOT / "office_asset" / "asset_service.py").read_text(encoding="utf-8")
+        server_source = (ROOT / "server.py").read_text(encoding="utf-8")
+
+        self.assertIn('const API_EMPLOYEES_URL = "/api/employees";', app)
+        self.assertIn('data-action="open-employee-offboard"', app)
+        self.assertIn('data-form="employee-offboard"', app)
+        self.assertIn("function handleEmployeeOffboardSubmit", app)
+        self.assertIn("${API_EMPLOYEES_URL}/${encodeURIComponent(employeeId)}/offboard", app)
+        self.assertIn("请通过“办理离职”表单提交受控离职流程。", app)
+        self.assertNotIn("const archived = archiveEmployee(pending.employee", app)
+
+        self.assertIn("/api/employees/", router)
+        self.assertIn("/offboard", router)
+        self.assertIn('self._write_context(handler, "employees", "update")', router)
+        self.assertIn("offboard_employee", router)
+
+        self.assertIn("def offboard_employee(", service)
+        self.assertIn('"recover": "回收"', service)
+        self.assertIn("办理离职需要使用人员的全部数据或所属部门数据权限。", service)
+        self.assertIn("left_employee_archive", service)
+        self.assertIn("UPDATE auth_session session", service)
+        self.assertIn("SET employee_id = NULL", service)
+        self.assertIn("service_notification", service)
+        self.assertIn("employee_offboarded", service)
+        self.assertIn("api_idempotency_key", service)
+        self.assertIn('"employee_offboarded": "办理离职"', server_source)
+
+    def test_employee_offboarding_requires_complete_item_handling(self):
+        service = (ROOT / "office_asset" / "asset_service.py").read_text(encoding="utf-8")
+        app = (ROOT / "web" / "app.js").read_text(encoding="utf-8")
+
+        self.assertIn("离职日期、离职原因和备注不能为空。", service)
+        self.assertIn("当前名下资产或物资必须逐项处理后才能办理离职。", service)
+        self.assertIn("异常待处理必须填写说明。", service)
+        self.assertIn("转交他人时必须选择接收人员。", service)
+        self.assertIn("离职资产只能转交给在职人员。", service)
+        self.assertIn("离职办理异常待处理", service)
+        self.assertIn("离职办理转交给", service)
+        self.assertIn("离职办理回收入库", service)
+        self.assertIn("targetEmployeeName", app)
+        self.assertIn("leftEmployeeDeviceActionText", app)
+        self.assertIn("异常待处理必须填写说明。", app)
+
 
 class FlowRecordUiTests(TestCase):
     def test_flow_page_has_filters_export_classification_and_inline_notes(self):

@@ -20,6 +20,13 @@ COMPUTER_STATUS_TRANSITIONS = {
 }
 
 
+OFFBOARD_ACTION_LABELS = {
+    "recover": "回收",
+    "transfer": "转交他人",
+    "exception": "异常待处理",
+}
+
+
 @dataclass
 class AssetService:
     db: SqlGateway
@@ -1884,6 +1891,924 @@ class AssetService:
                 if self.db.integer(row.get("issuedBy"), 0) == self._actor_id(context)
             ]
         return rows
+
+    def _sql_id_list(self, values: list[int]) -> str:
+        ids = [str(value) for value in sorted({value for value in values if value > 0})]
+        return ", ".join(ids) if ids else "0"
+
+    def _nullable_id_sql(self, value: object) -> str:
+        value_int = self.db.integer(value, 0)
+        return str(value_int) if value_int > 0 else "NULL"
+
+    def _offboard_note(self, prefix: str, note: str = "") -> str:
+        note = self.db.text(note).strip()
+        return (f"{prefix}：{note}" if note else prefix)[:500]
+
+    def _org_path(self, org_id: object) -> str:
+        org_id_text = self.db.text(org_id)
+        if not org_id_text:
+            return ""
+        rows = self.db.json(
+            """
+            SELECT COALESCE(JSON_ARRAYAGG(JSON_OBJECT(
+              'id', CAST(org_unit_id AS CHAR),
+              'parentId', COALESCE(CAST(parent_org_unit_id AS CHAR), ''),
+              'name', org_name
+            )), JSON_ARRAY())
+            FROM org_unit
+            WHERE is_active = 1
+            """,
+            [],
+        )
+        by_id = {self.db.text(row.get("id")): row for row in rows or []}
+        current = by_id.get(org_id_text)
+        visited: set[str] = set()
+        path: list[str] = []
+        while current and self.db.text(current.get("id")) not in visited:
+            current_id = self.db.text(current.get("id"))
+            visited.add(current_id)
+            path.append(self.db.text(current.get("name")))
+            current = by_id.get(self.db.text(current.get("parentId")))
+        return " / ".join(part for part in reversed(path) if part)
+
+    def _offboarding_employee(self, employee_id: int) -> dict:
+        employee = self.db.json(
+            f"""
+            SELECT JSON_OBJECT(
+              'id', CAST(employee.employee_id AS CHAR),
+              'employeeNo', employee.employee_no,
+              'name', employee.employee_name,
+              'orgId', COALESCE(CAST(employee.org_unit_id AS CHAR), ''),
+              'department', COALESCE(employee.department, ''),
+              'position', COALESCE(employee.position_name, ''),
+              'email', COALESCE(employee.email, ''),
+              'mobile', COALESCE(employee.mobile, ''),
+              'status', employee.employment_status
+            )
+            FROM employee
+            WHERE employee.employee_id = {employee_id}
+              AND employee.is_active = 1
+            """,
+            None,
+        )
+        if not employee:
+            raise self.api_error("人员不存在。")
+        result = dict(employee)
+        result["orgPath"] = self._org_path(result.get("orgId"))
+        return result
+
+    def _offboarding_items(self, employee_id: int) -> list[dict]:
+        computers = self.db.json(
+            f"""
+            SELECT COALESCE(JSON_ARRAYAGG(JSON_OBJECT(
+              'itemType', 'computer',
+              'id', CAST(computer_id AS CHAR),
+              'key', CONCAT('computer:', computer_id),
+              'label', device_name,
+              'detail', detail,
+              'quantity', 1,
+              'status', it_asset_status,
+              'assignmentId', CAST(assignment_id AS CHAR)
+            )), JSON_ARRAY())
+            FROM (
+              SELECT
+                asset.computer_id,
+                asset.device_name,
+                TRIM(CONCAT_WS(' ', asset.brand, asset.model)) AS detail,
+                asset.it_asset_status,
+                assignment.assignment_id
+              FROM computer_assignment assignment
+              JOIN computer_asset asset ON asset.computer_id = assignment.computer_id
+              WHERE assignment.employee_id = {employee_id}
+                AND assignment.returned_at IS NULL
+                AND assignment.assignment_status = 'active'
+                AND asset.is_active = 1
+              ORDER BY asset.device_name, asset.computer_id
+            ) active_computers
+            """,
+            [],
+        )
+        monitors = self.db.json(
+            f"""
+            SELECT COALESCE(JSON_ARRAYAGG(JSON_OBJECT(
+              'itemType', 'monitor',
+              'id', CAST(monitor_usage_id AS CHAR),
+              'key', CONCAT('monitor:', monitor_usage_id),
+              'label', COALESCE(type_name, '显示屏'),
+              'detail', detail,
+              'quantity', quantity,
+              'typeId', COALESCE(CAST(non_asset_type_id AS CHAR), ''),
+              'typeName', COALESCE(type_name, '显示屏'),
+              'brandId', COALESCE(CAST(inventory_brand_id AS CHAR), ''),
+              'modelId', COALESCE(CAST(inventory_model_id AS CHAR), ''),
+              'brand', display_name,
+              'model', model,
+              'stockAdjusted', stock_adjusted
+            )), JSON_ARRAY())
+            FROM (
+              SELECT
+                usage_row.monitor_usage_id,
+                usage_row.non_asset_type_id,
+                usage_row.inventory_brand_id,
+                usage_row.inventory_model_id,
+                COALESCE(type_row.type_name, '显示屏') AS type_name,
+                usage_row.display_name,
+                usage_row.model,
+                TRIM(CONCAT_WS(' ', usage_row.display_name, usage_row.model)) AS detail,
+                usage_row.quantity,
+                usage_row.stock_adjusted
+              FROM employee_monitor_usage usage_row
+              LEFT JOIN non_asset_type type_row
+                ON type_row.non_asset_type_id = usage_row.non_asset_type_id
+              WHERE usage_row.employee_id = {employee_id}
+                AND usage_row.is_active = 1
+              ORDER BY usage_row.monitor_usage_id
+            ) active_monitors
+            """,
+            [],
+        )
+        non_assets = self.db.json(
+            f"""
+            SELECT COALESCE(JSON_ARRAYAGG(JSON_OBJECT(
+              'itemType', 'non_asset',
+              'id', CAST(non_asset_usage_id AS CHAR),
+              'key', CONCAT('non_asset:', non_asset_usage_id),
+              'label', type_name,
+              'detail', detail,
+              'quantity', quantity,
+              'typeId', CAST(non_asset_type_id AS CHAR),
+              'typeName', type_name,
+              'brandId', COALESCE(CAST(inventory_brand_id AS CHAR), ''),
+              'modelId', COALESCE(CAST(inventory_model_id AS CHAR), ''),
+              'brand', brand,
+              'model', model,
+              'stockAdjusted', stock_adjusted
+            )), JSON_ARRAY())
+            FROM (
+              SELECT
+                usage_row.non_asset_usage_id,
+                usage_row.non_asset_type_id,
+                usage_row.inventory_brand_id,
+                usage_row.inventory_model_id,
+                COALESCE(type_row.type_name, '非资产物资') AS type_name,
+                usage_row.brand,
+                usage_row.model,
+                TRIM(CONCAT_WS(' ', usage_row.brand, usage_row.model)) AS detail,
+                usage_row.quantity,
+                usage_row.stock_adjusted
+              FROM employee_non_asset_usage usage_row
+              JOIN non_asset_type type_row
+                ON type_row.non_asset_type_id = usage_row.non_asset_type_id
+              WHERE usage_row.employee_id = {employee_id}
+                AND usage_row.is_active = 1
+              ORDER BY type_row.type_name, usage_row.non_asset_usage_id
+            ) active_non_assets
+            """,
+            [],
+        )
+        items = list(computers or []) + list(monitors or []) + list(non_assets or [])
+        for item in items:
+            item_type = self.db.text(item.get("itemType"))
+            item["id"] = self.db.text(item.get("id"))
+            item["key"] = f"{item_type}:{item['id']}"
+            item["detail"] = self.db.text(item.get("detail")) or (
+                self.db.text(item.get("status")) if item_type == "computer" else "未填写品牌型号"
+            )
+            item["quantity"] = max(1, self.db.integer(item.get("quantity"), 1))
+            item["stockAdjusted"] = parse_bool(item.get("stockAdjusted"), False)
+        return items
+
+    def _normalize_offboarding_plan(
+        self,
+        employee_id: int,
+        current_items: list[dict],
+        raw_items: object,
+        context: dict,
+    ) -> list[dict]:
+        if raw_items is None:
+            raw_items = []
+        if not isinstance(raw_items, list):
+            raise self.api_error("离职资产处理清单必须是数组。")
+
+        current_by_key = {self.db.text(item.get("key")): item for item in current_items}
+        submitted_keys: list[str] = []
+        normalized: list[dict] = []
+        target_cache: dict[int, dict] = {}
+        for raw_item in raw_items:
+            if not isinstance(raw_item, dict):
+                raise self.api_error("离职资产处理项格式无效。")
+            item_type = self.db.text(raw_item.get("itemType") or raw_item.get("category")).replace("-", "_")
+            if item_type == "nonasset":
+                item_type = "non_asset"
+            item_id = self.db.integer(raw_item.get("itemId") or raw_item.get("id"), 0)
+            key = f"{item_type}:{item_id}"
+            if item_id <= 0 or key not in current_by_key:
+                raise self.api_error("离职资产处理清单包含不存在或已变化的项目，请刷新后重试。")
+            if key in submitted_keys:
+                raise self.api_error("离职资产处理清单包含重复项目。")
+            action = self.db.text(raw_item.get("action"))
+            if action not in OFFBOARD_ACTION_LABELS:
+                raise self.api_error("每项资产或物资都必须选择处理方式。")
+            note = self.db.text(raw_item.get("note") or raw_item.get("handlingNote")).strip()
+            if len(note) > 500:
+                raise self.api_error("单项处理说明不能超过 500 个字符。")
+            target: dict | None = None
+            target_id = self.db.integer(raw_item.get("targetEmployeeId"), 0)
+            if action == "transfer":
+                if target_id <= 0:
+                    raise self.api_error("转交他人时必须选择接收人员。")
+                if target_id == employee_id:
+                    raise self.api_error("离职资产不能转交给离职人员本人。")
+                target = target_cache.get(target_id)
+                if target is None:
+                    target = self._employee(target_id)
+                    if self.db.text(target.get("status")) != "active":
+                        raise self.api_error("离职资产只能转交给在职人员。")
+                    self.scope.assert_org_access(context, target.get("orgId"))
+                    target_cache[target_id] = target
+            elif target_id > 0:
+                raise self.api_error("只有转交他人时才能选择接收人员。")
+            if action == "exception" and not note:
+                raise self.api_error("异常待处理必须填写说明。")
+
+            current = dict(current_by_key[key])
+            current.update(
+                {
+                    "action": action,
+                    "actionLabel": OFFBOARD_ACTION_LABELS[action],
+                    "note": note,
+                    "targetEmployeeId": str(target_id) if target_id > 0 else "",
+                    "targetEmployeeNo": self.db.text(target.get("employeeNo")) if target else "",
+                    "targetEmployeeName": self.db.text(target.get("name")) if target else "",
+                }
+            )
+            if action == "recover" and current["itemType"] != "computer":
+                if parse_bool(current.get("stockAdjusted"), False) and self.db.integer(current.get("modelId"), 0) <= 0:
+                    raise self.conflict_error("已扣减库存的物资缺少库存型号，无法通过离职回收自动入库。")
+            submitted_keys.append(key)
+            normalized.append(current)
+
+        current_keys = set(current_by_key)
+        submitted_key_set = set(submitted_keys)
+        if current_keys != submitted_key_set:
+            raise self.api_error("当前名下资产或物资必须逐项处理后才能办理离职。")
+        return normalized
+
+    def offboard_employee(
+        self,
+        employee_id: object,
+        payload: dict,
+        context: dict,
+        idempotency_key: str = "",
+    ) -> dict:
+        cached = self._idempotency_result("employee.offboard", idempotency_key, payload)
+        if cached:
+            return cached
+
+        employee_id_int = self.db.integer(employee_id, 0)
+        if employee_id_int <= 0:
+            raise self.api_error("人员不存在。")
+        permission_scope = self._permission_scope(context, "employees")
+        if permission_scope not in {"all", "organization"}:
+            raise self.forbidden_error("办理离职需要使用人员的全部数据或所属部门数据权限。")
+        if self._actor_employee_id(context) == employee_id_int:
+            raise self.conflict_error("当前登录账号不能办理自身绑定人员离职。")
+
+        leave_date = self.db.text(payload.get("leaveDate")).strip()
+        leave_reason = self.db.text(payload.get("leaveReason") or payload.get("leaveInfo")).strip()
+        leave_remark = self.db.text(payload.get("leaveRemark")).strip()
+        if not leave_date or not leave_reason or not leave_remark:
+            raise self.api_error("离职日期、离职原因和备注不能为空。")
+        try:
+            datetime.strptime(leave_date, "%Y-%m-%d")
+        except ValueError as exc:
+            raise self.api_error("离职日期格式必须为 YYYY-MM-DD。") from exc
+        if len(leave_reason) > 500 or len(leave_remark) > 500:
+            raise self.api_error("离职原因和备注不能超过 500 个字符。")
+
+        employee = self._offboarding_employee(employee_id_int)
+        if self.db.text(employee.get("status")) == "left":
+            raise self.conflict_error("该人员已经办理离职。")
+        self.scope.assert_org_access(context, employee.get("orgId"))
+        current_items = self._offboarding_items(employee_id_int)
+        plan = self._normalize_offboarding_plan(employee_id_int, current_items, payload.get("items"), context)
+
+        snapshot = []
+        for item in plan:
+            snapshot.append(
+                {
+                    "category": item.get("itemType"),
+                    "label": self.db.text(item.get("label")),
+                    "detail": self.db.text(item.get("detail")),
+                    "quantity": self.db.integer(item.get("quantity"), 1),
+                    "typeId": self.db.text(item.get("typeId")),
+                    "typeName": self.db.text(item.get("typeName")),
+                    "brandId": self.db.text(item.get("brandId")),
+                    "modelId": self.db.text(item.get("modelId")),
+                    "brand": self.db.text(item.get("brand")),
+                    "model": self.db.text(item.get("model")),
+                    "action": item.get("action"),
+                    "actionLabel": item.get("actionLabel"),
+                    "targetEmployeeId": item.get("targetEmployeeId"),
+                    "targetEmployeeNo": item.get("targetEmployeeNo"),
+                    "targetEmployeeName": item.get("targetEmployeeName"),
+                    "handlingNote": item.get("note"),
+                }
+            )
+
+        computer_ids = [self.db.integer(item.get("id"), 0) for item in plan if item.get("itemType") == "computer"]
+        monitor_ids = [self.db.integer(item.get("id"), 0) for item in plan if item.get("itemType") == "monitor"]
+        non_asset_ids = [self.db.integer(item.get("id"), 0) for item in plan if item.get("itemType") == "non_asset"]
+        target_ids = [
+            self.db.integer(item.get("targetEmployeeId"), 0)
+            for item in plan
+            if self.db.integer(item.get("targetEmployeeId"), 0) > 0
+        ]
+        recover_model_ids = [
+            self.db.integer(item.get("modelId"), 0)
+            for item in plan
+            if item.get("itemType") != "computer"
+            and item.get("action") == "recover"
+            and parse_bool(item.get("stockAdjusted"), False)
+        ]
+
+        computer_id_sql = self._sql_id_list(computer_ids)
+        monitor_id_sql = self._sql_id_list(monitor_ids)
+        non_asset_id_sql = self._sql_id_list(non_asset_ids)
+        target_id_sql = self._sql_id_list(target_ids)
+        recover_model_id_sql = self._sql_id_list(recover_model_ids)
+        distinct_target_count = len({value for value in target_ids if value > 0})
+        distinct_recover_model_count = len({value for value in recover_model_ids if value > 0})
+        actor_id = self._actor_id(context)
+        actor_sql = str(actor_id) if actor_id > 0 else "NULL"
+        employee_name = self.db.text(employee.get("name"))
+        employee_no = self.db.text(employee.get("employeeNo"))
+        employee_label = f"{employee_name}（{employee_no}）" if employee_no else employee_name
+
+        statements: list[str] = [
+            "START TRANSACTION",
+            "SET @processed_item_count = 0",
+            "SET @archive_id = 0",
+            f"""
+            SELECT employee_id
+            FROM employee
+            WHERE employee_id = {employee_id_int}
+              AND is_active = 1
+            FOR UPDATE
+            """,
+            f"""
+            SELECT assignment_id
+            FROM computer_assignment
+            WHERE employee_id = {employee_id_int}
+              AND returned_at IS NULL
+              AND assignment_status = 'active'
+            FOR UPDATE
+            """,
+            f"""
+            SELECT monitor_usage_id
+            FROM employee_monitor_usage
+            WHERE employee_id = {employee_id_int}
+              AND is_active = 1
+            FOR UPDATE
+            """,
+            f"""
+            SELECT non_asset_usage_id
+            FROM employee_non_asset_usage
+            WHERE employee_id = {employee_id_int}
+              AND is_active = 1
+            FOR UPDATE
+            """,
+        ]
+        if distinct_target_count:
+            statements.append(
+                f"""
+                SELECT employee_id
+                FROM employee
+                WHERE employee_id IN ({target_id_sql})
+                  AND is_active = 1
+                FOR UPDATE
+                """
+            )
+        if distinct_recover_model_count:
+            statements.append(
+                f"""
+                SELECT model_id
+                FROM it_inventory_model
+                WHERE model_id IN ({recover_model_id_sql})
+                  AND is_active = 1
+                FOR UPDATE
+                """
+            )
+
+        statements.extend(
+            [
+                f"""
+                SET @current_item_count = (
+                  SELECT
+                    (SELECT COUNT(*)
+                     FROM computer_assignment
+                     WHERE employee_id = {employee_id_int}
+                       AND returned_at IS NULL
+                       AND assignment_status = 'active')
+                    +
+                    (SELECT COUNT(*)
+                     FROM employee_monitor_usage
+                     WHERE employee_id = {employee_id_int}
+                       AND is_active = 1)
+                    +
+                    (SELECT COUNT(*)
+                     FROM employee_non_asset_usage
+                     WHERE employee_id = {employee_id_int}
+                       AND is_active = 1)
+                )
+                """,
+                f"""
+                SET @matched_item_count = (
+                  SELECT
+                    (SELECT COUNT(*)
+                     FROM computer_assignment
+                     WHERE employee_id = {employee_id_int}
+                       AND returned_at IS NULL
+                       AND assignment_status = 'active'
+                       AND computer_id IN ({computer_id_sql}))
+                    +
+                    (SELECT COUNT(*)
+                     FROM employee_monitor_usage
+                     WHERE employee_id = {employee_id_int}
+                       AND is_active = 1
+                       AND monitor_usage_id IN ({monitor_id_sql}))
+                    +
+                    (SELECT COUNT(*)
+                     FROM employee_non_asset_usage
+                     WHERE employee_id = {employee_id_int}
+                       AND is_active = 1
+                       AND non_asset_usage_id IN ({non_asset_id_sql}))
+                )
+                """,
+                f"""
+                SET @offboard_allowed = IF(
+                  (SELECT COUNT(*)
+                   FROM employee
+                   WHERE employee_id = {employee_id_int}
+                     AND is_active = 1
+                     AND employment_status <> 'left') = 1
+                  AND @current_item_count = {len(plan)}
+                  AND @matched_item_count = {len(plan)}
+                  AND (SELECT COUNT(*)
+                       FROM employee
+                       WHERE employee_id IN ({target_id_sql})
+                         AND is_active = 1
+                         AND employment_status = 'active') = {distinct_target_count}
+                  AND (SELECT COUNT(*)
+                       FROM it_inventory_model
+                       WHERE model_id IN ({recover_model_id_sql})
+                         AND is_active = 1) = {distinct_recover_model_count},
+                  1,
+                  0
+                )
+                """,
+            ]
+        )
+
+        for item in plan:
+            item_type = self.db.text(item.get("itemType"))
+            item_id = self.db.integer(item.get("id"), 0)
+            quantity = max(1, self.db.integer(item.get("quantity"), 1))
+            action = self.db.text(item.get("action"))
+            handling_note = self.db.text(item.get("note"))
+
+            if item_type == "computer":
+                if action == "transfer":
+                    target_id = self.db.integer(item.get("targetEmployeeId"), 0)
+                    target_name = self.db.text(item.get("targetEmployeeName"))
+                    note = self._offboard_note(f"离职办理转交给 {target_name}", handling_note)
+                    statements.extend(
+                        [
+                            f"""
+                            UPDATE computer_assignment
+                            SET returned_at = CURRENT_TIMESTAMP,
+                                assignment_status = 'returned',
+                                notes = CONCAT_WS(' ', notes, {self.db.quote(note)})
+                            WHERE computer_id = {item_id}
+                              AND employee_id = {employee_id_int}
+                              AND returned_at IS NULL
+                              AND assignment_status = 'active'
+                              AND @offboard_allowed = 1
+                            """,
+                            "SET @processed_item_count = @processed_item_count + ROW_COUNT()",
+                            f"""
+                            INSERT INTO computer_assignment_history (
+                              computer_id, device_name, employee_id, employee_no, employee_name,
+                              assigned_at, returned_at, assignment_status, notes, returned_by
+                            )
+                            SELECT
+                              assignment.computer_id, asset.device_name, assignment.employee_id,
+                              employee.employee_no, employee.employee_name, assignment.assigned_at,
+                              CURRENT_TIMESTAMP, 'returned', assignment.notes, {actor_sql}
+                            FROM computer_assignment assignment
+                            JOIN computer_asset asset ON asset.computer_id = assignment.computer_id
+                            JOIN employee ON employee.employee_id = assignment.employee_id
+                            WHERE assignment.computer_id = {item_id}
+                              AND assignment.employee_id = {employee_id_int}
+                              AND assignment.returned_at IS NOT NULL
+                              AND @offboard_allowed = 1
+                            ORDER BY assignment.assignment_id DESC
+                            LIMIT 1
+                            ON DUPLICATE KEY UPDATE
+                              returned_at = VALUES(returned_at),
+                              assignment_status = VALUES(assignment_status),
+                              notes = VALUES(notes),
+                              returned_by = VALUES(returned_by)
+                            """,
+                            f"""
+                            INSERT INTO computer_assignment (
+                              computer_id, employee_id, assigned_at, assignment_status, notes
+                            )
+                            SELECT {item_id}, {target_id}, CURRENT_TIMESTAMP, 'active', {self.db.quote(note)}
+                            FROM DUAL
+                            WHERE @offboard_allowed = 1
+                            """,
+                            f"""
+                            INSERT INTO computer_assignment_history (
+                              computer_id, device_name, employee_id, employee_no, employee_name,
+                              assigned_at, assignment_status, notes, assigned_by
+                            )
+                            SELECT
+                              asset.computer_id, asset.device_name, employee.employee_id,
+                              employee.employee_no, employee.employee_name, CURRENT_TIMESTAMP,
+                              'active', {self.db.quote(note)}, {actor_sql}
+                            FROM computer_asset asset
+                            JOIN employee ON employee.employee_id = {target_id}
+                            WHERE asset.computer_id = {item_id}
+                              AND @offboard_allowed = 1
+                            """,
+                            f"""
+                            UPDATE computer_asset
+                            SET it_asset_status = 'in_use'
+                            WHERE computer_id = {item_id}
+                              AND @offboard_allowed = 1
+                            """,
+                        ]
+                    )
+                    continue
+
+                next_status = "lost" if action == "exception" else "idle"
+                note = self._offboard_note(
+                    "离职办理异常待处理" if action == "exception" else "离职办理回收",
+                    handling_note,
+                )
+                statements.extend(
+                    [
+                        f"""
+                        UPDATE computer_assignment
+                        SET returned_at = CURRENT_TIMESTAMP,
+                            assignment_status = 'returned',
+                            notes = CONCAT_WS(' ', notes, {self.db.quote(note)})
+                        WHERE computer_id = {item_id}
+                          AND employee_id = {employee_id_int}
+                          AND returned_at IS NULL
+                          AND assignment_status = 'active'
+                          AND @offboard_allowed = 1
+                        """,
+                        "SET @processed_item_count = @processed_item_count + ROW_COUNT()",
+                        f"""
+                        INSERT INTO computer_assignment_history (
+                          computer_id, device_name, employee_id, employee_no, employee_name,
+                          assigned_at, returned_at, assignment_status, notes, returned_by
+                        )
+                        SELECT
+                          assignment.computer_id, asset.device_name, assignment.employee_id,
+                          employee.employee_no, employee.employee_name, assignment.assigned_at,
+                          CURRENT_TIMESTAMP, 'returned', assignment.notes, {actor_sql}
+                        FROM computer_assignment assignment
+                        JOIN computer_asset asset ON asset.computer_id = assignment.computer_id
+                        JOIN employee ON employee.employee_id = assignment.employee_id
+                        WHERE assignment.computer_id = {item_id}
+                          AND assignment.employee_id = {employee_id_int}
+                          AND assignment.returned_at IS NOT NULL
+                          AND @offboard_allowed = 1
+                        ORDER BY assignment.assignment_id DESC
+                        LIMIT 1
+                        ON DUPLICATE KEY UPDATE
+                          returned_at = VALUES(returned_at),
+                          assignment_status = VALUES(assignment_status),
+                          notes = VALUES(notes),
+                          returned_by = VALUES(returned_by)
+                        """,
+                        f"""
+                        UPDATE computer_asset
+                        SET it_asset_status = {self.db.quote(next_status)}
+                        WHERE computer_id = {item_id}
+                          AND @offboard_allowed = 1
+                        """,
+                        f"""
+                        INSERT INTO asset_status_history (
+                          computer_id, previous_status, next_status, reason, changed_by
+                        )
+                        SELECT
+                          {item_id}, {self.db.quote(self.db.text(item.get('status')) or 'in_use')},
+                          {self.db.quote(next_status)}, {self.db.quote(note)}, {actor_sql}
+                        FROM DUAL
+                        WHERE @offboard_allowed = 1
+                        """,
+                    ]
+                )
+                continue
+
+            usage_table = "employee_monitor_usage" if item_type == "monitor" else "employee_non_asset_usage"
+            usage_pk = "monitor_usage_id" if item_type == "monitor" else "non_asset_usage_id"
+            allocation_type = "monitor" if item_type == "monitor" else "non_asset"
+            type_id_sql = self._nullable_id_sql(item.get("typeId"))
+            brand_id_sql = self._nullable_id_sql(item.get("brandId"))
+            model_id = self.db.integer(item.get("modelId"), 0)
+            model_id_sql = self._nullable_id_sql(item.get("modelId"))
+            stock_adjusted = 1 if parse_bool(item.get("stockAdjusted"), False) else 0
+            type_name = self.db.text(item.get("typeName") or item.get("label")) or (
+                "显示屏" if item_type == "monitor" else "非资产物资"
+            )
+            brand_name = self.db.text(item.get("brand"))
+            model_name = self.db.text(item.get("model"))
+
+            if action == "transfer":
+                target_id = self.db.integer(item.get("targetEmployeeId"), 0)
+                target_name = self.db.text(item.get("targetEmployeeName"))
+                note = self._offboard_note(f"离职办理转交给 {target_name}", handling_note)
+                if item_type == "monitor":
+                    upsert_target_usage = f"""
+                    INSERT INTO employee_monitor_usage (
+                      employee_id, non_asset_type_id, inventory_brand_id, inventory_model_id,
+                      display_name, model, quantity, stock_adjusted, notes
+                    )
+                    SELECT
+                      {target_id}, {type_id_sql}, {brand_id_sql}, {model_id_sql},
+                      {self.db.quote(brand_name)}, {self.db.quote(model_name)}, {quantity},
+                      {stock_adjusted}, {self.db.quote(note)}
+                    FROM DUAL
+                    WHERE @offboard_allowed = 1
+                    ON DUPLICATE KEY UPDATE
+                      quantity = quantity + VALUES(quantity),
+                      stock_adjusted = GREATEST(stock_adjusted, VALUES(stock_adjusted)),
+                      inventory_brand_id = COALESCE(VALUES(inventory_brand_id), inventory_brand_id),
+                      inventory_model_id = COALESCE(VALUES(inventory_model_id), inventory_model_id),
+                      notes = CONCAT_WS(' ', notes, VALUES(notes))
+                    """
+                    target_usage_lookup = f"""
+                    SELECT monitor_usage_id
+                    INTO @target_usage_ref
+                    FROM employee_monitor_usage
+                    WHERE employee_id = {target_id}
+                      AND display_name = {self.db.quote(brand_name)}
+                      AND model = {self.db.quote(model_name)}
+                    LIMIT 1
+                    """
+                else:
+                    upsert_target_usage = f"""
+                    INSERT INTO employee_non_asset_usage (
+                      employee_id, non_asset_type_id, inventory_brand_id, inventory_model_id,
+                      brand, model, quantity, stock_adjusted, notes
+                    )
+                    SELECT
+                      {target_id}, {type_id_sql}, {brand_id_sql}, {model_id_sql},
+                      {self.db.quote(brand_name)}, {self.db.quote(model_name)}, {quantity},
+                      {stock_adjusted}, {self.db.quote(note)}
+                    FROM DUAL
+                    WHERE @offboard_allowed = 1
+                    ON DUPLICATE KEY UPDATE
+                      quantity = quantity + VALUES(quantity),
+                      stock_adjusted = GREATEST(stock_adjusted, VALUES(stock_adjusted)),
+                      inventory_brand_id = COALESCE(VALUES(inventory_brand_id), inventory_brand_id),
+                      inventory_model_id = COALESCE(VALUES(inventory_model_id), inventory_model_id),
+                      notes = CONCAT_WS(' ', notes, VALUES(notes))
+                    """
+                    target_usage_lookup = f"""
+                    SELECT non_asset_usage_id
+                    INTO @target_usage_ref
+                    FROM employee_non_asset_usage
+                    WHERE employee_id = {target_id}
+                      AND non_asset_type_id = {type_id_sql}
+                      AND brand = {self.db.quote(brand_name)}
+                      AND model = {self.db.quote(model_name)}
+                    LIMIT 1
+                    """
+                statements.extend(
+                    [
+                        "SET @target_usage_ref = 0",
+                        upsert_target_usage,
+                        target_usage_lookup,
+                        f"""
+                        UPDATE inventory_allocation_history
+                        SET employee_id = {target_id},
+                            usage_record_id = @target_usage_ref,
+                            notes = CONCAT_WS(' ', notes, {self.db.quote(note)})
+                        WHERE allocation_type = {self.db.quote(allocation_type)}
+                          AND employee_id = {employee_id_int}
+                          AND usage_record_id = {item_id}
+                          AND status = 'active'
+                          AND @offboard_allowed = 1
+                          AND @target_usage_ref > 0
+                        """,
+                        f"""
+                        DELETE FROM {usage_table}
+                        WHERE {usage_pk} = {item_id}
+                          AND employee_id = {employee_id_int}
+                          AND is_active = 1
+                          AND @offboard_allowed = 1
+                          AND @target_usage_ref > 0
+                        """,
+                        "SET @processed_item_count = @processed_item_count + ROW_COUNT()",
+                    ]
+                )
+                continue
+
+            note = self._offboard_note(
+                "离职办理异常待处理" if action == "exception" else "离职办理回收入库",
+                handling_note,
+            )
+            target_status = "cancelled" if action == "exception" else "returned"
+            statements.extend(
+                [
+                    f"""
+                    SET @active_allocation_count = (
+                      SELECT COUNT(*)
+                      FROM inventory_allocation_history
+                      WHERE allocation_type = {self.db.quote(allocation_type)}
+                        AND employee_id = {employee_id_int}
+                        AND usage_record_id = {item_id}
+                        AND status = 'active'
+                    )
+                    """,
+                    f"""
+                    UPDATE inventory_allocation_history
+                    SET status = {self.db.quote(target_status)},
+                        returned_at = CURRENT_TIMESTAMP,
+                        returned_by = {actor_sql},
+                        notes = CONCAT_WS(' ', notes, {self.db.quote(note)})
+                    WHERE allocation_type = {self.db.quote(allocation_type)}
+                      AND employee_id = {employee_id_int}
+                      AND usage_record_id = {item_id}
+                      AND status = 'active'
+                      AND @offboard_allowed = 1
+                    """,
+                    f"""
+                    INSERT INTO inventory_allocation_history (
+                      allocation_type, employee_id, non_asset_type_id, inventory_model_id,
+                      usage_record_id, quantity, stock_adjusted, status, issued_at,
+                      returned_at, notes, issued_by, returned_by
+                    )
+                    SELECT
+                      {self.db.quote(allocation_type)}, {employee_id_int}, {type_id_sql}, {model_id_sql},
+                      {item_id}, {quantity}, {stock_adjusted}, {self.db.quote(target_status)},
+                      CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, {self.db.quote(note)}, {actor_sql}, {actor_sql}
+                    FROM DUAL
+                    WHERE @offboard_allowed = 1
+                      AND @active_allocation_count = 0
+                    """,
+                    f"""
+                    DELETE FROM {usage_table}
+                    WHERE {usage_pk} = {item_id}
+                      AND employee_id = {employee_id_int}
+                      AND is_active = 1
+                      AND @offboard_allowed = 1
+                    """,
+                    "SET @processed_item_count = @processed_item_count + ROW_COUNT()",
+                ]
+            )
+            if action == "recover" and stock_adjusted:
+                statements.extend(
+                    [
+                        f"""
+                        UPDATE it_inventory_model
+                        SET quantity = quantity + {quantity}
+                        WHERE model_id = {model_id}
+                          AND @offboard_allowed = 1
+                        """,
+                        f"""
+                        INSERT INTO inventory_movement_log (
+                          movement_direction, type_name, brand_name, model_name, quantity,
+                          source_label, target_label, note, related_employee_no, related_employee_name, trigger_action
+                        )
+                        SELECT
+                          'increase', {self.db.quote(type_name)}, {self.db.quote(brand_name)},
+                          {self.db.quote(model_name)}, {quantity},
+                          {self.db.quote(employee_label)}, 'IT Inventory', {self.db.quote(note)},
+                          {self.db.quote(employee_no)}, {self.db.quote(employee_name)}, 'leave_recovery'
+                        FROM DUAL
+                        WHERE @offboard_allowed = 1
+                        """
+                    ]
+                )
+
+        statements.extend(
+            [
+                f"SET @offboard_success = IF(@offboard_allowed = 1 AND @processed_item_count = {len(plan)}, 1, 0)",
+                f"""
+                INSERT INTO left_employee_archive (
+                  source_employee_ref, employee_no, employee_name, org_unit_id, org_path,
+                  department, position_name, email, mobile, leave_date, leave_info,
+                  leave_remark, device_snapshot
+                )
+                SELECT
+                  CAST(employee_id AS CHAR),
+                  employee_no,
+                  employee_name,
+                  org_unit_id,
+                  {self.db.quote(self.db.text(employee.get('orgPath')))},
+                  department,
+                  position_name,
+                  email,
+                  mobile,
+                  {self.db.quote(leave_date)},
+                  {self.db.quote(leave_reason)},
+                  {self.db.quote(leave_remark)},
+                  {self.db.json_value(snapshot)}
+                FROM employee
+                WHERE employee_id = {employee_id_int}
+                  AND @offboard_success = 1
+                """,
+                "SET @archive_id = IF(@offboard_success = 1, LAST_INSERT_ID(), 0)",
+                f"""
+                UPDATE auth_session session
+                JOIN user_account account
+                  ON account.user_id = session.user_id
+                 AND account.employee_id = {employee_id_int}
+                SET session.revoked_at = CURRENT_TIMESTAMP
+                WHERE session.revoked_at IS NULL
+                  AND @offboard_success = 1
+                """,
+                f"""
+                UPDATE user_account
+                SET employee_id = NULL
+                WHERE employee_id = {employee_id_int}
+                  AND @offboard_success = 1
+                """,
+                "SET @unbound_account_count = ROW_COUNT()",
+                f"""
+                UPDATE employee
+                SET employment_status = 'left'
+                WHERE employee_id = {employee_id_int}
+                  AND employment_status <> 'left'
+                  AND @offboard_success = 1
+                """,
+                f"""
+                INSERT INTO service_notification (
+                  recipient_user_id, record_type, record_id, notification_type, title, content
+                )
+                SELECT
+                  {actor_id}, 'system', @archive_id, 'employee_offboarded',
+                  {self.db.quote('离职办理完成')},
+                  {self.db.quote(f'人员 {employee_label} 已完成离职办理，账号绑定已解除。')}
+                FROM DUAL
+                WHERE @offboard_success = 1
+                  AND {actor_id} > 0
+                """,
+                self._conditional_audit_sql(
+                    "employee_offboarded",
+                    "employee",
+                    self.db.quote(str(employee_id_int)),
+                    employee_label,
+                    f"人员 {employee_label} 已完成受控离职办理",
+                    context,
+                    "@offboard_success = 1",
+                    {
+                        "status": employee.get("status"),
+                        "itemCount": len(plan),
+                    },
+                    {
+                        "status": "left",
+                        "leaveDate": leave_date,
+                        "itemCount": len(plan),
+                        "unboundAccounts": "computed",
+                    },
+                ),
+                """
+                UPDATE app_state_revision
+                SET revision = revision + 1
+                WHERE revision_id = 1
+                  AND @offboard_success = 1
+                """,
+                "SELECT @offboard_success, @archive_id, @processed_item_count, @unbound_account_count",
+                "COMMIT",
+            ]
+        )
+        output = self.db.execute(";\n".join(statements) + ";")
+        lines = [line.strip() for line in output.splitlines() if line.strip()]
+        result = (lines[-1] if lines else "").split("\t")
+        success = self.db.integer(result[0] if result else 0, 0)
+        archive_id = self.db.integer(result[1] if len(result) > 1 else 0, 0)
+        processed_items = self.db.integer(result[2] if len(result) > 2 else 0, 0)
+        unbound_accounts = self.db.integer(result[3] if len(result) > 3 else 0, 0)
+        if success != 1 or archive_id <= 0:
+            raise self.conflict_error("离职资产清单已变化，请刷新后重新办理。")
+
+        response = {
+            "archiveId": str(archive_id),
+            "employeeId": str(employee_id_int),
+            "status": "left",
+            "processedItems": processed_items,
+            "unboundAccounts": unbound_accounts,
+        }
+        self._store_idempotency_result("employee.offboard", idempotency_key, payload, response)
+        return response
 
     def add_relation(self, payload: dict, context: dict) -> dict:
         source_type = self.db.text(payload.get("sourceType"))

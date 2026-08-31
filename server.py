@@ -138,6 +138,7 @@ AUDIT_CHANGE_LABELS = {
     "employee_added": "新增人员",
     "employee_removed": "删除人员",
     "employee_archived": "人员离职归档",
+    "employee_offboarded": "办理离职",
     "employee_status_changed": "人员状态变更",
     "employee_info_changed": "人员信息变更",
     "monitor_added": "人员增加显示屏",
@@ -1647,6 +1648,12 @@ def normalize_left_employee_devices(devices: list[dict]) -> list[dict]:
                 "modelId": text_value(device.get("modelId")),
                 "brand": text_value(device.get("brand")),
                 "model": text_value(device.get("model")),
+                "action": text_value(device.get("action")),
+                "actionLabel": text_value(device.get("actionLabel")),
+                "targetEmployeeId": text_value(device.get("targetEmployeeId")),
+                "targetEmployeeNo": text_value(device.get("targetEmployeeNo")),
+                "targetEmployeeName": text_value(device.get("targetEmployeeName")),
+                "handlingNote": text_value(device.get("handlingNote")),
             }
         )
     return normalized

@@ -2007,6 +2007,41 @@ tbody tr:hover {
   font-size: 11px;
 }
 
+.offboard-item-list {
+  display: grid;
+  gap: 12px;
+}
+
+.offboard-item-row {
+  display: grid;
+  gap: 12px;
+  padding: 12px;
+  border: 1px solid var(--line);
+  background: var(--panel);
+}
+
+.offboard-item-main {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+}
+
+.offboard-item-main strong,
+.offboard-item-main small {
+  display: block;
+}
+
+.offboard-item-main strong {
+  color: var(--ink);
+  font-size: 13px;
+}
+
+.offboard-item-main small {
+  margin-top: 4px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
 @keyframes toast-in {
   from {
     transform: translateY(8px);
