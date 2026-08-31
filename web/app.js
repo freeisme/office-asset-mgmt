@@ -5746,9 +5746,6 @@ function openEmployeeModal(id = "", presetOrgId = "") {
     email: "",
     mobile: "",
     status: "active",
-    leaveDate: "",
-    leaveInfo: "",
-    leaveRemark: "",
   };
   const isEditing = Boolean(id);
   const hasExistingNumber = Boolean(String(employee.employeeNo || "").trim());
@@ -5780,31 +5777,13 @@ function openEmployeeModal(id = "", presetOrgId = "") {
               "人员状态",
               "status",
               employee.status,
-              ["active", "inactive", "left"].map((value) => ({ value, label: statusLabels[value] })),
+              ["active", "inactive"].map((value) => ({ value, label: statusLabels[value] })),
               true,
             )}
             ${inputField("部门", "department", employee.department, false, "IT")}
             ${inputField("岗位", "position", employee.position, false, "IT 管理员")}
             ${inputField("邮箱", "email", employee.email, false, "name@example.com", "email")}
             ${inputField("手机号", "mobile", employee.mobile, false, "138****0000")}
-          </div>
-        </section>
-        <section class="modal-section" data-left-fields ${
-          employee.status === "left" ? "" : 'hidden style="display:none;"'
-        }>
-          <div class="form-grid three">
-            ${inputField(
-              "离职日期",
-              "leaveDate",
-              employee.leaveDate || (employee.status === "left" ? currentDateText() : ""),
-              false,
-              "",
-              "date",
-            )}
-          </div>
-          <div class="form-grid">
-            ${textareaField("离职信息", "leaveInfo", employee.leaveInfo || "", false, "如离职原因、交接情况等", 3)}
-            ${textareaField("备注", "leaveRemark", employee.leaveRemark || "", false, "仅在标记离职时写入离职人员档案", 3)}
           </div>
         </section>
         <div class="modal-footer"><button type="button" class="secondary-button" data-action="close-modal">取消</button><button class="primary-button" type="submit">保存人员</button></div>
@@ -5846,20 +5825,6 @@ function openLeftEmployeeModal(id = "") {
       <div class="modal-footer"><button type="button" class="secondary-button" data-action="close-modal">关闭</button></div>`,
     true,
   );
-}
-
-function toggleEmployeeLeaveFields(form, shouldAutofill = false) {
-  if (!form || form.dataset.form !== "employee") return;
-  const status = form.elements.status?.value || "active";
-  const leaveSection = form.querySelector("[data-left-fields]");
-  if (!leaveSection) return;
-  const isLeft = status === "left";
-  leaveSection.hidden = !isLeft;
-  leaveSection.style.display = isLeft ? "" : "none";
-  const leaveDateInput = form.elements.leaveDate;
-  if (isLeft && leaveDateInput && shouldAutofill && !String(leaveDateInput.value || "").trim()) {
-    leaveDateInput.value = currentDateText();
-  }
 }
 
 function inventoryBrandOptions(typeId, selectedId = "", currentName = "") {
@@ -9578,10 +9543,6 @@ document.addEventListener("change", (event) => {
       numberInput.value = employeeNumberFor(event.target.value, employeeForm.dataset.id || "");
       numberInput.dataset.generated = "true";
     }
-  }
-  if (employeeForm && event.target.name === "status") {
-    toggleEmployeeLeaveFields(employeeForm, true);
-    return;
   }
   const orgForm = event.target.closest('form[data-form="org"]');
   if (orgForm && ["name", "parentId"].includes(event.target.name)) {

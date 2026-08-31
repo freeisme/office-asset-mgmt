@@ -767,6 +767,24 @@ class FrontendAccessibilityAndThemeTests(TestCase):
         self.assertIn("color: var(--ink) !important;", styles)
 
 
+class EmployeeWorkflowUiTests(TestCase):
+    def test_employee_editor_does_not_collect_offboarding_details(self):
+        app = (ROOT / "web" / "app.js").read_text(encoding="utf-8")
+        editor = app.split("function openEmployeeModal", 1)[1].split(
+            "\nfunction leftEmployeeReadonlyField",
+            1,
+        )[0]
+
+        self.assertIn('["active", "inactive"].map', editor)
+        self.assertNotIn('"left"', editor)
+        self.assertNotIn("data-left-fields", editor)
+        self.assertNotIn('"leaveDate"', editor)
+        self.assertNotIn('"leaveInfo"', editor)
+        self.assertNotIn('"leaveRemark"', editor)
+        self.assertIn("function openLeftEmployeeModal", app)
+        self.assertIn("离职时设备快照", app)
+
+
 class FlowRecordUiTests(TestCase):
     def test_flow_page_has_filters_export_classification_and_inline_notes(self):
         app = (ROOT / "web" / "app.js").read_text(encoding="utf-8")
