@@ -1273,12 +1273,8 @@ class AssetService:
         self._assert_employee_scope(context, employee.get("id"))
         model_id = self.db.integer(payload.get("modelId"), 0)
         quantity = self.db.integer(payload.get("quantity"), 1)
-        stock_adjusted = self.db.text(payload.get("stockAdjusted")).lower() not in {
-            "0",
-            "false",
-            "no",
-            "off",
-        }
+        # Keep legacy callers deducting by default while honoring JSON false for reconciliation entries.
+        stock_adjusted = parse_bool(payload.get("stockAdjusted"), True)
         if model_id <= 0 or quantity <= 0:
             raise self.api_error("Allocation requires a model and a positive quantity.")
         if allocation_type == "monitor" and quantity != 1:

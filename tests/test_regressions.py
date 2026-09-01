@@ -931,6 +931,18 @@ class DataQualityRegressionTests(TestCase):
 
 
 class InventoryRecoveryRegressionTests(TestCase):
+    def test_register_without_deduction_honors_json_false(self):
+        service = (ROOT / "office_asset" / "asset_service.py").read_text(encoding="utf-8")
+        allocation_source = service.split("    def allocate_inventory(", 1)[1].split(
+            "\n    def adjust_inventory(",
+            1,
+        )[0]
+
+        self.assertIn('stock_adjusted = parse_bool(payload.get("stockAdjusted"), True)', allocation_source)
+        self.assertNotIn('self.db.text(payload.get("stockAdjusted"))', allocation_source)
+        self.assertFalse(server.parse_bool(False, True))
+        self.assertTrue(server.parse_bool(None, True))
+
     def test_recovery_selection_matches_numeric_and_string_ids(self):
         app = (ROOT / "web" / "app.js").read_text(encoding="utf-8")
 

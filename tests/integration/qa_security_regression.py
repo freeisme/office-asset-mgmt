@@ -16,7 +16,8 @@ ROOT = Path(__file__).resolve().parents[2]
 PYTHON = Path(r"C:\Users\K3DSZ080\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe")
 MYSQL = Path(r"D:\MYSQL\bin\mysql.exe")
 DB_NAME = os.environ.get("DB_NAME", "office_asset_mgmt_codex_test_20260814_b")
-BASE_URL = "http://127.0.0.1:8011"
+SERVER_PORT = int(os.environ.get("QA_SERVER_PORT", "8011"))
+BASE_URL = f"http://127.0.0.1:{SERVER_PORT}"
 PASSWORD = os.environ.get("QA_PASSWORD", "QaVerify!2026")
 PREFIX = "qa_sec_"
 
@@ -163,9 +164,22 @@ def cleanup() -> None:
              OR (entity_type = 'org_unit' AND entity_name LIKE '{PREFIX}%')
              OR (entity_type = 'inventory_movement_log' AND entity_name LIKE '{PREFIX}%')
              OR (entity_type = 'data_quality_issue' AND entity_name LIKE '[QA v2.0.8]%')
+             OR (entity_type = 'inventory_allocation' AND entity_name LIKE '{PREFIX}%')
              OR (entity_type = 'inventory_model' AND entity_name LIKE '{PREFIX}%')
              OR (entity_type = 'it_inventory_brand' AND entity_name LIKE '{PREFIX}%')
              OR (entity_type = 'non_asset_type' AND entity_name LIKE '{PREFIX}%');
+        DELETE FROM inventory_allocation_history
+          WHERE inventory_model_id IN (
+            SELECT model_id FROM it_inventory_model WHERE model_name LIKE '{PREFIX}%'
+          );
+        DELETE FROM employee_monitor_usage
+          WHERE inventory_model_id IN (
+            SELECT model_id FROM it_inventory_model WHERE model_name LIKE '{PREFIX}%'
+          );
+        DELETE FROM employee_non_asset_usage
+          WHERE inventory_model_id IN (
+            SELECT model_id FROM it_inventory_model WHERE model_name LIKE '{PREFIX}%'
+          );
         DELETE FROM inventory_purchase_log
           WHERE type_name LIKE '{PREFIX}%';
         DELETE FROM inventory_movement_note_correction
@@ -275,7 +289,7 @@ def main() -> int:
                 "powershell.exe",
                 "-NoProfile",
                 "-Command",
-                "$listeners = Get-NetTCPConnection -LocalPort 8011 -State Listen -ErrorAction SilentlyContinue; "
+                f"$listeners = Get-NetTCPConnection -LocalPort {SERVER_PORT} -State Listen -ErrorAction SilentlyContinue; "
                 "foreach ($listener in $listeners) { Stop-Process -Id $listener.OwningProcess -Force -ErrorAction SilentlyContinue }",
             ],
             check=False,
@@ -297,7 +311,7 @@ def main() -> int:
             "MYSQL_BIN": str(MYSQL),
             "MYSQLDUMP_BIN": r"D:\MYSQL\bin\mysqldump.exe",
             "SERVER_HOST": "127.0.0.1",
-            "SERVER_PORT": "8011",
+            "SERVER_PORT": str(SERVER_PORT),
         }
     )
     server = None
@@ -907,6 +921,38 @@ def main() -> int:
             201,
         )
         inventory_model_id = inventory_model_payload["inventoryModel"]["id"]
+        _, reconciled_allocation = admin.request(
+            "POST",
+            "/api/inventory/allocations",
+            {
+                "allocationType": "non_asset",
+                "employeeId": employee_org_a,
+                "modelId": inventory_model_id,
+                "quantity": 1,
+                "notes": "QA 仅登记不扣减",
+                "stockAdjusted": False,
+            },
+            201,
+        )
+        assert reconciled_allocation["allocationId"]
+        assert sql_scalar(
+            f"SELECT quantity FROM it_inventory_model WHERE model_id = {inventory_model_id}"
+        ) == "0"
+        assert sql_scalar(
+            f"""
+            SELECT stock_adjusted
+            FROM inventory_allocation_history
+            WHERE allocation_id = {reconciled_allocation["allocationId"]}
+            """
+        ) == "0"
+        assert sql_scalar(
+            f"""
+            SELECT COUNT(*)
+            FROM inventory_movement_log
+            WHERE model_name = '{inventory_model_name}'
+              AND trigger_action = 'inventory_allocation'
+            """
+        ) == "0"
         original_note = "[QA v2.0.8] 原始入库备注"
         _, receipt = admin.request(
             "POST",
@@ -1068,6 +1114,7 @@ def main() -> int:
             "approval_gate,approval_status_sync,computer_movement_history,"
             "assignment_idempotency,assignment_reassignment_audit,own_asset_scope,"
             "org_asset_scope,cross_org_denied,readonly_write_denied,"
+            "inventory_register_without_deduction,"
             "inventory_note_correction_append_only,inventory_note_correction_permission,"
             "quality_resolution_required,quality_resolution_audit,quality_resolution_permission,"
             "quality_chinese_labels"
