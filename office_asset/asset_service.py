@@ -1275,44 +1275,103 @@ class AssetService:
         quantity = self.db.integer(payload.get("quantity"), 1)
         # Keep legacy callers deducting by default while honoring JSON false for reconciliation entries.
         stock_adjusted = parse_bool(payload.get("stockAdjusted"), True)
-        if model_id <= 0 or quantity <= 0:
-            raise self.api_error("Allocation requires a model and a positive quantity.")
+        if quantity <= 0:
+            raise self.api_error("Allocation requires a positive quantity.")
         if allocation_type == "monitor" and quantity != 1:
             raise self.api_error("Monitor allocation quantity must be one.")
 
-        model = self.db.json(
-            f"""
-            SELECT JSON_OBJECT(
-              'typeId', model.non_asset_type_id,
-              'brandId', model.brand_id,
-              'typeName', type_row.type_name,
-              'brandName', brand.brand_name,
-              'modelName', model.model_name
+        type_id = 0
+        brand_id = 0
+        type_name = ""
+        brand_name = ""
+        model_name = ""
+        model_id_sql = "NULL"
+        usage_display_name = ""
+        if model_id > 0:
+            model = self.db.json(
+                f"""
+                SELECT JSON_OBJECT(
+                  'typeId', model.non_asset_type_id,
+                  'brandId', model.brand_id,
+                  'typeName', type_row.type_name,
+                  'brandName', brand.brand_name,
+                  'modelName', model.model_name
+                )
+                FROM it_inventory_model model
+                JOIN it_inventory_brand brand ON brand.brand_id = model.brand_id
+                JOIN non_asset_type type_row ON type_row.non_asset_type_id = model.non_asset_type_id
+                WHERE model.model_id = {model_id} AND model.is_active = 1
+                """,
+                None,
             )
-            FROM it_inventory_model model
-            JOIN it_inventory_brand brand ON brand.brand_id = model.brand_id
-            JOIN non_asset_type type_row ON type_row.non_asset_type_id = model.non_asset_type_id
-            WHERE model.model_id = {model_id} AND model.is_active = 1
-            """,
-            None,
-        )
-        if not model:
-            raise self.api_error("Inventory model does not exist.")
+            if not model:
+                raise self.api_error("Inventory model does not exist.")
+            type_id = self.db.integer(model.get("typeId"), 0)
+            brand_id = self.db.integer(model.get("brandId"), 0)
+            type_name = self.db.text(model.get("typeName"))
+            brand_name = self.db.text(model.get("brandName"))
+            model_name = self.db.text(model.get("modelName"))
+            usage_display_name = self.db.text(payload.get("displayName")) or brand_name
+            model_id_sql = str(model_id)
+        else:
+            if stock_adjusted:
+                raise self.api_error("Inventory deduction requires a registered inventory model.")
+            type_id = self.db.integer(payload.get("typeId"), 0)
+            if type_id <= 0:
+                raise self.api_error("Custom allocation requires a type.")
+            type_row = self.db.json(
+                f"""
+                SELECT JSON_OBJECT('typeName', type_name)
+                FROM non_asset_type
+                WHERE non_asset_type_id = {type_id}
+                  AND is_active = 1
+                """,
+                None,
+            )
+            if not type_row:
+                raise self.api_error("Allocation type does not exist.")
+            brand_id = self.db.integer(payload.get("inventoryBrandId"), 0)
+            if brand_id > 0:
+                brand_row = self.db.json(
+                    f"""
+                    SELECT JSON_OBJECT('brandName', brand_name)
+                    FROM it_inventory_brand
+                    WHERE brand_id = {brand_id}
+                      AND non_asset_type_id = {type_id}
+                      AND is_active = 1
+                    """,
+                    None,
+                )
+                if not brand_row:
+                    raise self.api_error("Inventory brand does not exist.")
+                brand_name = self.db.text(payload.get("brand")) or self.db.text(brand_row.get("brandName"))
+            else:
+                brand_name = self.db.text(payload.get("brand"))
+            model_name = self.db.text(payload.get("model"))
+            usage_display_name = self.db.text(payload.get("displayName")) or brand_name
+            if allocation_type == "monitor":
+                brand_name = usage_display_name
+            if not brand_name or not model_name:
+                raise self.api_error("Custom allocation requires brand and model.")
+            type_name = self.db.text(type_row.get("typeName"))
 
         employee_id = self.db.integer(employee.get("id"), 0)
-        type_id = self.db.integer(model.get("typeId"), 0)
-        brand_id = self.db.integer(model.get("brandId"), 0)
-        model_name = self.db.text(model.get("modelName"))
         note = self.db.text(payload.get("notes"))
+        brand_id_sql = self._nullable_id_sql(brand_id)
+        model = {
+            "typeName": type_name,
+            "brandName": brand_name,
+            "modelName": model_name,
+        }
         if allocation_type == "monitor":
-            display_name = self.db.text(payload.get("displayName")) or self.db.text(model.get("brandName"))
+            display_name = usage_display_name or brand_name
             usage_sql = f"""
                 INSERT INTO employee_monitor_usage (
                   employee_id, non_asset_type_id, inventory_brand_id, inventory_model_id,
                   display_name, model, quantity, stock_adjusted, notes
                 )
                 SELECT
-                  {employee_id}, {type_id}, {brand_id}, {model_id},
+                  {employee_id}, {type_id}, {brand_id_sql}, {model_id_sql},
                   {self.db.quote(display_name)}, {self.db.quote(model_name)}, 1,
                   {1 if stock_adjusted else 0}, {self.db.quote(note)}
                 FROM DUAL
@@ -1328,7 +1387,7 @@ class AssetService:
                     SELECT monitor_usage_id
                     FROM employee_monitor_usage
                     WHERE employee_id = {employee_id}
-                      AND display_name = {self.db.quote(display_name)}
+                    AND display_name = {self.db.quote(display_name)}
                       AND model = {self.db.quote(model_name)}
                     LIMIT 1
                   ),
@@ -1342,8 +1401,8 @@ class AssetService:
                   brand, model, quantity, stock_adjusted, notes
                 )
                 SELECT
-                  {employee_id}, {type_id}, {brand_id}, {model_id},
-                  {self.db.quote(self.db.text(model.get('brandName')))}, {self.db.quote(model_name)},
+                  {employee_id}, {type_id}, {brand_id_sql}, {model_id_sql},
+                  {self.db.quote(brand_name)}, {self.db.quote(model_name)},
                   {quantity}, {1 if stock_adjusted else 0}, {self.db.quote(note)}
                 FROM DUAL
                 WHERE @stock_updated = 1
@@ -1359,7 +1418,7 @@ class AssetService:
                     FROM employee_non_asset_usage
                     WHERE employee_id = {employee_id}
                       AND non_asset_type_id = {type_id}
-                      AND brand = {self.db.quote(self.db.text(model.get('brandName')))}
+                      AND brand = {self.db.quote(brand_name)}
                       AND model = {self.db.quote(model_name)}
                     LIMIT 1
                   ),
@@ -1367,9 +1426,8 @@ class AssetService:
                 ) INTO @usage_ref;
             """
 
-        output = self.db.execute(
-            f"""
-            START TRANSACTION;
+        if model_id > 0:
+            inventory_guard_sql = f"""
             SELECT quantity INTO @available_quantity
             FROM it_inventory_model
             WHERE model_id = {model_id}
@@ -1384,13 +1442,24 @@ class AssetService:
             WHERE model_id = {model_id}
               AND @stock_updated = 1
               AND {1 if stock_adjusted else 0} = 1;
+            """
+        else:
+            inventory_guard_sql = """
+            SET @available_quantity = 0;
+            SET @stock_updated = 1;
+            """
+
+        output = self.db.execute(
+            f"""
+            START TRANSACTION;
+            {inventory_guard_sql}
             {usage_sql}
             INSERT INTO inventory_allocation_history (
               allocation_type, employee_id, non_asset_type_id, inventory_model_id,
               usage_record_id, quantity, stock_adjusted, status, notes, issued_by
             )
             SELECT
-              {self.db.quote(allocation_type)}, {employee_id}, {type_id}, {model_id},
+              {self.db.quote(allocation_type)}, {employee_id}, {type_id}, {model_id_sql},
               @usage_ref, {quantity}, {1 if stock_adjusted else 0}, 'active',
               {self.db.quote(note)}, {self._actor_id(context)}
             FROM DUAL
@@ -1534,14 +1603,20 @@ class AssetService:
               'stockAdjusted', allocation.stock_adjusted,
               'status', allocation.status,
               'typeName', COALESCE(type_row.type_name, ''),
-              'brandName', COALESCE(brand.brand_name, ''),
-              'modelName', COALESCE(model.model_name, '')
+              'brandName', COALESCE(brand.brand_name, monitor_usage.display_name, non_asset_usage.brand, ''),
+              'modelName', COALESCE(model.model_name, monitor_usage.model, non_asset_usage.model, '')
             )
             FROM inventory_allocation_history allocation
             JOIN employee ON employee.employee_id = allocation.employee_id
             LEFT JOIN it_inventory_model model ON model.model_id = allocation.inventory_model_id
             LEFT JOIN it_inventory_brand brand ON brand.brand_id = model.brand_id
             LEFT JOIN non_asset_type type_row ON type_row.non_asset_type_id = allocation.non_asset_type_id
+            LEFT JOIN employee_monitor_usage monitor_usage
+              ON monitor_usage.monitor_usage_id = allocation.usage_record_id
+             AND allocation.allocation_type = 'monitor'
+            LEFT JOIN employee_non_asset_usage non_asset_usage
+              ON non_asset_usage.non_asset_usage_id = allocation.usage_record_id
+             AND allocation.allocation_type = 'non_asset'
             WHERE allocation.allocation_id = {allocation_id_int}
             """,
             None,
@@ -1676,6 +1751,12 @@ class AssetService:
 
         usage_table = "employee_monitor_usage" if normalized_type == "monitor" else "employee_non_asset_usage"
         usage_pk = "monitor_usage_id" if normalized_type == "monitor" else "non_asset_usage_id"
+        brand_name_sql = (
+            "COALESCE(brand.brand_name, usage_row.display_name, '')"
+            if normalized_type == "monitor"
+            else "COALESCE(brand.brand_name, usage_row.brand, '')"
+        )
+        model_name_sql = "COALESCE(model.model_name, usage_row.model, '')"
         usage = self.db.json(
             f"""
             SELECT JSON_OBJECT(
@@ -1686,8 +1767,8 @@ class AssetService:
               'quantity', usage_row.quantity,
               'stockAdjusted', usage_row.stock_adjusted,
               'typeName', COALESCE(type_row.type_name, ''),
-              'brandName', COALESCE(brand.brand_name, ''),
-              'modelName', COALESCE(model.model_name, '')
+              'brandName', {brand_name_sql},
+              'modelName', {model_name_sql}
             )
             FROM {usage_table} usage_row
             LEFT JOIN non_asset_type type_row ON type_row.non_asset_type_id = usage_row.non_asset_type_id
@@ -1853,7 +1934,8 @@ class AssetService:
                   'issuedBy', COALESCE(CAST(allocation.issued_by AS CHAR), ''),
                   'modelId', COALESCE(CAST(allocation.inventory_model_id AS CHAR), ''),
                   'usageRecordId', COALESCE(CAST(allocation.usage_record_id AS CHAR), ''),
-                  'modelName', COALESCE(model.model_name, ''),
+                  'brandName', COALESCE(brand.brand_name, monitor_usage.display_name, non_asset_usage.brand, ''),
+                  'modelName', COALESCE(model.model_name, monitor_usage.model, non_asset_usage.model, ''),
                   'quantity', allocation.quantity,
                   'stockAdjusted', allocation.stock_adjusted,
                   'status', allocation.status,
@@ -1862,6 +1944,13 @@ class AssetService:
                 FROM inventory_allocation_history allocation
                 JOIN employee ON employee.employee_id = allocation.employee_id
                 LEFT JOIN it_inventory_model model ON model.model_id = allocation.inventory_model_id
+                LEFT JOIN it_inventory_brand brand ON brand.brand_id = model.brand_id
+                LEFT JOIN employee_monitor_usage monitor_usage
+                  ON monitor_usage.monitor_usage_id = allocation.usage_record_id
+                 AND allocation.allocation_type = 'monitor'
+                LEFT JOIN employee_non_asset_usage non_asset_usage
+                  ON non_asset_usage.non_asset_usage_id = allocation.usage_record_id
+                 AND allocation.allocation_type = 'non_asset'
                 {where}
                 """,
                 [],

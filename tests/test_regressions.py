@@ -939,9 +939,66 @@ class InventoryRecoveryRegressionTests(TestCase):
         )[0]
 
         self.assertIn('stock_adjusted = parse_bool(payload.get("stockAdjusted"), True)', allocation_source)
+        self.assertIn('if stock_adjusted:\n                raise self.api_error("Inventory deduction requires a registered inventory model.")', allocation_source)
+        self.assertIn('model_id_sql = "NULL"', allocation_source)
+        self.assertIn('if model_id > 0:', allocation_source)
+        self.assertIn('if allocation_type == "monitor":', allocation_source)
         self.assertNotIn('self.db.text(payload.get("stockAdjusted"))', allocation_source)
         self.assertFalse(server.parse_bool(False, True))
         self.assertTrue(server.parse_bool(None, True))
+
+    def test_computer_submit_uses_server_assignment_flow(self):
+        app = (ROOT / "web" / "app.js").read_text(encoding="utf-8")
+        source = app.split("async function handleComputerSubmit(form) {", 1)[1].split(
+            "\nasync function handleEmployeeSubmit(form) {",
+            1,
+        )[0]
+
+        self.assertIn("requestJson(API_STATE_URL)", source)
+        self.assertIn("sameRecordId(computer.id, id)", source)
+        self.assertIn("const shouldAssign = Boolean(desiredUserId)", source)
+        self.assertIn("/api/computers/${encodeURIComponent(computerId)}/assignments", source)
+        self.assertIn("/api/computers/${encodeURIComponent(computerId)}/assignments/return", source)
+        self.assertIn('const statusForSave = desiredUserId ? "in_use" : shouldReturn ? currentStatus : targetStatus;', source)
+
+    def test_custom_inventory_registration_keeps_fallback_brand_and_model_names(self):
+        service = (ROOT / "office_asset" / "asset_service.py").read_text(encoding="utf-8")
+        return_source = service.split("    def return_inventory(", 1)[1].split(
+            "\n    def return_usage_inventory(",
+            1,
+        )[0]
+        usage_source = service.split("    def return_usage_inventory(", 1)[1].split(
+            "\n    def list_allocations(",
+            1,
+        )[0]
+        list_source = service.split("    def list_allocations(", 1)[1].split(
+            "\n    def _sql_id_list(",
+            1,
+        )[0]
+
+        self.assertIn("monitor_usage.display_name", return_source)
+        self.assertIn("non_asset_usage.brand", return_source)
+        self.assertIn("usage_row.display_name", usage_source)
+        self.assertIn("usage_row.model", usage_source)
+        self.assertIn("monitor_usage.display_name", list_source)
+        self.assertIn("non_asset_usage.brand", list_source)
+
+    def test_device_save_allows_custom_registration_without_inventory_model(self):
+        app = (ROOT / "web" / "app.js").read_text(encoding="utf-8")
+        source = app.split("async function finishDeviceSave(mode) {", 1)[1].split(
+            "\nasync function handleRoleCreateSubmit(form) {",
+            1,
+        )[0]
+
+        self.assertIn('if (mode === "deduct" && !model)', source)
+        self.assertIn("openDeviceStockConfirm(pending.kind, pending.employeeId, pending.item, pending.previous);", source)
+        self.assertIn('modelId: model?.id || ""', source)
+        self.assertIn('typeId: pending.item.typeId || ""', source)
+        self.assertIn('inventoryBrandId: pending.item.inventoryBrandId || ""', source)
+        self.assertIn('brand: brandName', source)
+        self.assertIn('model: modelName', source)
+        self.assertIn('displayName: pending.kind === "monitor" ? brandName : ""', source)
+        self.assertIn('stockAdjusted: mode === "deduct"', source)
 
     def test_recovery_selection_matches_numeric_and_string_ids(self):
         app = (ROOT / "web" / "app.js").read_text(encoding="utf-8")

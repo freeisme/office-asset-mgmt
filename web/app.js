@@ -9107,10 +9107,33 @@ async function handleComputerSubmit(form) {
   const wifiMac = normalizeMacAddress(data.wifiMac);
   const ethernetMac = normalizeMacAddress(data.ethernetMac);
   if (!data.deviceName || !isValidMacAddress(wifiMac) || !isValidMacAddress(ethernetMac)) {
-    return showToast("Please provide a device name and valid MAC addresses.", true);
+    return showToast("请填写设备名并输入有效的 MAC 地址。", true);
   }
+
+  let serverComputer = null;
+  if (id) {
+    try {
+      const serverState = await requestJson(API_STATE_URL);
+      serverComputer =
+        Array.isArray(serverState.computers)
+          ? serverState.computers.find((computer) => sameRecordId(computer.id, id)) || null
+          : null;
+    } catch (error) {
+      serverComputer = state.computers.find((computer) => sameRecordId(computer.id, id)) || null;
+    }
+  }
+
+  const currentUserId = String(serverComputer?.userId || "");
+  const desiredUserId = String(data.userId || "");
+  const currentStatus = String(serverComputer?.status || data.status || "idle");
+  const targetStatus = String(data.status || "idle");
+  const shouldAssign = Boolean(desiredUserId) && !sameRecordId(desiredUserId, currentUserId);
+  const shouldReturn = !desiredUserId && Boolean(currentUserId);
+  const statusForSave = desiredUserId ? "in_use" : shouldReturn ? currentStatus : targetStatus;
+  const returnStatus = targetStatus === "in_use" ? "idle" : targetStatus;
+
   try {
-    await saveResource("computer", id, {
+    const saved = await saveResource("computer", id, {
       deviceName: data.deviceName,
       orgId: data.orgId || "",
       deviceType: data.deviceType,
@@ -9130,9 +9153,27 @@ async function handleComputerSubmit(form) {
       location: data.location || "",
       department: data.department || "",
       position: data.position || "",
-      status: data.status || "idle",
+      status: statusForSave,
       remarks: data.remarks || "",
     });
+
+    const computerId = id || saved?.computer?.id || "";
+    if (!computerId) {
+      throw new Error("保存后未获取到办公终端编号。");
+    }
+    if (shouldAssign) {
+      await runCommand(
+        `/api/computers/${encodeURIComponent(computerId)}/assignments`,
+        { employeeId: desiredUserId, notes: "Assigned from computer asset form" },
+        "computer-assignment",
+      );
+    } else if (shouldReturn) {
+      await runCommand(
+        `/api/computers/${encodeURIComponent(computerId)}/assignments/return`,
+        { nextStatus: returnStatus, notes: "Returned from computer asset form" },
+        "computer-return",
+      );
+    }
     closeModal();
     await reloadDomainState();
     showToast(id ? "办公终端已更新" : "办公终端已创建");
@@ -9350,8 +9391,13 @@ async function finishDeviceSave(mode) {
   if (!pending) return;
   const employee = getEmployee(pending.employeeId);
   const model = inventoryModelForItem(pending.item);
-  if (!employee || !model) {
-    return showToast("领用必须关联已登记的库存型号。", true);
+  if (!employee) {
+    return showToast("未找到使用人员，请刷新后重试。", true);
+  }
+  if (mode === "deduct" && !model) {
+    showToast("同步扣减库存必须关联已登记的库存型号。", true);
+    openDeviceStockConfirm(pending.kind, pending.employeeId, pending.item, pending.previous);
+    return;
   }
   try {
     if (pending.previous?.id) {
@@ -9365,14 +9411,20 @@ async function finishDeviceSave(mode) {
         throw new Error("Existing usage has no tracked allocation. Create a reconciled allocation before editing it.");
       }
     }
+    const brandName = pending.item.brand || "";
+    const modelName = pending.item.model || "";
     await runCommand(
       "/api/inventory/allocations",
       {
         allocationType: pending.kind === "monitor" ? "monitor" : "non_asset",
         employeeId: employee.id,
-        modelId: model.id,
+        modelId: model?.id || "",
+        typeId: pending.item.typeId || "",
+        inventoryBrandId: pending.item.inventoryBrandId || "",
+        brand: brandName,
+        model: modelName,
+        displayName: pending.kind === "monitor" ? brandName : "",
         quantity: pending.kind === "monitor" ? 1 : Math.max(1, Number(pending.item.quantity || 1)),
-        displayName: pending.item.brand || "",
         notes: mode === "deduct" ? "Inventory issued to employee" : "Registered without stock deduction",
         stockAdjusted: mode === "deduct",
       },

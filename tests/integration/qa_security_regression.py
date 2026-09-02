@@ -171,15 +171,20 @@ def cleanup() -> None:
         DELETE FROM inventory_allocation_history
           WHERE inventory_model_id IN (
             SELECT model_id FROM it_inventory_model WHERE model_name LIKE '{PREFIX}%'
-          );
+          )
+             OR notes LIKE '{PREFIX}%';
         DELETE FROM employee_monitor_usage
           WHERE inventory_model_id IN (
             SELECT model_id FROM it_inventory_model WHERE model_name LIKE '{PREFIX}%'
-          );
+          )
+             OR display_name LIKE '{PREFIX}%'
+             OR model LIKE '{PREFIX}%';
         DELETE FROM employee_non_asset_usage
           WHERE inventory_model_id IN (
             SELECT model_id FROM it_inventory_model WHERE model_name LIKE '{PREFIX}%'
-          );
+          )
+             OR brand LIKE '{PREFIX}%'
+             OR model LIKE '{PREFIX}%';
         DELETE FROM inventory_purchase_log
           WHERE type_name LIKE '{PREFIX}%';
         DELETE FROM inventory_movement_note_correction
@@ -951,6 +956,72 @@ def main() -> int:
             FROM inventory_movement_log
             WHERE model_name = '{inventory_model_name}'
               AND trigger_action = 'inventory_allocation'
+            """
+        ) == "0"
+        custom_brand_name = f"{PREFIX}custom_brand_{suffix}"
+        custom_model_name = f"{PREFIX}custom_model_{suffix}"
+        custom_note = f"{PREFIX}custom_registration_{suffix}"
+        _, custom_allocation = admin.request(
+            "POST",
+            "/api/inventory/allocations",
+            {
+                "allocationType": "non_asset",
+                "employeeId": employee_org_a,
+                "typeId": inventory_type_id,
+                "modelId": "",
+                "inventoryBrandId": "",
+                "brand": custom_brand_name,
+                "model": custom_model_name,
+                "quantity": 1,
+                "notes": custom_note,
+                "stockAdjusted": False,
+            },
+            201,
+        )
+        assert custom_allocation["allocationId"]
+        _, active_allocations = admin.request("GET", "/api/inventory/allocations?status=active", expected=200)
+        assert any(
+            item["id"] == custom_allocation["allocationId"]
+            and item["brandName"] == custom_brand_name
+            and item["modelName"] == custom_model_name
+            for item in active_allocations["allocations"]
+        ), active_allocations
+        assert sql_scalar(
+            f"""
+            SELECT IF(inventory_model_id IS NULL, 'NULL', CAST(inventory_model_id AS CHAR))
+            FROM inventory_allocation_history
+            WHERE allocation_id = {custom_allocation["allocationId"]}
+            """
+        ) == "NULL"
+        assert sql_scalar(
+            f"""
+            SELECT COUNT(*)
+            FROM employee_non_asset_usage
+            WHERE employee_id = {employee_org_a}
+              AND non_asset_type_id = {inventory_type_id}
+              AND brand = '{custom_brand_name}'
+              AND model = '{custom_model_name}'
+              AND stock_adjusted = 0
+            """
+        ) == "1"
+        assert sql_scalar(
+            f"SELECT COUNT(*) FROM it_inventory_model WHERE model_name = '{custom_model_name}'"
+        ) == "0"
+        _, custom_return = admin.request(
+            "POST",
+            f"/api/inventory/allocations/{custom_allocation['allocationId']}/return",
+            {"notes": "QA custom registration return"},
+            200,
+        )
+        assert custom_return["status"] == "returned"
+        assert sql_scalar(
+            f"""
+            SELECT COUNT(*)
+            FROM employee_non_asset_usage
+            WHERE employee_id = {employee_org_a}
+              AND non_asset_type_id = {inventory_type_id}
+              AND brand = '{custom_brand_name}'
+              AND model = '{custom_model_name}'
             """
         ) == "0"
         original_note = "[QA v2.0.8] 原始入库备注"
