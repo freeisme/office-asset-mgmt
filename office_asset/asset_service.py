@@ -65,6 +65,131 @@ class AssetService:
                 "Asset assignment and inventory issue require an all-data or organization data scope."
             )
 
+    def _warehouse(self, warehouse_id: object, include_inactive: bool = False) -> dict:
+        warehouse_id_int = self.db.integer(warehouse_id, 0)
+        if warehouse_id_int <= 0:
+            raise self.api_error("Warehouse identifier is required.")
+        active_sql = "" if include_inactive else "AND warehouse.is_active = 1"
+        warehouse = self.db.json(
+            f"""
+            SELECT JSON_OBJECT(
+              'id', CAST(warehouse.warehouse_id AS CHAR),
+              'code', warehouse.warehouse_code,
+              'name', warehouse.warehouse_name,
+              'orgId', CAST(warehouse.org_unit_id AS CHAR),
+              'managerEmployeeId', COALESCE(CAST(warehouse.manager_employee_id AS CHAR), ''),
+              'managerName', COALESCE(manager.employee_name, ''),
+              'contactPhone', warehouse.contact_phone,
+              'address', warehouse.address,
+              'isActive', warehouse.is_active,
+              'remarks', warehouse.remarks,
+              'createdAt', DATE_FORMAT(warehouse.created_at, '%Y-%m-%d %H:%i:%s'),
+              'updatedAt', DATE_FORMAT(warehouse.updated_at, '%Y-%m-%d %H:%i:%s')
+            )
+            FROM inventory_warehouse warehouse
+            LEFT JOIN employee manager ON manager.employee_id = warehouse.manager_employee_id
+            WHERE warehouse.warehouse_id = {warehouse_id_int}
+              {active_sql}
+            """,
+            None,
+        )
+        if not warehouse:
+            raise self.api_error("Warehouse does not exist or is disabled.")
+        return dict(warehouse)
+
+    def _default_warehouse(self) -> dict:
+        warehouse_id = self.db.scalar(
+            """
+            SELECT warehouse_id
+            FROM inventory_warehouse
+            WHERE warehouse_code = 'WH-001'
+              AND is_active = 1
+            LIMIT 1;
+            """
+        )
+        if warehouse_id <= 0:
+            raise self.conflict_error("The default warehouse is unavailable. Restore or enable 仓库1 first.")
+        return self._warehouse(warehouse_id)
+
+    def _assert_warehouse_access(
+        self,
+        context: dict,
+        warehouse: dict,
+        module_code: str = "warehouse_management",
+        require_active: bool = False,
+    ) -> None:
+        if require_active and not parse_bool(warehouse.get("isActive"), True):
+            raise self.conflict_error("The selected warehouse is disabled.")
+        scope = self._permission_scope(context, module_code)
+        if scope == "all":
+            return
+        if scope == "organization":
+            self.scope.assert_org_access(context, warehouse.get("orgId"))
+            return
+        if scope == "own":
+            actor_employee_id = self._actor_employee_id(context)
+            if actor_employee_id > 0 and actor_employee_id == self.db.integer(
+                warehouse.get("managerEmployeeId"), 0
+            ):
+                return
+        raise self.forbidden_error("This account is not authorized to access this warehouse.")
+
+    def _resolve_warehouse(
+        self,
+        payload: dict,
+        context: dict,
+        module_code: str,
+        *,
+        require_explicit: bool = False,
+    ) -> dict:
+        warehouse_id = self.db.integer(payload.get("warehouseId"), 0)
+        if warehouse_id <= 0:
+            if require_explicit:
+                raise self.api_error("Select a target warehouse.")
+            warehouse = self._default_warehouse()
+        else:
+            warehouse = self._warehouse(warehouse_id)
+        self._assert_warehouse_access(context, warehouse, module_code, require_active=True)
+        if module_code != "warehouse_management":
+            self._assert_warehouse_access(
+                context,
+                warehouse,
+                "warehouse_management",
+                require_active=True,
+            )
+        return warehouse
+
+    def _warehouse_stock_rows(self, warehouse_id: int) -> list[dict]:
+        return list(
+            self.db.json(
+                f"""
+                SELECT COALESCE(JSON_ARRAYAGG(JSON_OBJECT(
+                  'modelId', CAST(stock.model_id AS CHAR),
+                  'quantity', stock.quantity,
+                  'typeId', CAST(model.non_asset_type_id AS CHAR),
+                  'brandId', CAST(model.brand_id AS CHAR),
+                  'typeName', type_row.type_name,
+                  'brandName', brand.brand_name,
+                  'modelName', model.model_name,
+                  'unit', type_row.unit_name
+                )), JSON_ARRAY())
+                FROM (
+                  SELECT warehouse_id, model_id, quantity
+                  FROM inventory_warehouse_stock
+                  WHERE warehouse_id = {warehouse_id}
+                    AND quantity > 0
+                  ORDER BY model_id
+                ) stock
+                JOIN it_inventory_model model ON model.model_id = stock.model_id
+                  AND model.is_active = 1
+                JOIN it_inventory_brand brand ON brand.brand_id = model.brand_id
+                JOIN non_asset_type type_row ON type_row.non_asset_type_id = model.non_asset_type_id
+                """,
+                [],
+            )
+            or []
+        )
+
     def _entity_org_id(self, entity_type: str, entity_id: int) -> int:
         queries = {
             "computer": f"SELECT COALESCE(org_unit_id, 0) FROM computer_asset WHERE computer_id = {entity_id} AND is_active = 1;",
@@ -378,6 +503,8 @@ class AssetService:
               'typeName', COALESCE(type_name, ''),
               'brandName', COALESCE(brand_name, ''),
               'modelName', COALESCE(model_name, ''),
+              'sourceWarehouseId', COALESCE(CAST(source_warehouse_id AS CHAR), ''),
+              'targetWarehouseId', COALESCE(CAST(target_warehouse_id AS CHAR), ''),
               'originalNote', COALESCE(note, '')
             )
             FROM inventory_movement_log
@@ -387,6 +514,16 @@ class AssetService:
         )
         if not movement:
             raise self.api_error("物资流转记录不存在。")
+        for warehouse_id in {
+            self.db.integer(movement.get("sourceWarehouseId"), 0),
+            self.db.integer(movement.get("targetWarehouseId"), 0),
+        }:
+            if warehouse_id > 0:
+                self._assert_warehouse_access(
+                    context,
+                    self._warehouse(warehouse_id, include_inactive=True),
+                    "warehouse_management",
+                )
 
         entity_name = " / ".join(
             item
@@ -576,6 +713,212 @@ class AssetService:
         if resource_type == "inventory-model":
             return self._save_inventory_model(resource_id, payload, context)
         raise self.api_error("Unsupported resource type.")
+
+    def list_warehouses(self, context: dict) -> list[dict]:
+        rows = list(
+            self.db.json(
+                """
+                SELECT COALESCE(JSON_ARRAYAGG(JSON_OBJECT(
+                  'id', CAST(warehouse.warehouse_id AS CHAR),
+                  'code', warehouse.warehouse_code,
+                  'name', warehouse.warehouse_name,
+                  'orgId', CAST(warehouse.org_unit_id AS CHAR),
+                  'managerEmployeeId', COALESCE(CAST(warehouse.manager_employee_id AS CHAR), ''),
+                  'managerName', COALESCE(manager.employee_name, ''),
+                  'contactPhone', warehouse.contact_phone,
+                  'address', warehouse.address,
+                  'isActive', warehouse.is_active,
+                  'remarks', warehouse.remarks,
+                  'createdAt', DATE_FORMAT(warehouse.created_at, '%Y-%m-%d %H:%i:%s'),
+                  'updatedAt', DATE_FORMAT(warehouse.updated_at, '%Y-%m-%d %H:%i:%s')
+                )), JSON_ARRAY())
+                FROM (
+                  SELECT *
+                  FROM inventory_warehouse
+                  ORDER BY is_active DESC, warehouse_name, warehouse_id
+                ) warehouse
+                LEFT JOIN employee manager ON manager.employee_id = warehouse.manager_employee_id
+                """,
+                [],
+            )
+            or []
+        )
+        visible: list[dict] = []
+        for warehouse in rows:
+            try:
+                self._assert_warehouse_access(context, warehouse, "warehouse_management")
+            except Exception as exc:
+                if isinstance(exc, self.forbidden_error):
+                    continue
+                raise
+            visible.append(warehouse)
+        return visible
+
+    def save_warehouse(
+        self,
+        warehouse_id: object | None,
+        payload: dict,
+        context: dict,
+    ) -> dict:
+        warehouse_id_int = self.db.integer(warehouse_id, 0)
+        code = self.db.text(payload.get("code")).upper()
+        name = self.db.text(payload.get("name"))
+        org_id = self.db.integer(payload.get("orgId"), 0)
+        manager_employee_id = self.db.integer(payload.get("managerEmployeeId"), 0)
+        if not re.fullmatch(r"[A-Z0-9][A-Z0-9._-]{1,63}", code):
+            raise self.api_error("Warehouse code must use 2-64 uppercase letters, numbers, dots, underscores, or hyphens.")
+        if not name or org_id <= 0:
+            raise self.api_error("Warehouse name and organization are required.")
+        self.scope.assert_org_access(context, org_id)
+        previous = self._warehouse(warehouse_id_int, include_inactive=True) if warehouse_id_int else None
+        if previous:
+            self._assert_warehouse_access(context, previous, "warehouse_management")
+        if self.db.scalar(
+            f"""
+            SELECT COUNT(*)
+            FROM org_unit
+            WHERE org_unit_id = {org_id}
+              AND is_active = 1;
+            """
+        ) != 1:
+            raise self.api_error("Warehouse organization does not exist.")
+        manager_sql = "NULL"
+        if manager_employee_id > 0:
+            if self.db.scalar(
+                f"""
+                SELECT COUNT(*)
+                FROM employee
+                WHERE employee_id = {manager_employee_id}
+                  AND org_unit_id = {org_id}
+                  AND is_active = 1
+                  AND employment_status = 'active';
+                """
+            ) != 1:
+                raise self.api_error("Warehouse manager must be an active employee of the selected organization.")
+            manager_sql = str(manager_employee_id)
+        duplicate_count = self.db.scalar(
+            f"""
+            SELECT COUNT(*)
+            FROM inventory_warehouse
+            WHERE warehouse_code = {self.db.quote(code)}
+              AND warehouse_id <> {warehouse_id_int};
+            """
+        )
+        if duplicate_count:
+            raise self.conflict_error("Warehouse code already exists.")
+        is_active = 1 if parse_bool(payload.get("isActive"), True) else 0
+        assignments = {
+            "warehouse_code": self.db.quote(code),
+            "warehouse_name": self.db.quote(name),
+            "org_unit_id": str(org_id),
+            "manager_employee_id": manager_sql,
+            "contact_phone": self.db.quote(self.db.text(payload.get("contactPhone"))),
+            "address": self.db.quote(self.db.text(payload.get("address"))),
+            "is_active": str(is_active),
+            "remarks": self.db.quote(self.db.text(payload.get("remarks"))),
+        }
+        if warehouse_id_int:
+            self.db.execute(
+                f"""
+                START TRANSACTION;
+                UPDATE inventory_warehouse
+                SET {", ".join(f"{column} = {value}" for column, value in assignments.items())}
+                WHERE warehouse_id = {warehouse_id_int};
+                {self._audit_sql(
+                    'warehouse_updated',
+                    'inventory_warehouse',
+                    warehouse_id_int,
+                    name,
+                    'Warehouse updated',
+                    context,
+                    previous,
+                    {
+                        'code': code,
+                        'name': name,
+                        'orgId': org_id,
+                        'managerEmployeeId': manager_employee_id,
+                        'isActive': bool(is_active),
+                    },
+                )};
+                COMMIT;
+                """
+            )
+        else:
+            output = self.db.execute(
+                f"""
+                START TRANSACTION;
+                INSERT INTO inventory_warehouse ({", ".join(assignments.keys())})
+                VALUES ({", ".join(assignments.values())});
+                SET @warehouse_id = LAST_INSERT_ID();
+                {self._audit_sql(
+                    'warehouse_created',
+                    'inventory_warehouse',
+                    "'new'",
+                    name,
+                    'Warehouse created',
+                    context,
+                    None,
+                    {'code': code, 'name': name, 'orgId': org_id, 'managerEmployeeId': manager_employee_id},
+                )};
+                UPDATE audit_log
+                SET entity_id = CAST(@warehouse_id AS CHAR)
+                WHERE audit_log_id = LAST_INSERT_ID();
+                SELECT @warehouse_id;
+                COMMIT;
+                """
+            )
+            warehouse_id_int = self.db.integer(output.splitlines()[-1] if output else 0, 0)
+        return {"warehouse": self._warehouse(warehouse_id_int, include_inactive=True)}
+
+    def delete_warehouse(self, warehouse_id: object, context: dict) -> dict:
+        warehouse = self._warehouse(warehouse_id, include_inactive=True)
+        self._assert_warehouse_access(context, warehouse, "warehouse_management")
+        warehouse_id_int = self.db.integer(warehouse.get("id"), 0)
+        if self.db.text(warehouse.get("code")) == "WH-001":
+            raise self.conflict_error("默认仓库“仓库1”不能删除，可编辑或停用。")
+        references = self.db.scalar(
+            f"""
+            SELECT
+              (SELECT COUNT(*) FROM inventory_warehouse_stock
+               WHERE warehouse_id = {warehouse_id_int} AND quantity > 0)
+              + (SELECT COUNT(*) FROM inventory_allocation_history
+                 WHERE warehouse_id = {warehouse_id_int})
+              + (SELECT COUNT(*) FROM inventory_transfer_log
+                 WHERE source_warehouse_id = {warehouse_id_int}
+                    OR target_warehouse_id = {warehouse_id_int})
+              + (SELECT COUNT(*) FROM inventory_movement_log
+                 WHERE source_warehouse_id = {warehouse_id_int}
+                    OR target_warehouse_id = {warehouse_id_int})
+              + (SELECT COUNT(*) FROM inventory_purchase_log
+                 WHERE warehouse_id = {warehouse_id_int});
+            """
+        )
+        if references:
+            raise self.conflict_error("The warehouse has inventory or historical references and cannot be deleted.")
+        self.db.execute(
+            f"""
+            START TRANSACTION;
+            DELETE FROM inventory_warehouse_stock WHERE warehouse_id = {warehouse_id_int};
+            DELETE FROM inventory_warehouse WHERE warehouse_id = {warehouse_id_int};
+            {self._audit_sql(
+                'warehouse_deleted',
+                'inventory_warehouse',
+                warehouse_id_int,
+                self.db.text(warehouse.get('name')),
+                'Warehouse deleted',
+                context,
+                warehouse,
+                None,
+            )};
+            COMMIT;
+            """
+        )
+        return {"deleted": True, "warehouseId": str(warehouse_id_int)}
+
+    def list_warehouse_stock(self, warehouse_id: object, context: dict) -> list[dict]:
+        warehouse = self._warehouse(warehouse_id, include_inactive=True)
+        self._assert_warehouse_access(context, warehouse, "warehouse_management")
+        return self._warehouse_stock_rows(self.db.integer(warehouse.get("id"), 0))
 
     def _save_computer(self, resource_id: object | None, payload: dict, context: dict) -> dict:
         device_name = self.db.text(payload.get("deviceName"))
@@ -1181,11 +1524,18 @@ class AssetService:
         cached = self._idempotency_result("inventory.receipt", idempotency_key, payload)
         if cached:
             return cached
-        self._assert_inventory_global_operation(context)
+        self._assert_inventory_issue_scope(context)
         model_id = self.db.integer(payload.get("modelId"), 0)
         quantity = self.db.integer(payload.get("quantity"), 0)
         if model_id <= 0 or quantity <= 0:
             raise self.api_error("Inventory receipt requires a model and a positive quantity.")
+        warehouse = self._resolve_warehouse(
+            payload,
+            context,
+            "inventory_operations",
+            require_explicit=True,
+        )
+        warehouse_id = self.db.integer(warehouse.get("id"), 0)
         model = self.db.json(
             f"""
             SELECT JSON_OBJECT(
@@ -1213,31 +1563,45 @@ class AssetService:
             f"""
             START TRANSACTION;
             SELECT model_id FROM it_inventory_model WHERE model_id = {model_id} FOR UPDATE;
+            INSERT INTO inventory_warehouse_stock (warehouse_id, model_id, quantity)
+            VALUES ({warehouse_id}, {model_id}, 0)
+            ON DUPLICATE KEY UPDATE warehouse_id = VALUES(warehouse_id);
+            SELECT quantity
+            FROM inventory_warehouse_stock
+            WHERE warehouse_id = {warehouse_id}
+              AND model_id = {model_id}
+            FOR UPDATE;
             UPDATE it_inventory_model
             SET quantity = quantity + {quantity},
                 inbound_date = {self.db.quote(inbound_date)}
             WHERE model_id = {model_id};
+            UPDATE inventory_warehouse_stock
+            SET quantity = quantity + {quantity}
+            WHERE warehouse_id = {warehouse_id}
+              AND model_id = {model_id};
             INSERT INTO inventory_movement_log (
               movement_direction, type_name, brand_name, model_name, quantity,
-              source_label, target_label, note, trigger_action
+              source_label, source_warehouse_id, target_label, target_warehouse_id,
+              note, trigger_action
             )
             VALUES (
               'increase', {self.db.quote(self.db.text(model.get('typeName')))},
               {self.db.quote(self.db.text(model.get('brandName')))},
               {self.db.quote(self.db.text(model.get('modelName')))}, {quantity},
-              {self.db.quote(source_label)}, 'IT Inventory', {self.db.quote(note)}, 'inventory_receipt'
+              {self.db.quote(source_label)}, NULL, {self.db.quote(self.db.text(warehouse.get('name')))},
+              {warehouse_id}, {self.db.quote(note)}, 'inventory_receipt'
             );
             SET @movement_id = LAST_INSERT_ID();
             INSERT INTO inventory_purchase_log (
               type_name, brand_name, model_name, non_asset_type_id, brand_id, model_id,
-              quantity, inbound_date, source_label, note, source_movement_log_id
+              warehouse_id, quantity, inbound_date, source_label, note, source_movement_log_id
             )
             VALUES (
               {self.db.quote(self.db.text(model.get('typeName')))},
               {self.db.quote(self.db.text(model.get('brandName')))},
               {self.db.quote(self.db.text(model.get('modelName')))},
               {self.db.integer(model.get('typeId'), 0)}, {self.db.integer(model.get('brandId'), 0)}, {model_id},
-              {quantity}, {self.db.quote(inbound_date)}, {self.db.quote(source_label)},
+              {warehouse_id}, {quantity}, {self.db.quote(inbound_date)}, {self.db.quote(source_label)},
               {self.db.quote(note)}, @movement_id
             );
             SET @purchase_id = LAST_INSERT_ID();
@@ -1249,14 +1613,19 @@ class AssetService:
                 'Inventory receipt',
                 context,
                 {'quantity': self.db.integer(model.get('quantity'), 0)},
-                {'quantityDelta': quantity},
+                {'quantityDelta': quantity, 'warehouseId': warehouse_id},
             )};
             SELECT @purchase_id;
             COMMIT;
             """
         )
         purchase_id = self.db.integer(output.splitlines()[-1] if output else 0, 0)
-        response = {"purchaseId": str(purchase_id), "modelId": str(model_id), "quantityReceived": quantity}
+        response = {
+            "purchaseId": str(purchase_id),
+            "modelId": str(model_id),
+            "warehouseId": str(warehouse_id),
+            "quantityReceived": quantity,
+        }
         self._store_idempotency_result("inventory.receipt", idempotency_key, payload, response)
         return response
 
@@ -1279,6 +1648,16 @@ class AssetService:
             raise self.api_error("Allocation requires a positive quantity.")
         if allocation_type == "monitor" and quantity != 1:
             raise self.api_error("Monitor allocation quantity must be one.")
+        warehouse = None
+        if stock_adjusted:
+            warehouse = self._resolve_warehouse(
+                payload,
+                context,
+                "inventory_operations",
+                require_explicit=True,
+            )
+        warehouse_id = self.db.integer((warehouse or {}).get("id"), 0)
+        warehouse_id_sql = str(warehouse_id) if warehouse_id > 0 else "NULL"
 
         type_id = 0
         brand_id = 0
@@ -1432,14 +1811,31 @@ class AssetService:
             FROM it_inventory_model
             WHERE model_id = {model_id}
             FOR UPDATE;
+            INSERT INTO inventory_warehouse_stock (warehouse_id, model_id, quantity)
+            SELECT {warehouse_id}, {model_id}, 0
+            FROM DUAL
+            WHERE {1 if stock_adjusted else 0} = 1
+            ON DUPLICATE KEY UPDATE warehouse_id = VALUES(warehouse_id);
+            SELECT COALESCE(quantity, 0) INTO @warehouse_available_quantity
+            FROM inventory_warehouse_stock
+            WHERE warehouse_id = {warehouse_id}
+              AND model_id = {model_id}
+            FOR UPDATE;
             SET @stock_updated = IF(
-              {1 if stock_adjusted else 0} = 0 OR @available_quantity >= {quantity},
+              {1 if stock_adjusted else 0} = 0
+              OR (@available_quantity >= {quantity} AND @warehouse_available_quantity >= {quantity}),
               1,
               0
             );
             UPDATE it_inventory_model
             SET quantity = quantity - {quantity}
             WHERE model_id = {model_id}
+              AND @stock_updated = 1
+              AND {1 if stock_adjusted else 0} = 1;
+            UPDATE inventory_warehouse_stock
+            SET quantity = quantity - {quantity}
+            WHERE warehouse_id = {warehouse_id}
+              AND model_id = {model_id}
               AND @stock_updated = 1
               AND {1 if stock_adjusted else 0} = 1;
             """
@@ -1456,23 +1852,25 @@ class AssetService:
             {usage_sql}
             INSERT INTO inventory_allocation_history (
               allocation_type, employee_id, non_asset_type_id, inventory_model_id,
-              usage_record_id, quantity, stock_adjusted, status, notes, issued_by
+              warehouse_id, usage_record_id, quantity, stock_adjusted, status, notes, issued_by
             )
             SELECT
               {self.db.quote(allocation_type)}, {employee_id}, {type_id}, {model_id_sql},
-              @usage_ref, {quantity}, {1 if stock_adjusted else 0}, 'active',
+              {warehouse_id_sql}, @usage_ref, {quantity}, {1 if stock_adjusted else 0}, 'active',
               {self.db.quote(note)}, {self._actor_id(context)}
             FROM DUAL
             WHERE @stock_updated = 1;
             SET @allocation_id = IF(@stock_updated = 1, LAST_INSERT_ID(), 0);
             INSERT INTO inventory_movement_log (
               movement_direction, type_name, brand_name, model_name, quantity,
-              source_label, target_label, note, related_employee_no, related_employee_name, trigger_action
+              source_label, source_warehouse_id, target_label, target_warehouse_id,
+              note, related_employee_no, related_employee_name, trigger_action
             )
             SELECT
               'decrease', {self.db.quote(self.db.text(model.get('typeName')))},
               {self.db.quote(self.db.text(model.get('brandName')))}, {self.db.quote(model_name)}, {quantity},
-              'IT Inventory', {self.db.quote(self.db.text(employee.get('name')))}, {self.db.quote(note)},
+              {self.db.quote(self.db.text((warehouse or {}).get('name')))}, {warehouse_id_sql},
+              {self.db.quote(self.db.text(employee.get('name')))}, NULL, {self.db.quote(note)},
               {self.db.quote(self.db.text(employee.get('employeeNo')))},
               {self.db.quote(self.db.text(employee.get('name')))}, 'inventory_allocation'
             FROM DUAL
@@ -1486,7 +1884,12 @@ class AssetService:
                 context,
                 '@stock_updated = 1',
                 None,
-                {'quantity': quantity, 'employeeId': employee.get('id'), 'stockAdjusted': stock_adjusted},
+                {
+                    'quantity': quantity,
+                    'employeeId': employee.get('id'),
+                    'stockAdjusted': stock_adjusted,
+                    'warehouseId': warehouse_id if stock_adjusted else None,
+                },
             )};
             SELECT @stock_updated, @allocation_id, @usage_ref;
             COMMIT;
@@ -1499,7 +1902,11 @@ class AssetService:
         usage_ref = self.db.integer(result[2] if len(result) > 2 else 0, 0)
         if stock_updated != 1 or allocation_id <= 0 or usage_ref <= 0:
             raise self.conflict_error("Insufficient inventory.")
-        response = {"allocationId": str(allocation_id), "usageRecordId": str(usage_ref)}
+        response = {
+            "allocationId": str(allocation_id),
+            "usageRecordId": str(usage_ref),
+            "warehouseId": str(warehouse_id) if stock_adjusted else "",
+        }
         self._store_idempotency_result("inventory.allocate", idempotency_key, payload, response)
         return response
 
@@ -1507,11 +1914,18 @@ class AssetService:
         cached = self._idempotency_result("inventory.adjust", idempotency_key, payload)
         if cached:
             return cached
-        self._assert_inventory_global_operation(context)
+        self._assert_inventory_issue_scope(context)
         model_id = self.db.integer(payload.get("modelId"), 0)
         delta = self.db.integer(payload.get("quantityDelta"), 0)
         if model_id <= 0 or delta == 0:
             raise self.api_error("Inventory adjustment requires a model and a non-zero quantity delta.")
+        warehouse = self._resolve_warehouse(
+            payload,
+            context,
+            "inventory_operations",
+            require_explicit=True,
+        )
+        warehouse_id = self.db.integer(warehouse.get("id"), 0)
         model = self.db.json(
             f"""
             SELECT JSON_OBJECT(
@@ -1539,13 +1953,32 @@ class AssetService:
             FROM it_inventory_model
             WHERE model_id = {model_id}
             FOR UPDATE;
-            SET @adjusted = IF(@current_quantity + ({delta}) >= 0, 1, 0);
+            INSERT INTO inventory_warehouse_stock (warehouse_id, model_id, quantity)
+            VALUES ({warehouse_id}, {model_id}, 0)
+            ON DUPLICATE KEY UPDATE warehouse_id = VALUES(warehouse_id);
+            SELECT quantity INTO @warehouse_current_quantity
+            FROM inventory_warehouse_stock
+            WHERE warehouse_id = {warehouse_id}
+              AND model_id = {model_id}
+            FOR UPDATE;
+            SET @adjusted = IF(
+              @current_quantity + ({delta}) >= 0
+              AND @warehouse_current_quantity + ({delta}) >= 0,
+              1,
+              0
+            );
             UPDATE it_inventory_model
             SET quantity = quantity + ({delta})
             WHERE model_id = {model_id} AND @adjusted = 1;
+            UPDATE inventory_warehouse_stock
+            SET quantity = quantity + ({delta})
+            WHERE warehouse_id = {warehouse_id}
+              AND model_id = {model_id}
+              AND @adjusted = 1;
             INSERT INTO inventory_movement_log (
               movement_direction, type_name, brand_name, model_name, quantity,
-              source_label, target_label, note, trigger_action
+              source_label, source_warehouse_id, target_label, target_warehouse_id,
+              note, trigger_action
             )
             SELECT
               {self.db.quote(direction)},
@@ -1553,8 +1986,10 @@ class AssetService:
               {self.db.quote(self.db.text(model.get('brandName')))},
               {self.db.quote(self.db.text(model.get('modelName')))},
               {quantity},
-              {self.db.quote('Manual adjustment' if delta > 0 else 'IT Inventory')},
-              {self.db.quote('IT Inventory' if delta > 0 else 'Manual adjustment')},
+              {self.db.quote('Manual adjustment' if delta > 0 else self.db.text(warehouse.get('name')))},
+              {"NULL" if delta > 0 else str(warehouse_id)},
+              {self.db.quote(self.db.text(warehouse.get('name') if delta > 0 else 'Manual adjustment'))},
+              {str(warehouse_id) if delta > 0 else "NULL"},
               {self.db.quote(note)},
               'inventory_adjustment'
             FROM DUAL
@@ -1568,7 +2003,7 @@ class AssetService:
                 context,
                 '@adjusted = 1',
                 {'quantity': self.db.integer(model.get('quantity'), 0)},
-                {'quantityDelta': delta},
+                {'quantityDelta': delta, 'warehouseId': warehouse_id},
             )};
             SELECT @adjusted;
             COMMIT;
@@ -1577,8 +2012,170 @@ class AssetService:
         adjusted = self.db.integer(output.splitlines()[-1] if output else 0, 0)
         if adjusted != 1:
             raise self.conflict_error("Inventory adjustment would make stock negative.")
-        response = {"modelId": str(model_id), "quantityDelta": delta}
+        response = {"modelId": str(model_id), "warehouseId": str(warehouse_id), "quantityDelta": delta}
         self._store_idempotency_result("inventory.adjust", idempotency_key, payload, response)
+        return response
+
+    def transfer_inventory(self, payload: dict, context: dict, idempotency_key: str = "") -> dict:
+        cached = self._idempotency_result("inventory.transfer", idempotency_key, payload)
+        if cached:
+            return cached
+        self._assert_inventory_issue_scope(context)
+
+        source_warehouse_id = self.db.integer(payload.get("sourceWarehouseId"), 0)
+        target_warehouse_id = self.db.integer(payload.get("targetWarehouseId"), 0)
+        model_id = self.db.integer(payload.get("modelId"), 0)
+        quantity = self.db.integer(payload.get("quantity"), 0)
+        note = self.db.text(payload.get("note")).strip()
+        if source_warehouse_id <= 0 or target_warehouse_id <= 0:
+            raise self.api_error("请选择调出仓库和调入仓库。")
+        if source_warehouse_id == target_warehouse_id:
+            raise self.api_error("调出仓库和调入仓库不能相同。")
+        if model_id <= 0 or quantity <= 0:
+            raise self.api_error("请选择物资型号并填写大于零的调拨数量。")
+        if len(note) > 500:
+            raise self.api_error("调拨备注不能超过 500 个字符。")
+
+        source_warehouse = self._warehouse(source_warehouse_id)
+        target_warehouse = self._warehouse(target_warehouse_id)
+        self._assert_warehouse_access(
+            context, source_warehouse, "warehouse_management", require_active=True
+        )
+        self._assert_warehouse_access(
+            context, target_warehouse, "warehouse_management", require_active=True
+        )
+        model = self.db.json(
+            f"""
+            SELECT JSON_OBJECT(
+              'typeName', type_row.type_name,
+              'brandName', brand.brand_name,
+              'modelName', model.model_name
+            )
+            FROM it_inventory_model model
+            JOIN it_inventory_brand brand ON brand.brand_id = model.brand_id
+            JOIN non_asset_type type_row ON type_row.non_asset_type_id = model.non_asset_type_id
+            WHERE model.model_id = {model_id}
+              AND model.is_active = 1;
+            """,
+            None,
+        )
+        if not model:
+            raise self.api_error("物资型号不存在或已停用。")
+
+        first_warehouse_id, second_warehouse_id = sorted(
+            (source_warehouse_id, target_warehouse_id)
+        )
+        actor_id = self._actor_id(context)
+        actor_sql = str(actor_id) if actor_id > 0 else "NULL"
+        output = self.db.execute(
+            f"""
+            START TRANSACTION;
+            SET @model_exists = 0;
+            SELECT 1 INTO @model_exists
+            FROM it_inventory_model
+            WHERE model_id = {model_id}
+              AND is_active = 1
+            FOR UPDATE;
+            INSERT INTO inventory_warehouse_stock (warehouse_id, model_id, quantity)
+            VALUES ({first_warehouse_id}, {model_id}, 0)
+            ON DUPLICATE KEY UPDATE warehouse_id = VALUES(warehouse_id);
+            INSERT INTO inventory_warehouse_stock (warehouse_id, model_id, quantity)
+            VALUES ({second_warehouse_id}, {model_id}, 0)
+            ON DUPLICATE KEY UPDATE warehouse_id = VALUES(warehouse_id);
+            SELECT quantity INTO @source_quantity
+            FROM inventory_warehouse_stock
+            WHERE warehouse_id = {source_warehouse_id}
+              AND model_id = {model_id}
+            FOR UPDATE;
+            SELECT quantity
+            FROM inventory_warehouse_stock
+            WHERE warehouse_id = {target_warehouse_id}
+              AND model_id = {model_id}
+            FOR UPDATE;
+            SET @transferred = IF(
+              @model_exists = 1
+              AND COALESCE(@source_quantity, 0) >= {quantity},
+              1,
+              0
+            );
+            UPDATE inventory_warehouse_stock
+            SET quantity = quantity - {quantity}
+            WHERE warehouse_id = {source_warehouse_id}
+              AND model_id = {model_id}
+              AND @transferred = 1;
+            UPDATE inventory_warehouse_stock
+            SET quantity = quantity + {quantity}
+            WHERE warehouse_id = {target_warehouse_id}
+              AND model_id = {model_id}
+              AND @transferred = 1;
+            INSERT INTO inventory_transfer_log (
+              source_warehouse_id, target_warehouse_id, model_id, quantity, note, created_by
+            )
+            SELECT
+              {source_warehouse_id}, {target_warehouse_id}, {model_id}, {quantity},
+              {self.db.quote(note)}, {actor_sql}
+            FROM DUAL
+            WHERE @transferred = 1;
+            SET @transfer_id = IF(@transferred = 1, LAST_INSERT_ID(), 0);
+            INSERT INTO inventory_movement_log (
+              movement_direction, type_name, brand_name, model_name, quantity,
+              source_label, source_warehouse_id, target_label, target_warehouse_id,
+              note, trigger_action
+            )
+            SELECT
+              'decrease',
+              {self.db.quote(self.db.text(model.get('typeName')))},
+              {self.db.quote(self.db.text(model.get('brandName')))},
+              {self.db.quote(self.db.text(model.get('modelName')))},
+              {quantity},
+              {self.db.quote(self.db.text(source_warehouse.get('name')))},
+              {source_warehouse_id},
+              {self.db.quote(self.db.text(target_warehouse.get('name')))},
+              {target_warehouse_id},
+              {self.db.quote(note)},
+              'inventory_transfer'
+            FROM DUAL
+            WHERE @transferred = 1;
+            {self._conditional_audit_sql(
+                'inventory_transferred',
+                'inventory_transfer',
+                'CAST(@transfer_id AS CHAR)',
+                self.db.text(model.get('modelName')),
+                'Warehouse inventory transferred',
+                context,
+                '@transferred = 1',
+                {
+                    'sourceWarehouseId': source_warehouse_id,
+                    'targetWarehouseId': target_warehouse_id,
+                    'modelId': model_id,
+                    'quantity': quantity,
+                },
+                {
+                    'sourceWarehouseId': source_warehouse_id,
+                    'targetWarehouseId': target_warehouse_id,
+                    'modelId': model_id,
+                    'quantity': quantity,
+                    'note': note,
+                },
+            )};
+            SELECT @transferred, @transfer_id;
+            COMMIT;
+            """
+        )
+        lines = [line.strip() for line in output.splitlines() if line.strip()]
+        result = (lines[-1] if lines else "").split("\t")
+        transferred = self.db.integer(result[0] if result else 0, 0)
+        transfer_id = self.db.integer(result[1] if len(result) > 1 else 0, 0)
+        if transferred != 1 or transfer_id <= 0:
+            raise self.conflict_error("调出仓库库存不足，无法完成调拨。")
+        response = {
+            "transferId": str(transfer_id),
+            "sourceWarehouseId": str(source_warehouse_id),
+            "targetWarehouseId": str(target_warehouse_id),
+            "modelId": str(model_id),
+            "quantity": quantity,
+        }
+        self._store_idempotency_result("inventory.transfer", idempotency_key, payload, response)
         return response
 
     def return_inventory(self, allocation_id: object, payload: dict, context: dict, idempotency_key: str = "") -> dict:
@@ -1598,6 +2195,7 @@ class AssetService:
               'issuedBy', COALESCE(allocation.issued_by, 0),
               'typeId', COALESCE(allocation.non_asset_type_id, 0),
               'modelId', COALESCE(allocation.inventory_model_id, 0),
+              'warehouseId', COALESCE(allocation.warehouse_id, 0),
               'usageRecordId', COALESCE(allocation.usage_record_id, 0),
               'quantity', allocation.quantity,
               'stockAdjusted', allocation.stock_adjusted,
@@ -1635,6 +2233,31 @@ class AssetService:
             raise self.conflict_error("This inventory allocation has already been returned.")
         quantity = self.db.integer(allocation.get("quantity"), 0)
         stock_adjusted = self.db.integer(allocation.get("stockAdjusted"), 1) == 1
+        source_warehouse_id = self.db.integer(allocation.get("warehouseId"), 0)
+        target_warehouse = None
+        if stock_adjusted:
+            if source_warehouse_id > 0:
+                source_warehouse = self._warehouse(source_warehouse_id, include_inactive=True)
+                self._assert_warehouse_access(
+                    context,
+                    source_warehouse,
+                    "inventory_operations",
+                )
+                self._assert_warehouse_access(
+                    context,
+                    source_warehouse,
+                    "warehouse_management",
+                )
+            target_warehouse = self._resolve_warehouse(
+                payload,
+                context,
+                "inventory_operations",
+                require_explicit=True,
+            )
+        elif self.db.integer(payload.get("warehouseId"), 0) > 0:
+            raise self.api_error("Inventory registered without stock deduction cannot be returned to a warehouse.")
+        target_warehouse_id = self.db.integer((target_warehouse or {}).get("id"), 0)
+        target_warehouse_id_sql = str(target_warehouse_id) if target_warehouse_id > 0 else "NULL"
         usage_id = self.db.integer(allocation.get("usageRecordId"), 0)
         usage_table = "employee_monitor_usage" if self.db.text(allocation.get("type")) == "monitor" else "employee_non_asset_usage"
         usage_pk = "monitor_usage_id" if usage_table == "employee_monitor_usage" else "non_asset_usage_id"
@@ -1653,10 +2276,25 @@ class AssetService:
             FROM inventory_allocation_history
             WHERE allocation_id = {allocation_id_int} AND status = 'active'
             FOR UPDATE;
+            INSERT INTO inventory_warehouse_stock (warehouse_id, model_id, quantity)
+            SELECT {target_warehouse_id}, {self.db.integer(allocation.get('modelId'), 0)}, 0
+            FROM DUAL
+            WHERE {1 if stock_adjusted else 0} = 1
+            ON DUPLICATE KEY UPDATE quantity = inventory_warehouse_stock.quantity;
+            SELECT quantity
+            FROM inventory_warehouse_stock
+            WHERE warehouse_id = {target_warehouse_id}
+              AND model_id = {self.db.integer(allocation.get('modelId'), 0)}
+            FOR UPDATE;
             UPDATE inventory_allocation_history
             SET status = 'returned',
                 returned_at = CURRENT_TIMESTAMP,
-                returned_by = {self._actor_id(context)}
+                returned_by = {self._actor_id(context)},
+                warehouse_id = CASE
+                  WHEN warehouse_id IS NULL AND {target_warehouse_id_sql} IS NOT NULL
+                    THEN {target_warehouse_id_sql}
+                  ELSE warehouse_id
+                END
             WHERE allocation_id = {allocation_id_int}
               AND status = 'active'
               AND @return_allowed = 1;
@@ -1675,15 +2313,23 @@ class AssetService:
             WHERE model_id = {self.db.integer(allocation.get('modelId'), 0)}
               AND @returned_count = 1
               AND {1 if stock_adjusted else 0} = 1;
+            UPDATE inventory_warehouse_stock
+            SET quantity = quantity + {quantity}
+            WHERE warehouse_id = {target_warehouse_id}
+              AND model_id = {self.db.integer(allocation.get('modelId'), 0)}
+              AND @returned_count = 1
+              AND {1 if stock_adjusted else 0} = 1;
             INSERT INTO inventory_movement_log (
               movement_direction, type_name, brand_name, model_name, quantity,
-              source_label, target_label, note, related_employee_no, related_employee_name, trigger_action
+              source_label, source_warehouse_id, target_label, target_warehouse_id,
+              note, related_employee_no, related_employee_name, trigger_action
             )
             SELECT
               'increase', {self.db.quote(self.db.text(allocation.get('typeName')))},
               {self.db.quote(self.db.text(allocation.get('brandName')))},
               {self.db.quote(self.db.text(allocation.get('modelName')))}, {quantity},
-              {self.db.quote(self.db.text(allocation.get('employeeName')))}, 'IT Inventory',
+              {self.db.quote(self.db.text(allocation.get('employeeName')))}, NULL,
+              {self.db.quote(self.db.text((target_warehouse or {}).get('name')))}, {target_warehouse_id_sql},
               {self.db.quote(self.db.text(payload.get('notes')))},
               {self.db.quote(self.db.text(allocation.get('employeeNo')))},
               {self.db.quote(self.db.text(allocation.get('employeeName')))}, 'inventory_return'
@@ -1698,7 +2344,12 @@ class AssetService:
                 context,
                 '@returned_count = 1',
                 {'status': 'active'},
-                {'status': 'returned', 'quantity': quantity, 'stockAdjusted': stock_adjusted},
+                {
+                    'status': 'returned',
+                    'quantity': quantity,
+                    'stockAdjusted': stock_adjusted,
+                    'warehouseId': target_warehouse_id if stock_adjusted else None,
+                },
             )};
             SELECT @returned_count;
             COMMIT;
@@ -1707,7 +2358,11 @@ class AssetService:
         returned_count = self.db.integer(output.splitlines()[-1] if output else 0, 0)
         if returned_count <= 0:
             raise self.conflict_error("This inventory allocation has already been returned.")
-        response = {"allocationId": str(allocation_id_int), "status": "returned"}
+        response = {
+            "allocationId": str(allocation_id_int),
+            "warehouseId": str(target_warehouse_id) if stock_adjusted else "",
+            "status": "returned",
+        }
         self._store_idempotency_result("inventory.return", idempotency_key, payload, response)
         return response
 
@@ -1793,6 +2448,18 @@ class AssetService:
             raise self.conflict_error(
                 "This legacy usage has no linked inventory model. Reconcile its catalog link before returning it."
             )
+        target_warehouse = None
+        if stock_adjusted:
+            target_warehouse = self._resolve_warehouse(
+                payload,
+                context,
+                "inventory_operations",
+                require_explicit=True,
+            )
+        elif self.db.integer(payload.get("warehouseId"), 0) > 0:
+            raise self.api_error("Inventory registered without stock deduction cannot be returned to a warehouse.")
+        target_warehouse_id = self.db.integer((target_warehouse or {}).get("id"), 0)
+        target_warehouse_id_sql = str(target_warehouse_id) if target_warehouse_id > 0 else "NULL"
 
         existing_allocation_id = self.db.scalar(
             f"""
@@ -1856,14 +2523,24 @@ class AssetService:
               1,
               0
             );
+            INSERT INTO inventory_warehouse_stock (warehouse_id, model_id, quantity)
+            SELECT {target_warehouse_id}, @usage_model_id, 0
+            FROM DUAL
+            WHERE @usage_stock_adjusted = 1
+            ON DUPLICATE KEY UPDATE quantity = inventory_warehouse_stock.quantity;
+            SELECT quantity
+            FROM inventory_warehouse_stock
+            WHERE warehouse_id = {target_warehouse_id}
+              AND model_id = @usage_model_id
+            FOR UPDATE;
             INSERT INTO inventory_allocation_history (
               allocation_type, employee_id, non_asset_type_id, inventory_model_id,
-              usage_record_id, quantity, stock_adjusted, status, issued_at, returned_at,
+              warehouse_id, usage_record_id, quantity, stock_adjusted, status, issued_at, returned_at,
               notes, issued_by, returned_by
             )
             SELECT
               {self.db.quote(normalized_type)}, {employee_id}, {type_sql}, {model_sql},
-              {usage_id}, @usage_quantity, @usage_stock_adjusted, 'returned', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP,
+              {target_warehouse_id_sql}, {usage_id}, @usage_quantity, @usage_stock_adjusted, 'returned', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP,
               {self.db.quote(reconciliation_note)}, {actor_sql}, {actor_sql}
             FROM DUAL
             WHERE @return_allowed = 1;
@@ -1879,14 +2556,22 @@ class AssetService:
             WHERE model_id = @usage_model_id
               AND @usage_stock_adjusted = 1
               AND @return_allowed = 1;
+            UPDATE inventory_warehouse_stock
+            SET quantity = quantity + @usage_quantity
+            WHERE warehouse_id = {target_warehouse_id}
+              AND model_id = @usage_model_id
+              AND @usage_stock_adjusted = 1
+              AND @return_allowed = 1;
             INSERT INTO inventory_movement_log (
               movement_direction, type_name, brand_name, model_name, quantity,
-              source_label, target_label, note, related_employee_no, related_employee_name, trigger_action
+              source_label, source_warehouse_id, target_label, target_warehouse_id,
+              note, related_employee_no, related_employee_name, trigger_action
             )
             SELECT
               'increase', {self.db.quote(self.db.text(usage.get('typeName')))},
               {self.db.quote(self.db.text(usage.get('brandName')))}, {self.db.quote(self.db.text(usage.get('modelName')))},
-              @usage_quantity, {self.db.quote(self.db.text(employee.get('name')))}, 'IT Inventory',
+              @usage_quantity, {self.db.quote(self.db.text(employee.get('name')))}, NULL,
+              {self.db.quote(self.db.text((target_warehouse or {}).get('name')))}, {target_warehouse_id_sql},
               {self.db.quote(reconciliation_note)}, {self.db.quote(self.db.text(employee.get('employeeNo')))},
               {self.db.quote(self.db.text(employee.get('name')))}, 'inventory_return'
             FROM DUAL
@@ -1900,7 +2585,12 @@ class AssetService:
                 context,
                 '@return_allowed = 1',
                 {'status': 'active', 'legacyUsage': True},
-                {'status': 'returned', 'quantity': quantity, 'stockAdjusted': stock_adjusted},
+                {
+                    'status': 'returned',
+                    'quantity': quantity,
+                    'stockAdjusted': stock_adjusted,
+                    'warehouseId': target_warehouse_id if stock_adjusted else None,
+                },
             )};
             SELECT @return_allowed, @allocation_id;
             COMMIT;
@@ -1916,6 +2606,7 @@ class AssetService:
             "allocationId": str(allocation_id),
             "status": "returned",
             "legacyUsageReconciled": True,
+            "warehouseId": str(target_warehouse_id) if stock_adjusted else "",
         }
         self._store_idempotency_result("inventory.usage-return", idempotency_key, payload, response)
         return response
@@ -1933,6 +2624,8 @@ class AssetService:
                   'orgId', COALESCE(CAST(employee.org_unit_id AS CHAR), ''),
                   'issuedBy', COALESCE(CAST(allocation.issued_by AS CHAR), ''),
                   'modelId', COALESCE(CAST(allocation.inventory_model_id AS CHAR), ''),
+                  'warehouseId', COALESCE(CAST(allocation.warehouse_id AS CHAR), ''),
+                  'warehouseName', COALESCE(warehouse.warehouse_name, ''),
                   'usageRecordId', COALESCE(CAST(allocation.usage_record_id AS CHAR), ''),
                   'brandName', COALESCE(brand.brand_name, monitor_usage.display_name, non_asset_usage.brand, ''),
                   'modelName', COALESCE(model.model_name, monitor_usage.model, non_asset_usage.model, ''),
@@ -1945,6 +2638,7 @@ class AssetService:
                 JOIN employee ON employee.employee_id = allocation.employee_id
                 LEFT JOIN it_inventory_model model ON model.model_id = allocation.inventory_model_id
                 LEFT JOIN it_inventory_brand brand ON brand.brand_id = model.brand_id
+                LEFT JOIN inventory_warehouse warehouse ON warehouse.warehouse_id = allocation.warehouse_id
                 LEFT JOIN employee_monitor_usage monitor_usage
                   ON monitor_usage.monitor_usage_id = allocation.usage_record_id
                  AND allocation.allocation_type = 'monitor'
@@ -1960,6 +2654,17 @@ class AssetService:
         allowed = self.scope.permitted_org_ids(context)
         if allowed is not None:
             rows = [row for row in rows if self.db.integer(row.get("orgId"), 0) in allowed]
+        visible_warehouse_ids = {
+            self.db.text(item.get("id"))
+            for item in self.list_warehouses(context)
+            if self.db.text(item.get("id"))
+        }
+        rows = [
+            row
+            for row in rows
+            if not self.db.text(row.get("warehouseId"))
+            or self.db.text(row.get("warehouseId")) in visible_warehouse_ids
+        ]
         scope = self._permission_scope(context)
         if scope == "own":
             actor_employee_id = self._actor_employee_id(context)
@@ -1976,6 +2681,25 @@ class AssetService:
                 if self.db.integer(row.get("issuedBy"), 0) == self._actor_id(context)
             ]
         return rows
+
+    def offboarding_preview(self, employee_id: object, context: dict) -> dict:
+        employee_id_int = self.db.integer(employee_id, 0)
+        if employee_id_int <= 0:
+            raise self.api_error("人员不存在。")
+        permission_scope = self._permission_scope(context, "employees")
+        if permission_scope not in {"all", "organization"}:
+            raise self.forbidden_error("办理离职需要使用人员的全部数据或所属部门数据权限。")
+        if self._actor_employee_id(context) == employee_id_int:
+            raise self.conflict_error("当前登录账号不能办理自身绑定人员离职。")
+
+        employee = self._offboarding_employee(employee_id_int)
+        if self.db.text(employee.get("status")) == "left":
+            raise self.conflict_error("该人员已经办理离职。")
+        self.scope.assert_org_access(context, employee.get("orgId"))
+        return {
+            "employee": employee,
+            "items": self._offboarding_items(employee_id_int),
+        }
 
     def _sql_id_list(self, values: list[int]) -> str:
         ids = [str(value) for value in sorted({value for value in values if value > 0})]
@@ -2151,6 +2875,35 @@ class AssetService:
             """,
             [],
         )
+        allocation_rows = list(
+            self.db.json(
+                f"""
+                SELECT COALESCE(JSON_ARRAYAGG(JSON_OBJECT(
+                  'id', CAST(allocation.allocation_id AS CHAR),
+                  'allocationType', allocation.allocation_type,
+                  'usageRecordId', CAST(allocation.usage_record_id AS CHAR),
+                  'quantity', allocation.quantity,
+                  'stockAdjusted', allocation.stock_adjusted,
+                  'warehouseId', COALESCE(CAST(allocation.warehouse_id AS CHAR), ''),
+                  'warehouseName', COALESCE(warehouse.warehouse_name, '')
+                )), JSON_ARRAY())
+                FROM inventory_allocation_history allocation
+                LEFT JOIN inventory_warehouse warehouse
+                  ON warehouse.warehouse_id = allocation.warehouse_id
+                WHERE allocation.employee_id = {employee_id}
+                  AND allocation.status = 'active'
+                  AND allocation.allocation_type IN ('monitor', 'non_asset')
+                """,
+                [],
+            )
+            or []
+        )
+        allocations_by_key: dict[str, list[dict]] = {}
+        for allocation in allocation_rows:
+            allocation_type = self.db.text(allocation.get("allocationType"))
+            usage_record_id = self.db.text(allocation.get("usageRecordId"))
+            if allocation_type and usage_record_id:
+                allocations_by_key.setdefault(f"{allocation_type}:{usage_record_id}", []).append(dict(allocation))
         items = list(computers or []) + list(monitors or []) + list(non_assets or [])
         for item in items:
             item_type = self.db.text(item.get("itemType"))
@@ -2161,6 +2914,41 @@ class AssetService:
             )
             item["quantity"] = max(1, self.db.integer(item.get("quantity"), 1))
             item["stockAdjusted"] = parse_bool(item.get("stockAdjusted"), False)
+            if item_type in {"monitor", "non_asset"}:
+                allocations = allocations_by_key.get(f"{item_type}:{item['id']}", [])
+                warehouse_ids = [
+                    self.db.text(allocation.get("warehouseId"))
+                    for allocation in allocations
+                    if self.db.text(allocation.get("warehouseId"))
+                ]
+                warehouse_names = [
+                    self.db.text(allocation.get("warehouseName"))
+                    for allocation in allocations
+                    if self.db.text(allocation.get("warehouseName"))
+                ]
+                item["activeAllocationCount"] = len(allocations)
+                item["activeAllocationQuantity"] = sum(
+                    max(0, self.db.integer(allocation.get("quantity"), 0))
+                    for allocation in allocations
+                )
+                item["activeAllocations"] = [
+                    {
+                        "id": self.db.text(allocation.get("id")),
+                        "quantity": max(0, self.db.integer(allocation.get("quantity"), 0)),
+                        "warehouseId": self.db.text(allocation.get("warehouseId")),
+                        "warehouseName": self.db.text(allocation.get("warehouseName")),
+                    }
+                    for allocation in allocations
+                ]
+                item["sourceWarehouseIds"] = sorted(set(warehouse_ids), key=int)
+                item["sourceWarehouseNames"] = list(dict.fromkeys(warehouse_names))
+                item["requiresRecoveryWarehouse"] = bool(
+                    item["stockAdjusted"]
+                    and (
+                        not allocations
+                        or any(not self.db.text(allocation.get("warehouseId")) for allocation in allocations)
+                    )
+                )
         return items
 
     def _normalize_offboarding_plan(
@@ -2228,8 +3016,35 @@ class AssetService:
                 }
             )
             if action == "recover" and current["itemType"] != "computer":
-                if parse_bool(current.get("stockAdjusted"), False) and self.db.integer(current.get("modelId"), 0) <= 0:
+                stock_adjusted = parse_bool(current.get("stockAdjusted"), False)
+                if stock_adjusted and self.db.integer(current.get("modelId"), 0) <= 0:
                     raise self.conflict_error("已扣减库存的物资缺少库存型号，无法通过离职回收自动入库。")
+                if stock_adjusted:
+                    source_warehouse_ids = sorted(
+                        {
+                            self.db.integer(value, 0)
+                            for value in current.get("sourceWarehouseIds") or []
+                            if self.db.integer(value, 0) > 0
+                        }
+                    )
+                    if source_warehouse_ids:
+                        for source_warehouse_id in source_warehouse_ids:
+                            self._assert_warehouse_access(
+                                context,
+                                self._warehouse(source_warehouse_id, include_inactive=True),
+                                "warehouse_management",
+                            )
+                    # Every stock-adjusted recovery must name its destination.
+                    # The destination is independent from the warehouse used
+                    # when the item was issued.
+                    target_warehouse = self._resolve_warehouse(
+                        raw_item,
+                        context,
+                        "employees",
+                        require_explicit=True,
+                    )
+                    current["recoveryWarehouseId"] = self.db.text(target_warehouse.get("id"))
+                    current["recoveryWarehouseName"] = self.db.text(target_warehouse.get("name"))
             submitted_keys.append(key)
             normalized.append(current)
 
@@ -2297,6 +3112,10 @@ class AssetService:
                     "targetEmployeeId": item.get("targetEmployeeId"),
                     "targetEmployeeNo": item.get("targetEmployeeNo"),
                     "targetEmployeeName": item.get("targetEmployeeName"),
+                    "sourceWarehouseIds": item.get("sourceWarehouseIds") or [],
+                    "sourceWarehouseNames": item.get("sourceWarehouseNames") or [],
+                    "recoveryWarehouseId": item.get("recoveryWarehouseId") or "",
+                    "recoveryWarehouseName": item.get("recoveryWarehouseName") or "",
                     "handlingNote": item.get("note"),
                 }
             )
@@ -2361,6 +3180,13 @@ class AssetService:
             FROM employee_non_asset_usage
             WHERE employee_id = {employee_id_int}
               AND is_active = 1
+            FOR UPDATE
+            """,
+            f"""
+            SELECT allocation_id
+            FROM inventory_allocation_history
+            WHERE employee_id = {employee_id_int}
+              AND status = 'active'
             FOR UPDATE
             """,
         ]
@@ -2710,6 +3536,10 @@ class AssetService:
                 handling_note,
             )
             target_status = "cancelled" if action == "exception" else "returned"
+            recovery_warehouse_id = self.db.integer(item.get("recoveryWarehouseId"), 0)
+            recovery_warehouse_id_sql = (
+                str(recovery_warehouse_id) if recovery_warehouse_id > 0 else "NULL"
+            )
             statements.extend(
                 [
                     f"""
@@ -2722,11 +3552,99 @@ class AssetService:
                         AND status = 'active'
                     )
                     """,
+                ]
+            )
+            if action == "recover" and stock_adjusted:
+                statements.extend(
+                    [
+                        f"""
+                        SET @allocation_recovery_quantity = (
+                          SELECT COALESCE(SUM(quantity), 0)
+                          FROM inventory_allocation_history
+                          WHERE allocation_type = {self.db.quote(allocation_type)}
+                            AND employee_id = {employee_id_int}
+                            AND usage_record_id = {item_id}
+                            AND status = 'active'
+                            AND stock_adjusted = 1
+                        )
+                        """,
+                        f"""
+                        SET @recovery_quantity = IF(
+                          @active_allocation_count = 0,
+                          {quantity},
+                          @allocation_recovery_quantity
+                        )
+                        """,
+                        f"""
+                        INSERT INTO inventory_warehouse_stock (warehouse_id, model_id, quantity)
+                        SELECT
+                          {recovery_warehouse_id_sql},
+                          {model_id},
+                          SUM(allocation.quantity)
+                        FROM inventory_allocation_history allocation
+                        WHERE allocation.allocation_type = {self.db.quote(allocation_type)}
+                          AND allocation.employee_id = {employee_id_int}
+                          AND allocation.usage_record_id = {item_id}
+                          AND allocation.status = 'active'
+                          AND allocation.stock_adjusted = 1
+                          AND @active_allocation_count > 0
+                          AND @offboard_allowed = 1
+                        ON DUPLICATE KEY UPDATE
+                          quantity = quantity + VALUES(quantity)
+                        """,
+                        f"""
+                        INSERT INTO inventory_warehouse_stock (warehouse_id, model_id, quantity)
+                        SELECT {recovery_warehouse_id_sql}, {model_id}, {quantity}
+                        FROM DUAL
+                        WHERE @active_allocation_count = 0
+                          AND @offboard_allowed = 1
+                        ON DUPLICATE KEY UPDATE
+                          quantity = quantity + VALUES(quantity)
+                        """,
+                        f"""
+                        UPDATE it_inventory_model
+                        SET quantity = quantity + @recovery_quantity
+                        WHERE model_id = {model_id}
+                          AND @offboard_allowed = 1
+                        """,
+                        f"""
+                        INSERT INTO inventory_movement_log (
+                          movement_direction, type_name, brand_name, model_name, quantity,
+                          source_label, source_warehouse_id, target_label, target_warehouse_id,
+                          note, related_employee_no, related_employee_name, trigger_action
+                        )
+                        SELECT
+                          'increase',
+                          {self.db.quote(type_name)},
+                          {self.db.quote(brand_name)},
+                          {self.db.quote(model_name)},
+                          @recovery_quantity,
+                          {self.db.quote(employee_label)},
+                          NULL,
+                          warehouse.warehouse_name,
+                          warehouse.warehouse_id,
+                          {self.db.quote(note)},
+                          {self.db.quote(employee_no)},
+                          {self.db.quote(employee_name)},
+                          'leave_recovery'
+                        FROM inventory_warehouse warehouse
+                        WHERE warehouse.warehouse_id = {recovery_warehouse_id_sql}
+                          AND @offboard_allowed = 1
+                        """,
+                    ]
+                )
+            statements.extend(
+                [
                     f"""
                     UPDATE inventory_allocation_history
                     SET status = {self.db.quote(target_status)},
                         returned_at = CURRENT_TIMESTAMP,
                         returned_by = {actor_sql},
+                        warehouse_id = CASE
+                          WHEN {1 if action == "recover" and stock_adjusted else 0} = 1
+                            THEN COALESCE(warehouse_id, {recovery_warehouse_id_sql})
+                          ELSE warehouse_id
+                        END,
                         notes = CONCAT_WS(' ', notes, {self.db.quote(note)})
                     WHERE allocation_type = {self.db.quote(allocation_type)}
                       AND employee_id = {employee_id_int}
@@ -2736,12 +3654,13 @@ class AssetService:
                     """,
                     f"""
                     INSERT INTO inventory_allocation_history (
-                      allocation_type, employee_id, non_asset_type_id, inventory_model_id,
+                      allocation_type, employee_id, non_asset_type_id, inventory_model_id, warehouse_id,
                       usage_record_id, quantity, stock_adjusted, status, issued_at,
                       returned_at, notes, issued_by, returned_by
                     )
                     SELECT
                       {self.db.quote(allocation_type)}, {employee_id_int}, {type_id_sql}, {model_id_sql},
+                      {recovery_warehouse_id_sql if action == "recover" and stock_adjusted else "NULL"},
                       {item_id}, {quantity}, {stock_adjusted}, {self.db.quote(target_status)},
                       CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, {self.db.quote(note)}, {actor_sql}, {actor_sql}
                     FROM DUAL
@@ -2758,30 +3677,6 @@ class AssetService:
                     "SET @processed_item_count = @processed_item_count + ROW_COUNT()",
                 ]
             )
-            if action == "recover" and stock_adjusted:
-                statements.extend(
-                    [
-                        f"""
-                        UPDATE it_inventory_model
-                        SET quantity = quantity + {quantity}
-                        WHERE model_id = {model_id}
-                          AND @offboard_allowed = 1
-                        """,
-                        f"""
-                        INSERT INTO inventory_movement_log (
-                          movement_direction, type_name, brand_name, model_name, quantity,
-                          source_label, target_label, note, related_employee_no, related_employee_name, trigger_action
-                        )
-                        SELECT
-                          'increase', {self.db.quote(type_name)}, {self.db.quote(brand_name)},
-                          {self.db.quote(model_name)}, {quantity},
-                          {self.db.quote(employee_label)}, 'IT Inventory', {self.db.quote(note)},
-                          {self.db.quote(employee_no)}, {self.db.quote(employee_name)}, 'leave_recovery'
-                        FROM DUAL
-                        WHERE @offboard_allowed = 1
-                        """
-                    ]
-                )
 
         statements.extend(
             [

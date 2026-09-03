@@ -1788,7 +1788,9 @@ def normalize_inventory_movement_logs(logs: list[dict]) -> list[dict]:
                 "modelName": text_value(log.get("modelName")),
                 "quantity": max(1, sql_int(log.get("quantity"), 1)),
                 "sourceLabel": text_value(log.get("sourceLabel")),
+                "sourceWarehouseId": text_value(log.get("sourceWarehouseId")),
                 "targetLabel": text_value(log.get("targetLabel")),
+                "targetWarehouseId": text_value(log.get("targetWarehouseId")),
                 "note": text_value(log.get("effectiveNote")) or text_value(log.get("note")),
                 "originalNote": text_value(log.get("originalNote")) or text_value(log.get("note")),
                 "effectiveNote": text_value(log.get("effectiveNote")) or text_value(log.get("note")),
@@ -1815,6 +1817,7 @@ def normalize_inventory_purchase_logs(logs: list[dict]) -> list[dict]:
                 "typeId": text_value(log.get("typeId")),
                 "brandId": text_value(log.get("brandId")),
                 "modelId": text_value(log.get("modelId")),
+                "warehouseId": text_value(log.get("warehouseId")),
                 "quantity": max(1, sql_int(log.get("quantity"), 1)),
                 "inboundDate": inbound_date,
                 "cpu": text_value(log.get("cpu")) if is_computer_inventory_type_name(log.get("typeName")) else "",
@@ -3518,6 +3521,34 @@ def build_state_payload() -> dict:
         """,
         """
         SELECT COALESCE(JSON_ARRAYAGG(JSON_OBJECT(
+          'id', CAST(warehouse.warehouse_id AS CHAR),
+          'code', warehouse.warehouse_code,
+          'name', warehouse.warehouse_name,
+          'orgId', CAST(warehouse.org_unit_id AS CHAR),
+          'managerEmployeeId', COALESCE(CAST(warehouse.manager_employee_id AS CHAR), ''),
+          'managerName', COALESCE(manager.employee_name, ''),
+          'contactPhone', warehouse.contact_phone,
+          'address', warehouse.address,
+          'isActive', warehouse.is_active,
+          'remarks', warehouse.remarks
+        )), JSON_ARRAY())
+        FROM (
+          SELECT *
+          FROM inventory_warehouse
+          ORDER BY is_active DESC, warehouse_name, warehouse_id
+        ) warehouse
+        LEFT JOIN employee manager ON manager.employee_id = warehouse.manager_employee_id
+        """,
+        """
+        SELECT COALESCE(JSON_ARRAYAGG(JSON_OBJECT(
+          'warehouseId', CAST(stock.warehouse_id AS CHAR),
+          'modelId', CAST(stock.model_id AS CHAR),
+          'quantity', stock.quantity
+        )), JSON_ARRAY())
+        FROM inventory_warehouse_stock stock
+        """,
+        """
+        SELECT COALESCE(JSON_ARRAYAGG(JSON_OBJECT(
           'id', CAST(employee_id AS CHAR),
           'employeeNo', employee_no,
           'name', employee_name,
@@ -3655,7 +3686,9 @@ def build_state_payload() -> dict:
           'modelName', COALESCE(model_name, ''),
            'quantity', quantity,
           'sourceLabel', COALESCE(source_label, ''),
+          'sourceWarehouseId', COALESCE(CAST(source_warehouse_id AS CHAR), ''),
           'targetLabel', COALESCE(target_label, ''),
+          'targetWarehouseId', COALESCE(CAST(target_warehouse_id AS CHAR), ''),
            'note', COALESCE(effective_note, ''),
            'originalNote', COALESCE(original_note, ''),
            'effectiveNote', COALESCE(effective_note, ''),
@@ -3674,7 +3707,9 @@ def build_state_payload() -> dict:
             movement.model_name,
             movement.quantity,
             movement.source_label,
+            movement.source_warehouse_id,
             movement.target_label,
+            movement.target_warehouse_id,
             COALESCE(movement.note, '') AS original_note,
             COALESCE((
               SELECT correction.corrected_note
@@ -3713,6 +3748,7 @@ def build_state_payload() -> dict:
           'typeId', COALESCE(CAST(non_asset_type_id AS CHAR), ''),
           'brandId', COALESCE(CAST(brand_id AS CHAR), ''),
           'modelId', COALESCE(CAST(model_id AS CHAR), ''),
+          'warehouseId', COALESCE(CAST(warehouse_id AS CHAR), ''),
           'quantity', quantity,
           'inboundDate', COALESCE(CAST(inbound_date AS CHAR), ''),
           'cpu', COALESCE(cpu, ''),
@@ -3726,7 +3762,7 @@ def build_state_payload() -> dict:
         )), JSON_ARRAY())
         FROM (
            SELECT purchase_log_id, type_name, brand_name, model_name, non_asset_type_id,
-                  brand_id, model_id, quantity, inbound_date, cpu, memory, storage, gpu, source_label, note,
+                  brand_id, model_id, warehouse_id, quantity, inbound_date, cpu, memory, storage, gpu, source_label, note,
                  source_movement_log_id, created_at
           FROM inventory_purchase_log
           WHERE is_active = 1
@@ -3766,6 +3802,8 @@ def build_state_payload() -> dict:
         types,
         inventory_brands,
         inventory_models,
+        warehouses,
+        warehouse_stocks,
         employees,
         monitors,
         non_asset_items,
@@ -3823,6 +3861,32 @@ def build_state_payload() -> dict:
             "sortOrder": sql_int(item.get("sortOrder"), 1000),
         }
         for item in inventory_models
+    ]
+    warehouse_rows = [
+        {
+            "id": str(item.get("id") or ""),
+            "code": item.get("code") or "",
+            "name": item.get("name") or "",
+            "orgId": str(item.get("orgId") or ""),
+            "managerEmployeeId": str(item.get("managerEmployeeId") or ""),
+            "managerName": item.get("managerName") or "",
+            "contactPhone": item.get("contactPhone") or "",
+            "address": item.get("address") or "",
+            "isActive": bool(sql_int(item.get("isActive"), 0)),
+            "remarks": item.get("remarks") or "",
+        }
+        for item in warehouses
+        if str(item.get("id") or "")
+    ]
+    warehouse_ids = {item["id"] for item in warehouse_rows}
+    warehouse_stock_rows = [
+        {
+            "warehouseId": str(item.get("warehouseId") or ""),
+            "modelId": str(item.get("modelId") or ""),
+            "quantity": max(0, sql_int(item.get("quantity"), 0)),
+        }
+        for item in warehouse_stocks
+        if str(item.get("warehouseId") or "") in warehouse_ids
     ]
     inventory_brand_by_type_name = {
         (item["typeId"], item["name"]): item["id"] for item in inventory_brand_rows
@@ -3931,6 +3995,8 @@ def build_state_payload() -> dict:
         "nonAssetTypes": type_rows,
         "inventoryBrands": inventory_brand_rows,
         "inventoryModels": inventory_model_rows,
+        "warehouses": warehouse_rows,
+        "warehouseStocks": warehouse_stock_rows,
         "inventoryMovementLogs": normalize_inventory_movement_logs(inventory_movement_logs),
         "inventoryPurchaseLogs": normalize_inventory_purchase_logs(inventory_purchase_logs),
         "employees": active_employees,
@@ -4009,7 +4075,7 @@ def filter_state_payload(payload: dict, context: dict) -> dict:
 
     restricted_modules = {
         module_code
-        for module_code in ("it_assets", "employees", "organizations")
+        for module_code in ("it_assets", "employees", "organizations", "warehouse_management")
         if scope_for(module_code) in {"organization", "own"}
     }
     allowed_orgs = scoped_org_ids_for_state(context) if restricted_modules else set()
@@ -4057,13 +4123,84 @@ def filter_state_payload(payload: dict, context: dict) -> dict:
     else:
         result["computers"] = []
 
-    if not (can_view("inventory_catalog") or can_view("inventory_operations")):
+    visible_warehouse_ids: set[str] = set()
+    if can_view("warehouse_management"):
+        warehouse_scope = scope_for("warehouse_management")
+        warehouses = list(result.get("warehouses") or [])
+        if warehouse_scope == "all":
+            visible_warehouses = warehouses
+        elif warehouse_scope == "organization":
+            visible_warehouses = [
+                item for item in warehouses if text_value(item.get("orgId")) in allowed_orgs
+            ]
+        elif warehouse_scope == "own":
+            employee_id = text_value((context.get("employee") or {}).get("employeeId"))
+            visible_warehouses = [
+                item
+                for item in warehouses
+                if employee_id and text_value(item.get("managerEmployeeId")) == employee_id
+            ]
+        else:
+            visible_warehouses = []
+        visible_warehouse_ids = {
+            text_value(item.get("id")) for item in visible_warehouses if text_value(item.get("id"))
+        }
+        result["warehouses"] = visible_warehouses
+        result["warehouseStocks"] = [
+            item
+            for item in result.get("warehouseStocks") or []
+            if text_value(item.get("warehouseId")) in visible_warehouse_ids
+        ]
+    else:
+        result["warehouses"] = []
+        result["warehouseStocks"] = []
+
+    can_view_inventory_catalog = can_view("inventory_catalog")
+    can_view_inventory_operations = can_view("inventory_operations")
+    can_view_warehouses = can_view("warehouse_management")
+    if not (can_view_inventory_catalog or can_view_inventory_operations or can_view_warehouses):
         result["nonAssetTypes"] = []
         result["inventoryBrands"] = []
         result["inventoryModels"] = []
-    if not can_view("inventory_operations"):
+    elif can_view_warehouses:
+        visible_quantities: dict[str, int] = {}
+        for stock in result.get("warehouseStocks") or []:
+            model_id = text_value(stock.get("modelId"))
+            if model_id:
+                visible_quantities[model_id] = visible_quantities.get(model_id, 0) + max(
+                    0, sql_int(stock.get("quantity"), 0)
+                )
+        result["inventoryModels"] = [
+            {
+                **item,
+                # The catalog quantity represents the caller's visible warehouse
+                # stock, never an unfiltered system-wide total.
+                "quantity": visible_quantities.get(text_value(item.get("id")), 0),
+            }
+            for item in result.get("inventoryModels") or []
+        ]
+    else:
+        # Catalog-only access may inspect type and model definitions but must
+        # not reveal stock quantities from warehouses outside its permissions.
+        result["inventoryModels"] = [
+            {**item, "quantity": 0} for item in result.get("inventoryModels") or []
+        ]
+
+    if not (can_view_inventory_operations and can_view_warehouses):
         result["inventoryMovementLogs"] = []
         result["inventoryPurchaseLogs"] = []
+    elif scope_for("warehouse_management") != "all":
+        result["inventoryMovementLogs"] = [
+            item
+            for item in result.get("inventoryMovementLogs") or []
+            if text_value(item.get("sourceWarehouseId")) in visible_warehouse_ids
+            or text_value(item.get("targetWarehouseId")) in visible_warehouse_ids
+        ]
+        result["inventoryPurchaseLogs"] = [
+            item
+            for item in result.get("inventoryPurchaseLogs") or []
+            if text_value(item.get("warehouseId")) in visible_warehouse_ids
+        ]
     if not can_view("audit_logs"):
         result["auditLogs"] = []
     return result
@@ -4903,7 +5040,8 @@ class AppHandler(SimpleHTTPRequestHandler):
                         "'org_unit', 'employee', 'computer_asset', 'computer_assignment', "
                         "'employee_monitor_usage', 'employee_non_asset_usage', "
                         "'non_asset_type', 'it_inventory_brand', 'it_inventory_model', "
-                        "'inventory_movement_log', 'inventory_purchase_log', 'computer_assignment_history', "
+                        "'inventory_movement_log', 'inventory_purchase_log', 'inventory_warehouse', "
+                        "'inventory_warehouse_stock', 'inventory_transfer_log', 'computer_assignment_history', "
                         "'left_employee_archive', 'audit_log', 'app_state_revision', "
                         "'user_account', 'auth_session', 'system_setting', 'database_backup', "
                         "'schema_migration', 'user_org_scope', 'asset_relation', 'api_idempotency_key', "
@@ -4920,7 +5058,7 @@ class AppHandler(SimpleHTTPRequestHandler):
                     ).strip(),
                     0,
                 )
-                required_table_count = 51
+                required_table_count = 54
                 healthy = probe == 1 and table_count == required_table_count
                 self.send_json(
                     {
@@ -5574,6 +5712,47 @@ class AppHandler(SimpleHTTPRequestHandler):
             )
 
     def do_POST(self) -> None:
+        try:
+            if self.path.startswith("/api/"):
+                self.handle_api()
+                return
+            self.send_json({"error": "Method not allowed"}, status=HTTPStatus.METHOD_NOT_ALLOWED)
+        except UnauthorizedError as exc:
+            self.send_json({"error": str(exc), "code": "AUTH_REQUIRED"}, status=HTTPStatus.UNAUTHORIZED)
+        except CsrfError as exc:
+            self.send_json({"error": str(exc), "code": "CSRF_INVALID"}, status=HTTPStatus.FORBIDDEN)
+        except ForbiddenError as exc:
+            self.send_json({"error": str(exc), "code": "FORBIDDEN"}, status=HTTPStatus.FORBIDDEN)
+        except PayloadTooLargeError as exc:
+            self.send_json(
+                {"error": str(exc), "code": "PAYLOAD_TOO_LARGE"},
+                status=HTTPStatus.REQUEST_ENTITY_TOO_LARGE,
+            )
+        except RateLimitError as exc:
+            self.send_json(
+                {"error": str(exc), "code": "LOGIN_RATE_LIMITED"},
+                status=HTTPStatus.TOO_MANY_REQUESTS,
+                headers=[("Retry-After", str(exc.retry_after))],
+            )
+        except InternalServerError as exc:
+            print(f"Internal server error: {exc}")
+            traceback.print_exc()
+            self.send_json(
+                {"error": "服务器内部错误。", "code": "INTERNAL_ERROR"},
+                status=HTTPStatus.INTERNAL_SERVER_ERROR,
+            )
+        except ConflictError as exc:
+            self.send_json({"error": str(exc), "code": "STATE_CONFLICT"}, status=HTTPStatus.CONFLICT)
+        except ApiError as exc:
+            self.send_json({"error": str(exc)}, status=HTTPStatus.BAD_REQUEST)
+        except Exception as exc:  # pragma: no cover
+            traceback.print_exc()
+            self.send_json(
+                {"error": "服务器内部错误。", "code": "INTERNAL_ERROR"},
+                status=HTTPStatus.INTERNAL_SERVER_ERROR,
+            )
+
+    def do_DELETE(self) -> None:
         try:
             if self.path.startswith("/api/"):
                 self.handle_api()

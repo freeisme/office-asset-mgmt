@@ -13,8 +13,12 @@ DROP TABLE IF EXISTS employee_monitor_usage;
 DROP TABLE IF EXISTS employee_non_asset_usage;
 DROP TABLE IF EXISTS computer_assignment_history;
 DROP TABLE IF EXISTS left_employee_archive;
-DROP TABLE IF EXISTS it_inventory_model;
+DROP TABLE IF EXISTS inventory_transfer_log;
+DROP TABLE IF EXISTS inventory_purchase_log;
 DROP TABLE IF EXISTS inventory_movement_log;
+DROP TABLE IF EXISTS inventory_warehouse_stock;
+DROP TABLE IF EXISTS inventory_warehouse;
+DROP TABLE IF EXISTS it_inventory_model;
 DROP TABLE IF EXISTS it_inventory_brand;
 DROP TABLE IF EXISTS non_asset_type;
 DROP TABLE IF EXISTS computer_assignment;
@@ -270,6 +274,74 @@ CREATE TABLE it_inventory_model (
   CONSTRAINT ck_it_inventory_model_active CHECK (is_active IN (0, 1))
 ) ENGINE = InnoDB;
 
+CREATE TABLE inventory_warehouse (
+  warehouse_id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+  warehouse_code VARCHAR(64) NOT NULL,
+  warehouse_name VARCHAR(128) NOT NULL,
+  org_unit_id BIGINT UNSIGNED NOT NULL,
+  manager_employee_id BIGINT UNSIGNED NULL,
+  contact_phone VARCHAR(64) NOT NULL DEFAULT '',
+  address VARCHAR(255) NOT NULL DEFAULT '',
+  is_active TINYINT(1) NOT NULL DEFAULT 1,
+  remarks VARCHAR(500) NOT NULL DEFAULT '',
+  created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  PRIMARY KEY (warehouse_id),
+  UNIQUE KEY uq_inventory_warehouse_code (warehouse_code),
+  KEY idx_inventory_warehouse_org (org_unit_id, is_active, warehouse_name),
+  KEY idx_inventory_warehouse_manager (manager_employee_id),
+  CONSTRAINT fk_inventory_warehouse_org
+    FOREIGN KEY (org_unit_id) REFERENCES org_unit (org_unit_id)
+    ON DELETE RESTRICT ON UPDATE CASCADE,
+  CONSTRAINT fk_inventory_warehouse_manager
+    FOREIGN KEY (manager_employee_id) REFERENCES employee (employee_id)
+    ON DELETE SET NULL ON UPDATE CASCADE,
+  CONSTRAINT ck_inventory_warehouse_active CHECK (is_active IN (0, 1))
+) ENGINE = InnoDB;
+
+CREATE TABLE inventory_warehouse_stock (
+  warehouse_id BIGINT UNSIGNED NOT NULL,
+  model_id BIGINT UNSIGNED NOT NULL,
+  quantity INT UNSIGNED NOT NULL DEFAULT 0,
+  created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  PRIMARY KEY (warehouse_id, model_id),
+  KEY idx_inventory_warehouse_stock_model (model_id, warehouse_id),
+  CONSTRAINT fk_inventory_warehouse_stock_warehouse
+    FOREIGN KEY (warehouse_id) REFERENCES inventory_warehouse (warehouse_id)
+    ON DELETE RESTRICT ON UPDATE CASCADE,
+  CONSTRAINT fk_inventory_warehouse_stock_model
+    FOREIGN KEY (model_id) REFERENCES it_inventory_model (model_id)
+    ON DELETE RESTRICT ON UPDATE CASCADE,
+  CONSTRAINT ck_inventory_warehouse_stock_quantity CHECK (quantity >= 0)
+) ENGINE = InnoDB;
+
+CREATE TABLE inventory_transfer_log (
+  transfer_id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+  source_warehouse_id BIGINT UNSIGNED NOT NULL,
+  target_warehouse_id BIGINT UNSIGNED NOT NULL,
+  model_id BIGINT UNSIGNED NOT NULL,
+  quantity INT UNSIGNED NOT NULL,
+  note VARCHAR(500) NOT NULL DEFAULT '',
+  created_by BIGINT UNSIGNED NULL,
+  created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (transfer_id),
+  KEY idx_inventory_transfer_source (source_warehouse_id, created_at),
+  KEY idx_inventory_transfer_target (target_warehouse_id, created_at),
+  KEY idx_inventory_transfer_model (model_id, created_at),
+  CONSTRAINT fk_inventory_transfer_source
+    FOREIGN KEY (source_warehouse_id) REFERENCES inventory_warehouse (warehouse_id)
+    ON DELETE RESTRICT,
+  CONSTRAINT fk_inventory_transfer_target
+    FOREIGN KEY (target_warehouse_id) REFERENCES inventory_warehouse (warehouse_id)
+    ON DELETE RESTRICT,
+  CONSTRAINT fk_inventory_transfer_model
+    FOREIGN KEY (model_id) REFERENCES it_inventory_model (model_id)
+    ON DELETE RESTRICT ON UPDATE CASCADE,
+  CONSTRAINT ck_inventory_transfer_quantity CHECK (quantity > 0),
+  CONSTRAINT ck_inventory_transfer_warehouses CHECK (source_warehouse_id <> target_warehouse_id)
+) ENGINE = InnoDB;
+
 CREATE TABLE inventory_movement_log (
   movement_log_id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
   movement_direction VARCHAR(16) NOT NULL,
@@ -278,7 +350,9 @@ CREATE TABLE inventory_movement_log (
   model_name VARCHAR(128) NOT NULL DEFAULT '',
   quantity INT UNSIGNED NOT NULL,
   source_label VARCHAR(255) NOT NULL DEFAULT '',
+  source_warehouse_id BIGINT UNSIGNED NULL,
   target_label VARCHAR(255) NOT NULL DEFAULT '',
+  target_warehouse_id BIGINT UNSIGNED NULL,
   note VARCHAR(500) NOT NULL DEFAULT '',
   related_employee_no VARCHAR(64) NOT NULL DEFAULT '',
   related_employee_name VARCHAR(128) NOT NULL DEFAULT '',
@@ -290,6 +364,14 @@ CREATE TABLE inventory_movement_log (
   KEY idx_inventory_movement_occurred_at (occurred_at, movement_log_id),
   KEY idx_inventory_movement_direction (movement_direction, occurred_at),
   KEY idx_inventory_movement_employee (related_employee_no, occurred_at),
+  KEY idx_inventory_movement_source_warehouse (source_warehouse_id, occurred_at),
+  KEY idx_inventory_movement_target_warehouse (target_warehouse_id, occurred_at),
+  CONSTRAINT fk_inventory_movement_source_warehouse
+    FOREIGN KEY (source_warehouse_id) REFERENCES inventory_warehouse (warehouse_id)
+    ON DELETE RESTRICT ON UPDATE CASCADE,
+  CONSTRAINT fk_inventory_movement_target_warehouse
+    FOREIGN KEY (target_warehouse_id) REFERENCES inventory_warehouse (warehouse_id)
+    ON DELETE RESTRICT ON UPDATE CASCADE,
   CONSTRAINT ck_inventory_movement_direction CHECK (movement_direction IN ('increase', 'decrease')),
   CONSTRAINT ck_inventory_movement_quantity CHECK (quantity > 0)
 ) ENGINE = InnoDB;
@@ -302,6 +384,7 @@ CREATE TABLE inventory_purchase_log (
   non_asset_type_id BIGINT UNSIGNED NULL,
   brand_id BIGINT UNSIGNED NULL,
   model_id BIGINT UNSIGNED NULL,
+  warehouse_id BIGINT UNSIGNED NULL,
   quantity INT UNSIGNED NOT NULL,
   inbound_date DATE NULL,
   cpu VARCHAR(128) NULL,
@@ -318,6 +401,10 @@ CREATE TABLE inventory_purchase_log (
   UNIQUE KEY uq_inventory_purchase_source (source_movement_log_id),
   KEY idx_inventory_purchase_date (inbound_date, purchase_log_id),
   KEY idx_inventory_purchase_type (type_name, inbound_date),
+  KEY idx_inventory_purchase_warehouse (warehouse_id, inbound_date),
+  CONSTRAINT fk_inventory_purchase_warehouse
+    FOREIGN KEY (warehouse_id) REFERENCES inventory_warehouse (warehouse_id)
+    ON DELETE RESTRICT ON UPDATE CASCADE,
   CONSTRAINT ck_inventory_purchase_quantity CHECK (quantity > 0),
   CONSTRAINT ck_inventory_purchase_active CHECK (is_active IN (0, 1))
 ) ENGINE = InnoDB;

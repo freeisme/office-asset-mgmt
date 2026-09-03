@@ -163,11 +163,23 @@ def cleanup() -> None:
              OR (entity_type = 'employee' AND entity_name LIKE '{PREFIX}%')
              OR (entity_type = 'org_unit' AND entity_name LIKE '{PREFIX}%')
              OR (entity_type = 'inventory_movement_log' AND entity_name LIKE '{PREFIX}%')
+             OR (entity_type = 'inventory_transfer' AND entity_name LIKE '{PREFIX}%')
+             OR (entity_type = 'inventory_warehouse' AND entity_name LIKE '{PREFIX}%')
              OR (entity_type = 'data_quality_issue' AND entity_name LIKE '[QA v2.0.8]%')
              OR (entity_type = 'inventory_allocation' AND entity_name LIKE '{PREFIX}%')
              OR (entity_type = 'inventory_model' AND entity_name LIKE '{PREFIX}%')
              OR (entity_type = 'it_inventory_brand' AND entity_name LIKE '{PREFIX}%')
              OR (entity_type = 'non_asset_type' AND entity_name LIKE '{PREFIX}%');
+        DELETE FROM inventory_transfer_log
+          WHERE model_id IN (
+            SELECT model_id FROM it_inventory_model WHERE model_name LIKE '{PREFIX}%'
+          )
+             OR source_warehouse_id IN (
+               SELECT warehouse_id FROM inventory_warehouse WHERE warehouse_name LIKE '{PREFIX}%'
+             )
+             OR target_warehouse_id IN (
+               SELECT warehouse_id FROM inventory_warehouse WHERE warehouse_name LIKE '{PREFIX}%'
+             );
         DELETE FROM inventory_allocation_history
           WHERE inventory_model_id IN (
             SELECT model_id FROM it_inventory_model WHERE model_name LIKE '{PREFIX}%'
@@ -197,6 +209,15 @@ def cleanup() -> None:
           WHERE type_name LIKE '{PREFIX}%';
         DELETE FROM data_quality_issue
           WHERE title LIKE '[QA v2.0.8]%';
+        DELETE FROM inventory_warehouse_stock
+          WHERE model_id IN (
+            SELECT model_id FROM it_inventory_model WHERE model_name LIKE '{PREFIX}%'
+          )
+             OR warehouse_id IN (
+               SELECT warehouse_id FROM inventory_warehouse WHERE warehouse_name LIKE '{PREFIX}%'
+             );
+        DELETE FROM inventory_warehouse
+          WHERE warehouse_name LIKE '{PREFIX}%';
         DELETE FROM it_inventory_model
           WHERE model_name LIKE '{PREFIX}%';
         DELETE FROM it_inventory_brand
@@ -568,6 +589,8 @@ def main() -> int:
         asset_user_read = f"{PREFIX}assetread_user_{suffix}"
         asset_user_owner = f"{PREFIX}assetown_user_{suffix}"
         asset_user_org = f"{PREFIX}assetorg_user_{suffix}"
+        warehouse_role_org = f"{PREFIX}warehouseorg_{suffix}"
+        warehouse_user_org = f"{PREFIX}warehouseorg_user_{suffix}"
         org_a_code = f"QSA{suffix[-6:]}"
         org_b_code = f"QSB{suffix[-6:]}"
 
@@ -605,6 +628,49 @@ def main() -> int:
         employee_owner = create_employee("asset_owner", org_a_id)
         employee_org_a = create_employee("asset_org_a", org_a_id)
         employee_org_b = create_employee("asset_org_b", org_b_id)
+        employee_warehouse_org = create_employee("warehouse_org", org_a_id)
+
+        def create_warehouse(
+            code: str,
+            name: str,
+            org_id: str,
+            manager_employee_id: str,
+        ) -> str:
+            _, warehouse_payload = admin.request(
+                "POST",
+                "/api/inventory/warehouses",
+                {
+                    "code": code,
+                    "name": name,
+                    "orgId": org_id,
+                    "managerEmployeeId": manager_employee_id,
+                    "contactPhone": "010-12345678",
+                    "address": f"{name} QA 地址",
+                    "isActive": True,
+                    "remarks": f"{PREFIX} warehouse",
+                },
+                201,
+            )
+            return warehouse_payload["warehouse"]["id"]
+
+        warehouse_a1 = create_warehouse(
+            f"QAW-A1-{suffix[-6:]}",
+            f"{PREFIX}warehouse_a1_{suffix}",
+            org_a_id,
+            employee_warehouse_org,
+        )
+        warehouse_a2 = create_warehouse(
+            f"QAW-A2-{suffix[-6:]}",
+            f"{PREFIX}warehouse_a2_{suffix}",
+            org_a_id,
+            employee_warehouse_org,
+        )
+        warehouse_b1 = create_warehouse(
+            f"QAW-B1-{suffix[-6:]}",
+            f"{PREFIX}warehouse_b1_{suffix}",
+            org_b_id,
+            employee_org_b,
+        )
 
         def create_role(code: str, name: str, permissions: list[dict]) -> dict:
             _, payload = admin.request(
@@ -687,6 +753,42 @@ def main() -> int:
                 },
             ],
         )
+        create_role(
+            warehouse_role_org,
+            "QA 组织仓库",
+            [
+                {
+                    "moduleCode": "inventory_operations",
+                    "actionCode": "create",
+                    "canCreate": True,
+                    "dataScope": "organization",
+                },
+                {
+                    "moduleCode": "inventory_operations",
+                    "actionCode": "update",
+                    "canUpdate": True,
+                    "dataScope": "organization",
+                },
+                {
+                    "moduleCode": "warehouse_management",
+                    "actionCode": "view",
+                    "canView": True,
+                    "dataScope": "organization",
+                },
+                {
+                    "moduleCode": "warehouse_management",
+                    "actionCode": "create",
+                    "canCreate": True,
+                    "dataScope": "organization",
+                },
+                {
+                    "moduleCode": "warehouse_management",
+                    "actionCode": "update",
+                    "canUpdate": True,
+                    "dataScope": "organization",
+                },
+            ],
+        )
 
         def create_user(username: str, role_code: str, employee_id: str) -> str:
             _, user_payload = admin.request(
@@ -706,9 +808,18 @@ def main() -> int:
         user_read_id = create_user(asset_user_read, asset_role_read, employee_read)
         user_owner_id = create_user(asset_user_owner, asset_role_owner, employee_owner)
         user_org_id = create_user(asset_user_org, asset_role_org, employee_org_a)
+        user_warehouse_org_id = create_user(
+            warehouse_user_org, warehouse_role_org, employee_warehouse_org
+        )
         admin.request(
             "PUT",
             f"/api/user-org-scopes/{user_org_id}",
+            {"scopes": [{"orgId": org_a_id, "includeDescendants": False}]},
+            200,
+        )
+        admin.request(
+            "PUT",
+            f"/api/user-org-scopes/{user_warehouse_org_id}",
             {"scopes": [{"orgId": org_a_id, "includeDescendants": False}]},
             200,
         )
@@ -926,6 +1037,178 @@ def main() -> int:
             201,
         )
         inventory_model_id = inventory_model_payload["inventoryModel"]["id"]
+        warehouse_stock_quantity = lambda warehouse_id: sql_scalar(
+            f"""
+            SELECT COALESCE(quantity, 0)
+            FROM inventory_warehouse_stock
+            WHERE warehouse_id = {warehouse_id}
+              AND model_id = {inventory_model_id}
+            """
+        ) or "0"
+
+        _, warehouse_receipt = admin.request(
+            "POST",
+            "/api/inventory/receipts",
+            {
+                "modelId": inventory_model_id,
+                "warehouseId": warehouse_a1,
+                "quantity": 5,
+                "inboundDate": "2026-09-03",
+                "sourceLabel": "QA 仓库入库",
+                "note": f"{PREFIX} warehouse receipt",
+            },
+            201,
+            extra_headers={"Idempotency-Key": f"qareceipt-{suffix}"},
+        )
+        assert warehouse_receipt["warehouseId"] == warehouse_a1, warehouse_receipt
+        assert warehouse_stock_quantity(warehouse_a1) == "5"
+        assert warehouse_stock_quantity(warehouse_a2) == "0"
+        assert sql_scalar(
+            f"SELECT quantity FROM it_inventory_model WHERE model_id = {inventory_model_id}"
+        ) == "5"
+
+        transfer_payload = {
+            "sourceWarehouseId": warehouse_a1,
+            "targetWarehouseId": warehouse_a2,
+            "modelId": inventory_model_id,
+            "quantity": 2,
+            "note": f"{PREFIX} warehouse transfer",
+        }
+        transfer_key = f"qatransfer-{suffix}"
+        _, transfer = admin.request(
+            "POST",
+            "/api/inventory/transfers",
+            transfer_payload,
+            201,
+            extra_headers={"Idempotency-Key": transfer_key},
+        )
+        _, repeated_transfer = admin.request(
+            "POST",
+            "/api/inventory/transfers",
+            transfer_payload,
+            201,
+            extra_headers={"Idempotency-Key": transfer_key},
+        )
+        assert transfer["transferId"] == repeated_transfer["transferId"], repeated_transfer
+        assert warehouse_stock_quantity(warehouse_a1) == "3"
+        assert warehouse_stock_quantity(warehouse_a2) == "2"
+        assert sql_scalar(
+            f"""
+            SELECT COUNT(*)
+            FROM inventory_transfer_log
+            WHERE transfer_id = {transfer["transferId"]}
+            """
+        ) == "1"
+        assert sql_scalar(
+            f"""
+            SELECT COUNT(*)
+            FROM inventory_movement_log
+            WHERE trigger_action = 'inventory_transfer'
+              AND model_name = '{inventory_model_name}'
+              AND note = '{PREFIX} warehouse transfer'
+            """
+        ) == "1"
+
+        status, insufficient_transfer = admin.request(
+            "POST",
+            "/api/inventory/transfers",
+            {
+                "sourceWarehouseId": warehouse_a1,
+                "targetWarehouseId": warehouse_a2,
+                "modelId": inventory_model_id,
+                "quantity": 99,
+                "note": f"{PREFIX} insufficient transfer",
+            },
+            extra_headers={"Idempotency-Key": f"qatransfer-insufficient-{suffix}"},
+        )
+        assert status == 409, insufficient_transfer
+        assert warehouse_stock_quantity(warehouse_a1) == "3"
+        assert warehouse_stock_quantity(warehouse_a2) == "2"
+        assert sql_scalar(
+            f"""
+            SELECT COUNT(*)
+            FROM inventory_transfer_log
+            WHERE model_id = {inventory_model_id}
+              AND note = '{PREFIX} insufficient transfer'
+            """
+        ) == "0"
+
+        warehouse_user = login(warehouse_user_org)
+        assert warehouse_user.request(
+            "POST",
+            "/api/inventory/transfers",
+            {
+                "sourceWarehouseId": warehouse_a1,
+                "targetWarehouseId": warehouse_b1,
+                "modelId": inventory_model_id,
+                "quantity": 1,
+                "note": f"{PREFIX} cross org transfer",
+            },
+            extra_headers={"Idempotency-Key": f"qatransfer-cross-org-{suffix}"},
+        )[0] == 403
+        assert warehouse_stock_quantity(warehouse_a1) == "3"
+        assert warehouse_stock_quantity(warehouse_b1) == "0"
+
+        _, warehouse_allocation = admin.request(
+            "POST",
+            "/api/inventory/allocations",
+            {
+                "allocationType": "non_asset",
+                "employeeId": employee_org_a,
+                "modelId": inventory_model_id,
+                "warehouseId": warehouse_a2,
+                "quantity": 1,
+                "notes": f"{PREFIX} warehouse allocation",
+                "stockAdjusted": True,
+            },
+            201,
+            extra_headers={"Idempotency-Key": f"qaallocation-warehouse-{suffix}"},
+        )
+        allocation_id = warehouse_allocation["allocationId"]
+        assert warehouse_allocation["warehouseId"] == warehouse_a2, warehouse_allocation
+        assert sql_scalar(
+            f"""
+            SELECT warehouse_id
+            FROM inventory_allocation_history
+            WHERE allocation_id = {allocation_id}
+            """
+        ) == warehouse_a2
+        assert warehouse_stock_quantity(warehouse_a1) == "3"
+        assert warehouse_stock_quantity(warehouse_a2) == "1"
+        assert sql_scalar(
+            f"SELECT quantity FROM it_inventory_model WHERE model_id = {inventory_model_id}"
+        ) == "4"
+
+        _, cross_warehouse_return = admin.request(
+            "POST",
+            f"/api/inventory/allocations/{allocation_id}/return",
+            {
+                "warehouseId": warehouse_a1,
+                "notes": f"{PREFIX} cross warehouse return",
+            },
+            200,
+            extra_headers={"Idempotency-Key": f"qareturn-warehouse-{suffix}"},
+        )
+        assert cross_warehouse_return["status"] == "returned", cross_warehouse_return
+        assert cross_warehouse_return["warehouseId"] == warehouse_a1, cross_warehouse_return
+        assert warehouse_stock_quantity(warehouse_a1) == "4"
+        assert warehouse_stock_quantity(warehouse_a2) == "1"
+        assert sql_scalar(
+            f"SELECT quantity FROM it_inventory_model WHERE model_id = {inventory_model_id}"
+        ) == "5"
+
+        _, warehouse_list = admin.request(
+            "GET", "/api/inventory/warehouses", expected=200
+        )
+        default_warehouse = next(
+            item for item in warehouse_list["warehouses"] if item["code"] == "WH-001"
+        )
+        assert admin.request(
+            "DELETE",
+            f"/api/inventory/warehouses/{default_warehouse['id']}",
+        )[0] == 409
+
+        reconciliation_note = f"{PREFIX} no stock deduction {suffix}"
         _, reconciled_allocation = admin.request(
             "POST",
             "/api/inventory/allocations",
@@ -934,7 +1217,7 @@ def main() -> int:
                 "employeeId": employee_org_a,
                 "modelId": inventory_model_id,
                 "quantity": 1,
-                "notes": "QA 仅登记不扣减",
+                "notes": reconciliation_note,
                 "stockAdjusted": False,
             },
             201,
@@ -942,7 +1225,7 @@ def main() -> int:
         assert reconciled_allocation["allocationId"]
         assert sql_scalar(
             f"SELECT quantity FROM it_inventory_model WHERE model_id = {inventory_model_id}"
-        ) == "0"
+        ) == "5"
         assert sql_scalar(
             f"""
             SELECT stock_adjusted
@@ -956,6 +1239,7 @@ def main() -> int:
             FROM inventory_movement_log
             WHERE model_name = '{inventory_model_name}'
               AND trigger_action = 'inventory_allocation'
+              AND note = '{reconciliation_note}'
             """
         ) == "0"
         custom_brand_name = f"{PREFIX}custom_brand_{suffix}"
@@ -1030,6 +1314,7 @@ def main() -> int:
             "/api/inventory/receipts",
             {
                 "modelId": inventory_model_id,
+                "warehouseId": warehouse_a1,
                 "quantity": 1,
                 "inboundDate": "2026-08-27",
                 "sourceLabel": "QA 安全回归",
@@ -1186,6 +1471,9 @@ def main() -> int:
             "assignment_idempotency,assignment_reassignment_audit,own_asset_scope,"
             "org_asset_scope,cross_org_denied,readonly_write_denied,"
             "inventory_register_without_deduction,"
+            "warehouse_receipt,warehouse_transfer,warehouse_transfer_idempotency,"
+            "warehouse_transfer_insufficient_stock,warehouse_cross_org_denied,"
+            "warehouse_allocation,cross_warehouse_return,default_warehouse_protected,"
             "inventory_note_correction_append_only,inventory_note_correction_permission,"
             "quality_resolution_required,quality_resolution_audit,quality_resolution_permission,"
             "quality_chinese_labels"

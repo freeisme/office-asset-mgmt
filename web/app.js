@@ -156,6 +156,7 @@ const permissionModuleLabels = {
   organizations: "组织与资产关系",
   inventory_catalog: "IT物资",
   inventory_operations: "物资流转记录",
+  warehouse_management: "仓库管理",
   audit_logs: "操作日志",
   backups: "备份",
   role_management: "角色与权限",
@@ -251,6 +252,7 @@ let settingsState = {
   },
 };
 let lastRenderedPage = "";
+let inventoryWarehouseView = "";
 let controlIdSequence = 0;
 let asyncRequestSequence = 0;
 const latestAsyncRequests = new Map();
@@ -350,6 +352,9 @@ function canViewPage(page) {
     governance: "sync",
     settings: "system_settings",
   };
+  if (page === "inventory") {
+    return hasPermission("inventory_catalog", "view") || hasPermission("warehouse_management", "view");
+  }
   return hasPermission(modules[page] || "dashboard", "view");
 }
 
@@ -419,6 +424,8 @@ function getSeedState() {
     ],
     inventoryBrands: [],
     inventoryModels: [],
+    warehouses: [],
+    warehouseStocks: [],
     inventoryMovementLogs: [],
     inventoryPurchaseLogs: [],
     stateRevision: 0,
@@ -458,6 +465,8 @@ function extractDataState(value) {
     nonAssetTypes: value.nonAssetTypes,
     inventoryBrands: value.inventoryBrands,
     inventoryModels: value.inventoryModels,
+    warehouses: value.warehouses,
+    warehouseStocks: value.warehouseStocks,
     inventoryMovementLogs: value.inventoryMovementLogs,
     inventoryPurchaseLogs: value.inventoryPurchaseLogs,
     employees: value.employees,
@@ -510,6 +519,11 @@ function normalizeState(value) {
         };
       })
     : seed.inventoryModels;
+  const warehouses = normalizeWarehouses(Array.isArray(value.warehouses) ? value.warehouses : seed.warehouses);
+  const warehouseIds = new Set(warehouses.map((warehouse) => warehouse.id));
+  const warehouseStocks = normalizeWarehouseStocks(
+    Array.isArray(value.warehouseStocks) ? value.warehouseStocks : seed.warehouseStocks,
+  ).filter((stock) => warehouseIds.has(stock.warehouseId));
   const inventoryTypeIds = new Set(nonAssetTypes.map((type) => type.id));
   const inventoryBrandIds = new Set(inventoryBrands.map((brand) => brand.id));
   const expandedInventoryTypeIds = Array.isArray(value.expandedInventoryTypeIds)
@@ -539,6 +553,8 @@ function normalizeState(value) {
     nonAssetTypes,
     inventoryBrands,
     inventoryModels,
+    warehouses,
+    warehouseStocks,
     inventoryMovementLogs: Array.isArray(value.inventoryMovementLogs)
       ? value.inventoryMovementLogs.map((log) => ({
           id: String(log.id || createId("invlog")),
@@ -547,6 +563,8 @@ function normalizeState(value) {
           brandName: log.brandName || "",
           modelName: log.modelName || "",
           quantity: Math.max(1, Number(log.quantity || 1)),
+          sourceWarehouseId: String(log.sourceWarehouseId || ""),
+          targetWarehouseId: String(log.targetWarehouseId || ""),
            sourceLabel: log.sourceLabel || "",
            targetLabel: log.targetLabel || "",
            note: log.effectiveNote || log.note || "",
@@ -568,6 +586,7 @@ function normalizeState(value) {
           typeId: String(log.typeId || ""),
           brandId: String(log.brandId || ""),
           modelId: String(log.modelId || ""),
+          warehouseId: String(log.warehouseId || ""),
           quantity: Math.max(1, Number(log.quantity || 1)),
           inboundDate: log.inboundDate || "",
           cpu: log.cpu || "",
@@ -892,7 +911,7 @@ async function activeAllocations() {
   return Array.isArray(payload.allocations) ? payload.allocations : [];
 }
 
-async function returnUsageAllocations(employeeId, allocationType, usageRecordId, notes = "") {
+async function returnUsageAllocations(employeeId, allocationType, usageRecordId, notes = "", warehouseId = "") {
   const allocations = await activeAllocations();
   const matches = allocations.filter(
     (item) =>
@@ -903,7 +922,7 @@ async function returnUsageAllocations(employeeId, allocationType, usageRecordId,
   for (const allocation of matches) {
     await runCommand(
       `/api/inventory/allocations/${encodeURIComponent(allocation.id)}/return`,
-      { notes },
+      { notes, warehouseId: String(warehouseId || "") },
       "inventory-return",
     );
   }
@@ -914,7 +933,7 @@ async function returnUsageAllocations(employeeId, allocationType, usageRecordId,
   // an unchecked selection.
   await runCommand(
     `/api/inventory/usage/${encodeURIComponent(allocationType)}/${encodeURIComponent(usageRecordId)}/return`,
-    { employeeId: String(employeeId || ""), notes },
+    { employeeId: String(employeeId || ""), notes, warehouseId: String(warehouseId || "") },
     "inventory-usage-return",
   );
   return 1;
@@ -1380,6 +1399,169 @@ function getType(id) {
   return state.nonAssetTypes.find((type) => type.id === id);
 }
 
+function normalizeWarehouses(warehouses) {
+  return (Array.isArray(warehouses) ? warehouses : []).map((warehouse) => ({
+    id: String(warehouse.id || warehouse.warehouseId || ""),
+    code: String(warehouse.code || warehouse.warehouseCode || ""),
+    name: String(warehouse.name || warehouse.warehouseName || ""),
+    orgId: String(warehouse.orgId || warehouse.orgUnitId || ""),
+    managerEmployeeId: String(warehouse.managerEmployeeId || ""),
+    managerName: String(warehouse.managerName || ""),
+    contactPhone: String(warehouse.contactPhone || ""),
+    address: String(warehouse.address || ""),
+    isActive: warehouse.isActive !== false && Number(warehouse.isActive ?? 1) !== 0,
+    remarks: String(warehouse.remarks || ""),
+    createdAt: warehouse.createdAt || "",
+    updatedAt: warehouse.updatedAt || "",
+  })).filter((warehouse) => warehouse.id && warehouse.name);
+}
+
+function normalizeWarehouseStocks(stocks) {
+  return (Array.isArray(stocks) ? stocks : []).map((stock) => ({
+    warehouseId: String(stock.warehouseId || ""),
+    modelId: String(stock.modelId || ""),
+    quantity: Math.max(0, Number(stock.quantity || 0)),
+    typeId: String(stock.typeId || ""),
+    brandId: String(stock.brandId || ""),
+    typeName: String(stock.typeName || ""),
+    brandName: String(stock.brandName || ""),
+    modelName: String(stock.modelName || ""),
+    unit: String(stock.unit || "件"),
+  })).filter((stock) => stock.warehouseId && stock.modelId && stock.quantity > 0);
+}
+
+function activeWarehouses() {
+  return (state.warehouses || []).filter((warehouse) => warehouse.isActive);
+}
+
+function warehouseName(id) {
+  return state.warehouses?.find((warehouse) => sameRecordId(warehouse.id, id))?.name || "";
+}
+
+function warehouseOptions(selectedId = "", placeholder = "请选择仓库") {
+  return [{ value: "", label: placeholder }].concat(
+    activeWarehouses().map((warehouse) => ({
+      value: warehouse.id,
+      label: `${warehouse.name}${warehouse.code ? ` · ${warehouse.code}` : ""}${orgName(warehouse.orgId) ? ` · ${orgName(warehouse.orgId)}` : ""}`,
+    })),
+  ).map((option) => ({
+    ...option,
+    selected: String(option.value) === String(selectedId || ""),
+  }));
+}
+
+function warehouseSelectField(label, name, selectedId = "", required = false, placeholder = "请选择仓库") {
+  return selectField(label, name, selectedId, warehouseOptions(selectedId, placeholder), required);
+}
+
+function inventoryWarehouseById(id = inventoryWarehouseView) {
+  return (state.warehouses || []).find((warehouse) => sameRecordId(warehouse.id, id)) || null;
+}
+
+function inventoryModelQuantityInWarehouse(modelId, warehouseId = inventoryWarehouseView) {
+  if (!warehouseId) {
+    return Math.max(0, Number(getInventoryModel(modelId)?.quantity || 0));
+  }
+  return Math.max(
+    0,
+    Number(
+      (state.warehouseStocks || []).find(
+        (stock) => sameRecordId(stock.warehouseId, warehouseId) && sameRecordId(stock.modelId, modelId),
+      )?.quantity || 0,
+    ),
+  );
+}
+
+function inventoryModelForWarehouseView(model, warehouseId = inventoryWarehouseView) {
+  return {
+    ...model,
+    quantity: inventoryModelQuantityInWarehouse(model.id, warehouseId),
+  };
+}
+
+function inventoryWarehousesForView() {
+  return [...(state.warehouses || [])].sort((left, right) => {
+    if (left.isActive !== right.isActive) return left.isActive ? -1 : 1;
+    return compareText(left.name, right.name);
+  });
+}
+
+function ensureInventoryWarehouseView() {
+  const warehouses = inventoryWarehousesForView();
+  if (!warehouses.some((warehouse) => sameRecordId(warehouse.id, inventoryWarehouseView))) {
+    inventoryWarehouseView = warehouses.find((warehouse) => warehouse.isActive)?.id || warehouses[0]?.id || "";
+  }
+  return inventoryWarehouseView;
+}
+
+function warehouseInventoryTotal(warehouseId = inventoryWarehouseView) {
+  if (!warehouseId) {
+    return state.inventoryModels.reduce((sum, model) => sum + Math.max(0, Number(model.quantity || 0)), 0);
+  }
+  return (state.warehouseStocks || [])
+    .filter((stock) => sameRecordId(stock.warehouseId, warehouseId))
+    .reduce((sum, stock) => sum + Math.max(0, Number(stock.quantity || 0)), 0);
+}
+
+function warehouseInventoryModelCount(warehouseId = inventoryWarehouseView) {
+  if (!warehouseId) {
+    return state.inventoryModels.filter((model) => Math.max(0, Number(model.quantity || 0)) > 0).length;
+  }
+  return (state.warehouseStocks || []).filter(
+    (stock) => sameRecordId(stock.warehouseId, warehouseId) && Math.max(0, Number(stock.quantity || 0)) > 0,
+  ).length;
+}
+
+function nextWarehouseCode() {
+  const used = new Set((state.warehouses || []).map((warehouse) => String(warehouse.code || "").toUpperCase()));
+  let sequence = 1;
+  while (used.has(`WH-${String(sequence).padStart(3, "0")}`)) sequence += 1;
+  return `WH-${String(sequence).padStart(3, "0")}`;
+}
+
+function warehouseOrganizationOptions(selectedId = "") {
+  return [{ value: "", label: "请选择所属组织" }].concat(
+    [...state.orgs]
+      .sort((left, right) => compareText(orgName(left.id), orgName(right.id)))
+      .map((org) => ({
+        value: org.id,
+        label: orgPathName(org.id) || org.name,
+        selected: sameRecordId(org.id, selectedId),
+      })),
+  );
+}
+
+function warehouseManagerOptions(orgId = "", selectedId = "") {
+  return [{ value: "", label: "未指定负责人" }].concat(
+    (state.employees || [])
+      .filter((employee) => employee.status === "active" && sameRecordId(employee.orgId, orgId))
+      .sort((left, right) => compareText(left.name, right.name))
+      .map((employee) => ({
+        value: employee.id,
+        label: `${employee.name}${employee.employeeNo ? ` · ${employee.employeeNo}` : ""}`,
+        selected: sameRecordId(employee.id, selectedId),
+      })),
+  );
+}
+
+function inventoryModelOptionsForWarehouse(warehouseId = "", selectedId = "", includeZero = false) {
+  const models = state.inventoryModels
+    .map((model) => inventoryModelForWarehouseView(model, warehouseId))
+    .filter((model) => includeZero || model.quantity > 0)
+    .sort((left, right) => compareText(left.name, right.name));
+  return [{ value: "", label: "请选择物资型号" }].concat(
+    models.map((model) => {
+      const brand = getInventoryBrand(model.brandId);
+      const type = getType(model.typeId);
+      return {
+        value: model.id,
+        label: `${type?.name || "未分类"} / ${brand?.name || "未登记品牌"} / ${model.name}（${model.quantity} ${type?.unit || "件"}）`,
+        selected: sameRecordId(model.id, selectedId),
+      };
+    }),
+  );
+}
+
 function isComputerInventoryType(type) {
   const code = inventoryText(type?.code);
   const name = inventoryText(type?.name);
@@ -1604,6 +1786,8 @@ function normalizeInventoryMovementLogs(logs) {
     brandName: log.brandName || "",
     modelName: log.modelName || "",
     quantity: Math.max(1, Number(log.quantity || 1)),
+    sourceWarehouseId: String(log.sourceWarehouseId || ""),
+    targetWarehouseId: String(log.targetWarehouseId || ""),
     sourceLabel: log.sourceLabel || "",
     targetLabel: log.targetLabel || "",
     note: log.note || "",
@@ -1623,6 +1807,7 @@ function normalizeInventoryPurchaseLogs(logs) {
     typeId: String(log.typeId || ""),
     brandId: String(log.brandId || ""),
     modelId: String(log.modelId || ""),
+    warehouseId: String(log.warehouseId || ""),
     quantity: Math.max(1, Number(log.quantity || 1)),
     inboundDate: log.inboundDate || "",
     cpu: log.cpu || "",
@@ -1645,6 +1830,9 @@ function inventoryDirectionClass(direction) {
 }
 
 const flowRecordDefinitions = {
+  inventory_receipt: { label: "仓库入库", category: "库存入库", stockDelta: 1 },
+  inventory_adjustment: { label: "库存调整", category: "库存管理" },
+  inventory_transfer: { label: "仓库调拨", category: "库存调拨", stockDelta: 0 },
   import: { label: "导入入库", category: "库存入库", stockDelta: 1 },
   manual_create: { label: "手工入库", category: "库存入库", stockDelta: 1 },
   manual_adjustment: { label: "库存调整", category: "库存管理" },
@@ -1859,6 +2047,7 @@ function inventoryBrandFilterOptions(typeId = "") {
 
 function buildInventoryTreeNodes() {
   const { search, typeId, brandId, selectedBrand } = getInventoryFilterContext();
+  const warehouseId = ensureInventoryWarehouseView();
 
   return state.nonAssetTypes
     .filter((type) => {
@@ -1873,10 +2062,10 @@ function buildInventoryTreeNodes() {
           return true;
         })
         .map((brand) => {
-          const models = inventoryModelsForBrand(brand.id).filter((model) => {
-            if (!search) return true;
-            return inventoryModelSearchText(model).includes(search);
-          });
+          const models = inventoryModelsForBrand(brand.id)
+            .map((model) => inventoryModelForWarehouseView(model, warehouseId))
+            .filter((model) => model.quantity > 0)
+            .filter((model) => !search || inventoryModelSearchText(model).includes(search));
           const brandVisible =
             !search ||
             brandId === brand.id ||
@@ -2391,6 +2580,7 @@ function employeeDevices(employee) {
       model: monitor.model || "",
       brandId: monitor.inventoryBrandId || "",
       modelId: monitor.inventoryModelId || "",
+      stockAdjusted: Boolean(monitor.stockAdjusted),
     });
   });
 
@@ -2543,6 +2733,7 @@ function employeeRecoveryDevices(employee) {
       model: monitor.model || "",
       brandId: monitor.inventoryBrandId || "",
       modelId: monitor.inventoryModelId || "",
+      stockAdjusted: Boolean(monitor.stockAdjusted),
     });
   });
   getNonAssetItems(employee).forEach((item) => {
@@ -2563,6 +2754,7 @@ function employeeRecoveryDevices(employee) {
       model: item.model || "",
       brandId: item.inventoryBrandId || "",
       modelId: item.inventoryModelId || "",
+      stockAdjusted: Boolean(item.stockAdjusted),
     });
   });
   return devices;
@@ -2651,6 +2843,7 @@ function recoveryDeviceFromSelection(employee, kind, id) {
       model: monitor.model || "",
       brandId: monitor.inventoryBrandId || "",
       modelId: monitor.inventoryModelId || "",
+      stockAdjusted: Boolean(monitor.stockAdjusted),
       sourceId: monitor.id,
     };
   }
@@ -2669,13 +2862,14 @@ function recoveryDeviceFromSelection(employee, kind, id) {
       model: item.model || "",
       brandId: item.inventoryBrandId || "",
       modelId: item.inventoryModelId || "",
+      stockAdjusted: Boolean(item.stockAdjusted),
       sourceId: item.id,
     };
   }
   return null;
 }
 
-function openDeviceRecoveryConfirm(employeeId, kind, selectedDevices = null) {
+function openDeviceRecoveryConfirm(employeeId, kind, selectedDevices = null, selectedWarehouseId = "") {
   const employee = getEmployee(employeeId);
   if (!employee) return;
   const devices = Array.isArray(selectedDevices)
@@ -2694,11 +2888,11 @@ function openDeviceRecoveryConfirm(employeeId, kind, selectedDevices = null) {
     showToast(kind === "monitor" ? "请先勾选要回收的显示屏" : "请先勾选要回收的非资产设备", true);
     return;
   }
-  pendingDeviceRecovery = { employeeId, kind, devices };
+  pendingDeviceRecovery = { employeeId, kind, devices, warehouseId: selectedWarehouseId || "" };
   openModal(
     `${modalHeader("确认回收物资", `${employee.name} · ${employee.employeeNo}`)}
-      <div class="confirm-panel">
-        <p>是否回收以下物资到 IT 物资库存？</p>
+      <form class="confirm-panel" data-form="device-recovery">
+        <p>请选择回收目标仓库。有来源仓库的物资也可以回收到其他仓库。</p>
         <div class="recovery-list">
           ${devices
             .map(
@@ -2711,19 +2905,26 @@ function openDeviceRecoveryConfirm(employeeId, kind, selectedDevices = null) {
             )
             .join("")}
         </div>
+        ${warehouseSelectField("回收目标仓库", "warehouseId", selectedWarehouseId, true, "请选择回收目标仓库")}
         <div class="confirm-options">
-          <button class="primary-button" data-action="confirm-device-recovery">确定回收</button>
-          <button class="secondary-button" data-action="cancel-device-recovery">取消</button>
+          <button type="button" class="primary-button" data-action="confirm-device-recovery">确定回收</button>
+          <button type="button" class="secondary-button" data-action="cancel-device-recovery">取消</button>
         </div>
-      </div>`,
+      </form>`,
     false,
   );
 }
 
 async function confirmDeviceRecovery() {
   const pending = pendingDeviceRecovery;
-  pendingDeviceRecovery = null;
   if (!pending) return;
+  const form = document.querySelector('form[data-form="device-recovery"]');
+  const warehouseId = String(form?.elements?.warehouseId?.value || pending.warehouseId || "").trim();
+  if (!warehouseId) {
+    showToast("请选择回收目标仓库。", true);
+    return;
+  }
+  pendingDeviceRecovery = null;
   const employee = getEmployee(pending.employeeId);
   if (!employee) {
     closeModal();
@@ -2739,6 +2940,7 @@ async function confirmDeviceRecovery() {
         pending.kind === "monitor" ? "monitor" : "non_asset",
         device.sourceId,
         device.category === "monitor" ? "Employee monitor recovery" : "Employee device recovery",
+        warehouseId,
       );
       if (!returned) {
         throw new Error("This usage record has no tracked allocation. Reconcile it before returning.");
@@ -2754,8 +2956,8 @@ async function confirmDeviceRecovery() {
       return;
     }
     showToast(`物资回收失败：${error.message}`, true);
-    pendingDeviceRecovery = { ...pending, devices: remainingDevices };
-    openDeviceRecoveryConfirm(pending.employeeId, pending.kind, remainingDevices);
+    pendingDeviceRecovery = { ...pending, devices: remainingDevices, warehouseId };
+    openDeviceRecoveryConfirm(pending.employeeId, pending.kind, remainingDevices, warehouseId);
     return;
   }
   closeModal();
@@ -2794,11 +2996,14 @@ function renderEmployeeOffboardItemRow(employee, item) {
   const safeRowKey = rowKey.replace(/[^A-Za-z0-9_-]/g, "-");
   const actionId = createControlId(`offboard-action-${safeRowKey}`);
   const targetId = createControlId(`offboard-target-${safeRowKey}`);
+  const recoveryWarehouseId = createControlId(`offboard-recovery-warehouse-${safeRowKey}`);
   const noteId = createControlId(`offboard-note-${safeRowKey}`);
   return `
     <article class="offboard-item-row" data-offboard-item-row data-item-type="${escapeHtml(
       item.itemType || item.category,
-    )}" data-item-id="${escapeHtml(item.sourceId || item.id || "")}">
+    )}" data-item-id="${escapeHtml(item.sourceId || item.id || "")}" data-stock-adjusted="${
+      item.stockAdjusted ? "1" : "0"
+    }">
       <div class="offboard-item-main">
         <span class="status-pill status-idle">${escapeHtml(offboardItemTypeLabel(item))}</span>
         <div>
@@ -2819,6 +3024,19 @@ function renderEmployeeOffboardItemRow(employee, item) {
               .join("")}
           </select>
         </div>
+        <div class="form-field" data-offboard-recovery-warehouse-field hidden>
+          <label for="${recoveryWarehouseId}">回收目标仓库</label>
+          <select id="${recoveryWarehouseId}" name="recoveryWarehouseId" data-offboard-recovery-warehouse>
+            ${warehouseOptions("", "请选择回收目标仓库")
+              .map(
+                (option) =>
+                  `<option value="${escapeHtml(option.value)}" ${
+                    option.selected ? "selected" : ""
+                  }>${escapeHtml(option.label)}</option>`,
+              )
+              .join("")}
+          </select>
+        </div>
         <div class="form-field">
           <label for="${noteId}">处理说明</label>
           <input id="${noteId}" data-offboard-note maxlength="500" placeholder="异常待处理时必填" />
@@ -2832,12 +3050,21 @@ function updateOffboardItemRow(row) {
   const action = row.querySelector("[data-offboard-action]")?.value || "recover";
   const targetField = row.querySelector("[data-offboard-target-field]");
   const target = row.querySelector("[data-offboard-target]");
+  const recoveryWarehouseField = row.querySelector("[data-offboard-recovery-warehouse-field]");
+  const recoveryWarehouse = row.querySelector("[data-offboard-recovery-warehouse]");
   const note = row.querySelector("[data-offboard-note]");
   if (targetField) targetField.hidden = action !== "transfer";
   if (target) {
     target.disabled = action !== "transfer";
     target.required = action === "transfer";
     if (action !== "transfer") target.value = "";
+  }
+  const requiresRecoveryWarehouse = row.dataset.stockAdjusted === "1" && action === "recover";
+  if (recoveryWarehouseField) recoveryWarehouseField.hidden = !requiresRecoveryWarehouse;
+  if (recoveryWarehouse) {
+    recoveryWarehouse.disabled = !requiresRecoveryWarehouse;
+    recoveryWarehouse.required = requiresRecoveryWarehouse;
+    if (!requiresRecoveryWarehouse) recoveryWarehouse.value = "";
   }
   if (note) {
     note.required = action === "exception";
@@ -2920,7 +3147,12 @@ async function handleEmployeeOffboardSubmit(form) {
       itemType: row.dataset.itemType || "",
       itemId: row.dataset.itemId || "",
       action,
+      stockAdjusted: row.dataset.stockAdjusted === "1",
       targetEmployeeId: action === "transfer" ? row.querySelector("[data-offboard-target]")?.value || "" : "",
+      recoveryWarehouseId:
+        action === "recover" && row.dataset.stockAdjusted === "1"
+          ? row.querySelector("[data-offboard-recovery-warehouse]")?.value || ""
+          : "",
       note: String(row.querySelector("[data-offboard-note]")?.value || "").trim(),
     };
   });
@@ -2930,6 +3162,9 @@ async function handleEmployeeOffboardSubmit(form) {
   }
   if (items.some((item) => item.action === "exception" && !item.note)) {
     return showToast("异常待处理必须填写说明。", true);
+  }
+  if (items.some((item) => item.action === "recover" && item.stockAdjusted && !item.recoveryWarehouseId)) {
+    return showToast("回收入库的显示屏或非资产物资必须选择目标仓库。", true);
   }
   form.dataset.submitting = "1";
   const submit = form.querySelector('button[type="submit"]');
@@ -4802,10 +5037,10 @@ function inventoryTreeRows() {
 }
 
 function renderInventoryPage() {
-  const totalQuantity = state.inventoryModels.reduce(
-    (sum, model) => sum + Math.max(0, Number(model.quantity || 0)),
-    0,
-  );
+  const warehouseId = ensureInventoryWarehouseView();
+  const warehouse = inventoryWarehouseById(warehouseId);
+  const warehouses = inventoryWarehousesForView();
+  const totalQuantity = warehouseInventoryTotal(warehouseId);
   const nodes = buildInventoryTreeNodes();
   const visibleBrandCount = nodes.reduce((sum, node) => sum + node.brands.length, 0);
   const visibleModelCount = nodes.reduce(
@@ -4822,16 +5057,66 @@ function renderInventoryPage() {
       ),
     0,
   );
+  const purchaseLogs = warehouseId
+    ? (state.inventoryPurchaseLogs || []).filter((log) => sameRecordId(log.warehouseId, warehouseId))
+    : state.inventoryPurchaseLogs || [];
+  const canManageWarehouses = hasPermission("warehouse_management", "view");
+  const canCreateWarehouses = hasPermission("warehouse_management", "create");
+  const canTransferInventory =
+    hasPermission("warehouse_management", "create") && hasPermission("inventory_operations", "update");
+  const canCreateCatalog = hasPermission("inventory_catalog", "create");
+  const canExportCatalog = hasPermission("inventory_catalog", "export");
+  const canCreateOperations = hasPermission("inventory_operations", "create");
+  const warehouseTabs = warehouses.length
+    ? `<nav class="inventory-warehouse-tabs" aria-label="库存仓库">
+        ${warehouses
+          .map(
+            (item) => `<button type="button" class="inventory-warehouse-tab ${
+              sameRecordId(item.id, warehouseId) ? "is-active" : ""
+            }" data-action="select-inventory-warehouse" data-id="${escapeHtml(item.id)}" aria-pressed="${
+              sameRecordId(item.id, warehouseId) ? "true" : "false"
+            }">
+              <strong>${escapeHtml(item.name)}</strong><span>${escapeHtml(item.code || "未设编码")}</span>
+            </button>`,
+          )
+          .join("")}
+      </nav>`
+    : "";
+
   return `
     <div class="page-intro">
-      <div><h2>IT物资</h2><p>按设备类型、品牌、型号管理未分配的显示屏、鼠标、键盘等办公物资库存。</p></div>
+      <div><h2>IT物资</h2><p>按仓库、类型、品牌和型号管理未分配的办公物资库存。</p></div>
       <div class="toolbar-actions">
-        <button class="secondary-button" data-action="open-inventory-import">＋ 导入物资</button>
-        <button class="secondary-button" data-action="export-inventory">导出筛选</button>
-        <button class="primary-button" data-action="open-type">新增类型</button>
+        ${canManageWarehouses ? '<button class="secondary-button" data-action="open-warehouse-directory">仓库管理</button>' : ""}
+        ${canTransferInventory ? '<button class="secondary-button" data-action="open-inventory-transfer">库存调拨</button>' : ""}
+        ${canCreateOperations ? '<button class="secondary-button" data-action="open-inventory-import">＋ 入库</button>' : ""}
+        ${canExportCatalog ? '<button class="secondary-button" data-action="export-inventory">导出当前仓库</button>' : ""}
+        ${canCreateCatalog ? '<button class="primary-button" data-action="open-type">新增类型</button>' : ""}
         <button class="secondary-button" data-action="navigate" data-page="dashboard">返回工作台</button>
       </div>
     </div>
+    ${warehouseTabs}
+    ${
+      warehouse
+        ? `<section class="inventory-warehouse-summary">
+            <div class="inventory-warehouse-heading">
+              <div><h3>${escapeHtml(warehouse.name)}</h3><span>${escapeHtml(warehouse.code || "未设仓库编码")}</span></div>
+              <span class="status-pill ${warehouse.isActive ? "status-idle" : "status-retired"}">${
+                warehouse.isActive ? "启用" : "已停用"
+              }</span>
+            </div>
+            <dl class="inventory-warehouse-details">
+              <div><dt>所属组织</dt><dd>${escapeHtml(orgPathName(warehouse.orgId))}</dd></div>
+              <div><dt>负责人</dt><dd>${escapeHtml(warehouse.managerName || "未指定")}</dd></div>
+              <div><dt>库存型号</dt><dd>${warehouseInventoryModelCount(warehouseId)} 个</dd></div>
+              <div><dt>库存总量</dt><dd>${totalQuantity} 件</dd></div>
+            </dl>
+          </section>`
+        : `<section class="inventory-warehouse-summary is-empty">
+            <div><h3>尚未配置可见仓库</h3><p>仓库库存迁移完成后，可在此按仓库维护入库、领用、归还和调拨。</p></div>
+            ${canCreateWarehouses ? '<button class="primary-button" data-action="open-warehouse">新增仓库</button>' : ""}
+          </section>`
+    }
     <div class="toolbar">
       <div class="toolbar-actions">
         <label class="search-box"><span>⌕</span><input data-filter="inventorySearch" value="${escapeHtml(
@@ -4864,18 +5149,18 @@ function renderInventoryPage() {
             : ""
         }
       </div>
-      <span class="secondary-text">显示 ${visibleModelCount} / ${state.inventoryModels.length} 个型号 · ${visibleBrandCount} / ${state.inventoryBrands.length} 个品牌 · ${visibleQuantity} / ${totalQuantity} 件</span>
+      <span class="secondary-text">当前仓库显示 ${visibleModelCount} 个型号 · ${visibleBrandCount} 个品牌 · ${visibleQuantity} / ${totalQuantity} 件</span>
     </div>
     <div class="stats-grid compact">
       <div class="stat-card"><div class="stat-label"><span>设备类型</span><span class="stat-mark">T</span></div><div class="stat-value">${
         state.nonAssetTypes.length
       }</div><div class="stat-foot">库存一级分组</div></div>
       <div class="stat-card"><div class="stat-label"><span>品牌组</span><span class="stat-mark">B</span></div><div class="stat-value">${
-        state.inventoryBrands.length
-      }</div><div class="stat-foot">库存二级分组</div></div>
+        visibleBrandCount
+      }</div><div class="stat-foot">当前仓库库存品牌</div></div>
       <div class="stat-card"><div class="stat-label"><span>型号组</span><span class="stat-mark">M</span></div><div class="stat-value">${
-        state.inventoryModels.length
-      }</div><div class="stat-foot">库存最下级条目</div></div>
+        warehouseInventoryModelCount(warehouseId)
+      }</div><div class="stat-foot">当前仓库可用型号</div></div>
       <div class="stat-card"><div class="stat-label"><span>可用数量</span><span class="stat-mark">Q</span></div><div class="stat-value">${totalQuantity}</div><div class="stat-foot">未分配库存总量</div></div>
     </div>
     <section class="section-block">
@@ -4890,16 +5175,261 @@ function renderInventoryPage() {
     </section>
     <section class="section-block">
       <div class="section-heading">
-        <div><h2>采购入库信息</h2><span>${state.inventoryPurchaseLogs.length} 条采购入库记录，普通物资不在库存型号上显示入库日期</span></div>
+        <div><h2>采购入库信息</h2><span>${purchaseLogs.length} 条当前仓库入库记录，普通物资不在库存型号上显示入库日期</span></div>
         <div class="toolbar-actions">
           <button class="secondary-button" data-action="export-inventory-purchase" ${
-            state.inventoryPurchaseLogs.length ? "" : "disabled"
-          }>导出入库表</button>
+            purchaseLogs.length && canExportCatalog ? "" : "disabled"
+          }>导出当前仓库入库表</button>
         </div>
       </div>
-      <div class="data-panel">${renderInventoryPurchaseTable(state.inventoryPurchaseLogs)}</div>
+      <div class="data-panel">${renderInventoryPurchaseTable(purchaseLogs)}</div>
     </section>
   `;
+}
+
+function renderWarehouseDirectory() {
+  const warehouses = inventoryWarehousesForView();
+  const canCreate = hasPermission("warehouse_management", "create");
+  const canUpdate = hasPermission("warehouse_management", "update");
+  const canDelete = hasPermission("warehouse_management", "delete");
+  return `
+    ${modalHeader("仓库管理", "维护仓库资料、组织归属和负责人；已有库存或流转记录的仓库不能删除。")}
+    <section class="modal-section warehouse-directory-section">
+      <div class="section-heading">
+        <div><h2>仓库目录</h2><span>${warehouses.length} 个可见仓库</span></div>
+        ${canCreate ? '<button type="button" class="primary-button" data-action="open-warehouse">新增仓库</button>' : ""}
+      </div>
+      <div class="data-panel">
+        ${
+          warehouses.length
+            ? `<div class="table-wrap"><table class="warehouse-directory-table"><thead><tr><th>仓库</th><th>所属组织</th><th>负责人</th><th>联系方式</th><th>库存</th><th>状态</th><th>操作</th></tr></thead><tbody>${warehouses
+                .map(
+                  (item) => `<tr>
+                    <td><div class="primary-text">${escapeHtml(item.name)}</div><div class="secondary-text mono">${escapeHtml(item.code || "—")}</div></td>
+                    <td>${escapeHtml(orgPathName(item.orgId))}</td>
+                    <td>${escapeHtml(item.managerName || "未指定")}</td>
+                    <td><div>${escapeHtml(item.contactPhone || "—")}</div><div class="secondary-text">${escapeHtml(item.address || "")}</div></td>
+                    <td>${warehouseInventoryModelCount(item.id)} 个型号 / ${warehouseInventoryTotal(item.id)} 件</td>
+                    <td><span class="status-pill ${item.isActive ? "status-idle" : "status-retired"}">${
+                      item.isActive ? "启用" : "已停用"
+                    }</span></td>
+                    <td><div class="inline-actions">
+                      ${canUpdate ? `<button type="button" class="text-button" data-action="open-warehouse" data-id="${escapeHtml(item.id)}">编辑</button>` : ""}
+                      ${
+                        canDelete && item.code !== "WH-001"
+                          ? `<button type="button" class="text-button danger" data-action="delete-warehouse" data-id="${escapeHtml(item.id)}">删除</button>`
+                          : ""
+                      }
+                    </div></td>
+                  </tr>`,
+                )
+                .join("")}</tbody></table></div>`
+            : '<div class="empty-state">当前权限范围内暂无仓库</div>'
+        }
+      </div>
+    </section>
+    <div class="modal-footer"><button type="button" class="secondary-button" data-action="close-modal">关闭</button></div>
+  `;
+}
+
+function openWarehouseDirectoryModal() {
+  openModal(renderWarehouseDirectory(), true);
+}
+
+function openWarehouseModal(id = "") {
+  const existing = inventoryWarehouseById(id);
+  if (id && !existing) return showToast("未找到仓库记录，请刷新后重试。", true);
+  const defaultOrgId = getRootOrgs()[0]?.id || state.orgs[0]?.id || "";
+  const warehouse = existing || {
+    id: "",
+    code: nextWarehouseCode(),
+    name: "",
+    orgId: defaultOrgId,
+    managerEmployeeId: "",
+    contactPhone: "",
+    address: "",
+    isActive: true,
+    remarks: "",
+  };
+  const isDefaultWarehouse = warehouse.code === "WH-001";
+  openModal(
+    `${modalHeader(id ? "编辑仓库" : "新增仓库", "仓库归属组织架构，负责人必须为该组织中的在职人员。")}
+      <form data-form="warehouse" data-id="${escapeHtml(warehouse.id)}">
+        <section class="modal-section">
+          <div class="form-grid">
+            ${inputField(
+              "仓库编码",
+              "code",
+              warehouse.code,
+              true,
+              "WH-002",
+              "text",
+              "",
+              isDefaultWarehouse ? 'readonly aria-readonly="true"' : 'maxlength="64" autocomplete="off"',
+            )}
+            ${inputField("仓库名称", "name", warehouse.name, true, "华东备件仓", "text", "", 'maxlength="120"')}
+            ${selectField("所属组织", "orgId", warehouse.orgId, warehouseOrganizationOptions(warehouse.orgId), true)}
+            ${selectField(
+              "负责人",
+              "managerEmployeeId",
+              warehouse.managerEmployeeId,
+              warehouseManagerOptions(warehouse.orgId, warehouse.managerEmployeeId),
+            )}
+            ${inputField("联系电话", "contactPhone", warehouse.contactPhone, false, "13800000000", "tel", "", 'maxlength="64"')}
+            ${inputField("地址", "address", warehouse.address, false, "填写仓库所在地点", "text", "", 'maxlength="255"')}
+            <label class="form-field warehouse-active-toggle"><span>仓库状态</span><span class="warehouse-active-control"><input type="checkbox" name="isActive" ${
+              warehouse.isActive ? "checked" : ""
+            } /> 启用仓库</span></label>
+            ${textareaField("备注", "remarks", warehouse.remarks, false, "记录仓库用途、管理约定等", 3, 'maxlength="500"')}
+          </div>
+        </section>
+        <div class="modal-footer">
+          <button type="button" class="secondary-button" data-action="close-modal">取消</button>
+          <button class="primary-button" type="submit">保存仓库</button>
+        </div>
+      </form>`,
+    true,
+  );
+}
+
+function refreshWarehouseManagerOptions(form) {
+  if (!form || form.dataset.form !== "warehouse") return;
+  const managerSelect = form.elements.managerEmployeeId;
+  if (!managerSelect) return;
+  replaceSelectOptions(
+    managerSelect,
+    warehouseManagerOptions(form.elements.orgId?.value || "", managerSelect.value || ""),
+    managerSelect.value || "",
+  );
+}
+
+async function handleWarehouseSubmit(form) {
+  const data = Object.fromEntries(new FormData(form).entries());
+  const id = form.dataset.id || "";
+  const code = String(data.code || "").trim().toUpperCase();
+  const name = String(data.name || "").trim();
+  const orgId = String(data.orgId || "").trim();
+  if (!code || !name || !orgId) return showToast("请填写仓库编码、仓库名称并选择所属组织。", true);
+  const payload = {
+    code,
+    name,
+    orgId,
+    managerEmployeeId: String(data.managerEmployeeId || "").trim(),
+    contactPhone: String(data.contactPhone || "").trim(),
+    address: String(data.address || "").trim(),
+    isActive: Boolean(form.elements.isActive?.checked),
+    remarks: String(data.remarks || "").trim(),
+  };
+  try {
+    await requestJson(`/api/inventory/warehouses${id ? `/${encodeURIComponent(id)}` : ""}`, {
+      method: id ? "PUT" : "POST",
+      body: JSON.stringify(payload),
+    });
+    closeModal();
+    await reloadDomainState();
+    render();
+    showToast(id ? "仓库已更新" : "仓库已创建");
+  } catch (error) {
+    showToast(`保存仓库失败：${error.message}`, true);
+  }
+}
+
+async function deleteWarehouse(id) {
+  const warehouse = inventoryWarehouseById(id);
+  if (!warehouse) return showToast("未找到仓库记录，请刷新后重试。", true);
+  if (warehouse.code === "WH-001") return showToast("默认仓库“仓库1”不能删除，可编辑或停用。", true);
+  if (!window.confirm(`确定删除仓库“${warehouse.name}”吗？没有库存和历史流转记录的仓库才可删除。`)) return;
+  try {
+    await requestJson(`/api/inventory/warehouses/${encodeURIComponent(warehouse.id)}`, { method: "DELETE" });
+    if (sameRecordId(inventoryWarehouseView, warehouse.id)) inventoryWarehouseView = "";
+    closeModal();
+    await reloadDomainState();
+    render();
+    showToast("仓库已删除");
+  } catch (error) {
+    showToast(`删除仓库失败：${error.message}`, true);
+  }
+}
+
+function openInventoryTransferModal() {
+  const warehouses = activeWarehouses();
+  if (warehouses.length < 2) {
+    return showToast("至少需要两个启用仓库才能进行库存调拨。", true);
+  }
+  const sourceWarehouseId = warehouses.some((warehouse) => sameRecordId(warehouse.id, inventoryWarehouseView))
+    ? inventoryWarehouseView
+    : warehouses[0].id;
+  const targetWarehouseId = warehouses.find((warehouse) => !sameRecordId(warehouse.id, sourceWarehouseId))?.id || "";
+  openModal(
+    `${modalHeader("库存调拨", "调拨在同一事务内扣减调出仓库并增加调入仓库，同时写入物资流转记录和审计日志。")}
+      <form data-form="inventory-transfer">
+        <section class="modal-section">
+          <div class="form-grid">
+            ${selectField("调出仓库", "sourceWarehouseId", sourceWarehouseId, warehouseOptions(sourceWarehouseId, "请选择调出仓库"), true)}
+            ${selectField("调入仓库", "targetWarehouseId", targetWarehouseId, warehouseOptions(targetWarehouseId, "请选择调入仓库"), true)}
+            ${selectField(
+              "物资型号",
+              "modelId",
+              "",
+              inventoryModelOptionsForWarehouse(sourceWarehouseId, "", false),
+              true,
+            )}
+            ${inputField("调拨数量", "quantity", 1, true, "1", "number", "1", "1")}
+            ${textareaField("调拨备注", "note", "", false, "填写调拨原因、用途或交接说明", 3, 'maxlength="500"')}
+          </div>
+        </section>
+        <div class="modal-footer">
+          <button type="button" class="secondary-button" data-action="close-modal">取消</button>
+          <button class="primary-button" type="submit">确认调拨</button>
+        </div>
+      </form>`,
+  );
+}
+
+function refreshInventoryTransferModelOptions(form) {
+  if (!form || form.dataset.form !== "inventory-transfer") return;
+  const modelSelect = form.elements.modelId;
+  if (!modelSelect) return;
+  replaceSelectOptions(
+    modelSelect,
+    inventoryModelOptionsForWarehouse(form.elements.sourceWarehouseId?.value || "", modelSelect.value || "", false),
+    modelSelect.value || "",
+  );
+}
+
+async function handleInventoryTransferSubmit(form) {
+  const data = Object.fromEntries(new FormData(form).entries());
+  const sourceWarehouseId = String(data.sourceWarehouseId || "").trim();
+  const targetWarehouseId = String(data.targetWarehouseId || "").trim();
+  const modelId = String(data.modelId || "").trim();
+  const quantity = Math.max(0, Number(data.quantity || 0));
+  if (!sourceWarehouseId || !targetWarehouseId || !modelId || quantity < 1) {
+    return showToast("请选择调出仓库、调入仓库、物资型号并填写调拨数量。", true);
+  }
+  if (sameRecordId(sourceWarehouseId, targetWarehouseId)) {
+    return showToast("调出仓库和调入仓库不能相同。", true);
+  }
+  const available = inventoryModelQuantityInWarehouse(modelId, sourceWarehouseId);
+  if (quantity > available) return showToast(`调出仓库可用库存不足，当前仅有 ${available} 件。`, true);
+  try {
+    await runCommand(
+      "/api/inventory/transfers",
+      {
+        sourceWarehouseId,
+        targetWarehouseId,
+        modelId,
+        quantity,
+        note: String(data.note || "").trim(),
+      },
+      "inventory-transfer",
+    );
+    closeModal();
+    await reloadDomainState();
+    render();
+    showToast("库存调拨已完成");
+  } catch (error) {
+    showToast(`库存调拨失败：${error.message}`, true);
+  }
 }
 
 function renderFlowRecordNoteEditor(log) {
@@ -5197,6 +5727,8 @@ function openInventoryModelModal(typeId, brandId, id = "") {
   if (!type || !brand) return;
   const computerModel = isComputerInventoryType(type);
   const existing = getInventoryModel(id);
+  const warehouseId = ensureInventoryWarehouseView();
+  const warehouse = inventoryWarehouseById(warehouseId);
   const model = existing || {
     id: "",
     typeId,
@@ -5215,16 +5747,24 @@ function openInventoryModelModal(typeId, brandId, id = "") {
       <form data-form="inventory-model" data-id="${escapeHtml(model.id)}" data-type-id="${escapeHtml(
         type.id,
       )}" data-brand-id="${escapeHtml(brand.id)}">
-        <div class="form-grid">${inputField("型号", "name", model.name, true, "M332")}${inputField(
+        <div class="form-grid">${warehouseSelectField(
+          "库存仓库",
+          "warehouseId",
+          warehouseId,
+          true,
+          "请选择库存仓库",
+        )}${inputField("型号", "name", model.name, true, "M332")}${inputField(
           "可用数量",
           "quantity",
-          Math.max(0, Number(model.quantity || 0)),
+          existing ? inventoryModelQuantityInWarehouse(existing.id, warehouseId) : 0,
           true,
           "0",
           "number",
           "0",
           "0",
-        )}${computerModel ? `${inputField(
+        )}<div class="form-field inventory-model-warehouse-note"><span class="readonly-label">当前仓库</span><div class="readonly-value">${escapeHtml(
+          warehouse?.name || "未选择仓库",
+        )}</div></div>${computerModel ? `${inputField(
           "入库时间",
           "inboundDate",
           model.inboundDate || (id ? "" : currentDateText()),
@@ -5301,10 +5841,12 @@ function toggleInventoryImportComputerFields(form) {
 
 function openInventoryImportModal() {
   const type = state.nonAssetTypes.find((item) => item.id === state.filters.inventoryType) || null;
+  const warehouseId = ensureInventoryWarehouseView();
   openModal(
     `${modalHeader("导入IT物资", "输入类型、品牌、型号和数量，已有项目会自动归类到对应层级，不存在则自动创建")}
       <form data-form="inventory-import">
         <div class="form-grid">
+          ${warehouseSelectField("入库仓库", "warehouseId", warehouseId, true, "请选择入库仓库")}
           ${inputField("设备类型", "type", type?.name || "", true, "鼠标")}
           ${inputField("品牌", "brand", "", true, "罗技")}
           ${inputField("型号", "model", "", true, "M330")}
@@ -6847,116 +7389,61 @@ function inventoryModelForItem(item) {
   return brand ? inventoryModelsForBrand(brand.id).find((model) => model.name === item.model) : null;
 }
 
-function stockMovementForDevice(previous, next, mode) {
-  if (mode !== "deduct") return [];
-  const movements = new Map();
-  const addMovement = (model, delta) => {
-    if (!model || !delta) return;
-    movements.set(model.id, (movements.get(model.id) || 0) + delta);
+function openDeviceStockConfirm(kind, employeeId, item, previous, selections = {}) {
+  pendingDeviceSave = {
+    kind,
+    employeeId,
+    item,
+    previous,
+    sourceWarehouseId: selections.sourceWarehouseId || "",
+    returnWarehouseId: selections.returnWarehouseId || "",
   };
-  if (previous?.stockAdjusted) {
-    addMovement(inventoryModelForItem(previous), Math.max(1, Number(previous.quantity || 1)));
-  }
-  const nextModel = inventoryModelForItem(next);
-  if (!nextModel) {
-    throw new Error("所选品牌或型号不在 IT 物资库存中，请先在库存模块新增，或选择仅登记。");
-  }
-  addMovement(nextModel, -Math.max(1, Number(next.quantity || 1)));
-  return [...movements.entries()].map(([modelId, delta]) => ({ modelId, delta }));
-}
-
-function applyStockMovement(movements) {
-  const models = movements.map((movement) => ({
-    movement,
-    model: getInventoryModel(movement.modelId),
-  }));
-  const invalid = models.find(({ model }) => !model);
-  if (invalid) {
-    throw new Error("所选品牌或型号不在 IT 物资库存中，请先在库存模块新增，或选择仅登记。");
-  }
-  const insufficient = models.find(
-    ({ movement, model }) => Number(model.quantity || 0) + movement.delta < 0,
-  );
-  if (insufficient) {
-    throw new Error(`${insufficient.model.name} 库存不足，当前可用 ${insufficient.model.quantity}。`);
-  }
-  models.forEach(({ movement, model }) => {
-    model.quantity = Math.max(0, Number(model.quantity || 0) + movement.delta);
-  });
-}
-
-function openDeviceStockConfirm(kind, employeeId, item, previous) {
-  pendingDeviceSave = { kind, employeeId, item, previous };
   const detail = [item.brand, item.model].filter(Boolean).join(" ") || "自定义物资";
   const quantity = Math.max(1, Number(item.quantity || 1));
+  const sourceWarehouseControlId = createControlId("device-stock-source-warehouse");
+  const returnWarehouseControlId = createControlId("device-stock-return-warehouse");
   openModal(
     `${modalHeader("是否同步修改 IT 物资库存", `${detail} x${quantity}`)}
-      <div class="confirm-panel">
+      <form class="confirm-panel" data-form="device-stock-confirm">
         <p>请选择本次人员物资分配是否同步影响库存数量。</p>
-        <div class="confirm-options">
-          <button class="primary-button" data-action="commit-device-stock">同步扣减库存</button>
-          <button class="secondary-button" data-action="commit-device-register">仅登记不扣减</button>
-          <button class="secondary-button" data-action="cancel-device-confirm">取消</button>
+        <div class="form-field">
+          <label for="${sourceWarehouseControlId}">新领用来源仓库</label>
+          <select id="${sourceWarehouseControlId}" name="sourceWarehouseId">
+            ${warehouseOptions(selections.sourceWarehouseId, "请选择来源仓库")
+              .map(
+                (option) =>
+                  `<option value="${escapeHtml(option.value)}" ${
+                    option.selected ? "selected" : ""
+                  }>${escapeHtml(option.label)}</option>`,
+              )
+              .join("")}
+          </select>
         </div>
-      </div>`,
+        ${
+          previous?.stockAdjusted
+            ? `<div class="form-field">
+                <label for="${returnWarehouseControlId}">旧记录回收目标仓库</label>
+                <select id="${returnWarehouseControlId}" name="returnWarehouseId">
+                  ${warehouseOptions(selections.returnWarehouseId, "请选择回收目标仓库")
+                    .map(
+                      (option) =>
+                        `<option value="${escapeHtml(option.value)}" ${
+                          option.selected ? "selected" : ""
+                        }>${escapeHtml(option.label)}</option>`,
+                    )
+                    .join("")}
+                </select>
+              </div>`
+            : ""
+        }
+        <div class="confirm-options">
+          <button type="button" class="primary-button" data-action="commit-device-stock">同步扣减库存</button>
+          <button type="button" class="secondary-button" data-action="commit-device-register">仅登记不扣减</button>
+          <button type="button" class="secondary-button" data-action="cancel-device-confirm">取消</button>
+        </div>
+      </form>`,
     false,
   );
-}
-
-function finishDeviceSave(mode) {
-  const pending = pendingDeviceSave;
-  pendingDeviceSave = null;
-  if (!pending) return;
-  const employee = getEmployee(pending.employeeId);
-  if (!employee) return;
-  try {
-    const movements = stockMovementForDevice(pending.previous, pending.item, mode);
-    if (mode === "deduct") {
-      applyStockMovement(movements);
-      movements.forEach(({ modelId, delta }) => {
-        if (!delta) return;
-        const model = getInventoryModel(modelId);
-        const names = modelLogNames(model);
-        recordInventoryMovement({
-          direction: delta < 0 ? "decrease" : "increase",
-          ...names,
-          quantity: Math.abs(delta),
-          sourceLabel: delta < 0 ? "IT物资库存" : employeeLogLabel(employee.employeeNo, employee.name),
-          targetLabel: delta < 0 ? employeeLogLabel(employee.employeeNo, employee.name) : "IT物资库存",
-          note: pending.kind === "monitor" ? "显示屏领用同步库存" : "非资产设备领用同步库存",
-          relatedEmployeeNo: employee.employeeNo || "",
-          relatedEmployeeName: employee.name || "",
-          triggerAction: delta < 0 ? "assignment" : "return_adjustment",
-        });
-      });
-    }
-  } catch (error) {
-    showToast(error.message, true);
-    openDeviceStockConfirm(pending.kind, pending.employeeId, pending.item, pending.previous);
-    return;
-  }
-
-  const item = {
-    ...pending.item,
-    stockAdjusted: Boolean(pending.previous?.stockAdjusted || mode === "deduct"),
-  };
-  if (pending.kind === "monitor") {
-    employee.monitors = employee.monitors || [];
-    const index = employee.monitors.findIndex((existing) => existing.id === item.id);
-    if (index >= 0) employee.monitors[index] = item;
-    else employee.monitors.push(item);
-  } else {
-    employee.nonAssetItems = getNonAssetItems(employee);
-    const index = employee.nonAssetItems.findIndex((existing) => existing.id === item.id);
-    if (index >= 0) employee.nonAssetItems[index] = item;
-    else employee.nonAssetItems.push(item);
-    syncNonAssetAggregate(employee);
-  }
-  persistState(true);
-  closeModal();
-  openDeviceManager(employee.id);
-  render();
-  showToast(mode === "deduct" ? "已保存，并同步更新库存" : "已保存，库存未变更");
 }
 
 function handleMonitorSubmit(form) {
@@ -7488,9 +7975,11 @@ function computerExportRows(computers) {
   });
 }
 
-function inventoryDetailExportRows(rows) {
+function inventoryDetailExportRows(rows, warehouse) {
   return rows.map(({ type, brand, model }) => {
     return [
+      warehouse?.name || "",
+      warehouse?.code || "",
       type.name,
       brand.name,
       model.name,
@@ -7518,14 +8007,16 @@ function inventoryMovementLogExportRows(logs) {
 }
 
 function exportInventory() {
+  const warehouse = inventoryWarehouseById(ensureInventoryWarehouseView());
+  if (!warehouse) return showToast("请先选择可访问的仓库。", true);
   const rows = inventoryFlatRows();
   if (!rows.length) return showToast("当前筛选条件下没有可导出的IT物资", true);
 
-  downloadExcel(`办公资产-IT物资-${exportDateStamp()}.xls`, [
+  downloadExcel(`办公资产-IT物资-${warehouse.code || "仓库"}-${exportDateStamp()}.xls`, [
     {
       name: "IT物资明细",
-      headers: ["设备类型", "品牌", "型号", "数量", "单位"],
-      rows: inventoryDetailExportRows(rows),
+      headers: ["仓库名称", "仓库编码", "设备类型", "品牌", "型号", "数量", "单位"],
+      rows: inventoryDetailExportRows(rows, warehouse),
     },
   ]);
   showToast(`已导出 ${rows.length} 条 IT 物资明细`);
@@ -7626,7 +8117,9 @@ function inventoryPurchaseLogExportRows(logs) {
 }
 
 function exportInventoryPurchaseLogs() {
-  const logs = state.inventoryPurchaseLogs || [];
+  const warehouse = inventoryWarehouseById(ensureInventoryWarehouseView());
+  if (!warehouse) return showToast("请先选择可访问的仓库。", true);
+  const logs = (state.inventoryPurchaseLogs || []).filter((log) => sameRecordId(log.warehouseId, warehouse.id));
   if (!logs.length) return showToast("当前没有可导出的采购入库记录", true);
   const standardLogs = logs.filter((log) => !isComputerPurchaseLog(log));
   const computerLogs = logs.filter((log) => isComputerPurchaseLog(log));
@@ -7634,12 +8127,14 @@ function exportInventoryPurchaseLogs() {
   if (standardLogs.length) {
     sheets.push({
       name: "普通物资入库",
-      headers: ["入库日期", "物资类型", "品牌", "型号", "数量", "来源", "备注", "记录时间"],
+      headers: ["仓库名称", "仓库编码", "入库日期", "物资类型", "品牌", "型号", "数量", "来源", "备注", "记录时间"],
       rows: standardLogs
         .sort((a, b) =>
           String(b.inboundDate || b.createdAt || "").localeCompare(String(a.inboundDate || a.createdAt || "")),
         )
         .map((log) => [
+          warehouse.name,
+          warehouse.code || "",
           log.inboundDate || "",
           log.typeName || "",
           log.brandName || "",
@@ -7654,12 +8149,14 @@ function exportInventoryPurchaseLogs() {
   if (computerLogs.length) {
     sheets.push({
       name: "办公终端入库",
-      headers: ["入库日期", "品牌", "型号", "数量", "CPU", "内存", "存储", "显卡", "来源", "备注", "记录时间"],
+      headers: ["仓库名称", "仓库编码", "入库日期", "品牌", "型号", "数量", "CPU", "内存", "存储", "显卡", "来源", "备注", "记录时间"],
       rows: computerLogs
         .sort((a, b) =>
           String(b.inboundDate || b.createdAt || "").localeCompare(String(a.inboundDate || a.createdAt || "")),
         )
         .map((log) => [
+          warehouse.name,
+          warehouse.code || "",
           log.inboundDate || "",
           log.brandName || "",
           log.modelName || "",
@@ -7674,7 +8171,7 @@ function exportInventoryPurchaseLogs() {
         ]),
     });
   }
-  downloadExcel(`办公资产-IT物资采购入库-${exportDateStamp()}.xls`, sheets);
+  downloadExcel(`办公资产-IT物资采购入库-${warehouse.code || "仓库"}-${exportDateStamp()}.xls`, sheets);
   showToast(`已导出 ${logs.length} 条采购入库记录`);
 }
 
@@ -8167,6 +8664,30 @@ document.addEventListener("click", (event) => {
   }
   if (action === "open-inventory-model") {
     openInventoryModelModal(actionElement.dataset.typeId, actionElement.dataset.brandId, actionElement.dataset.id || "");
+    return;
+  }
+  if (action === "select-inventory-warehouse") {
+    const warehouseId = String(actionElement.dataset.id || "");
+    if (!warehouseId) return;
+    inventoryWarehouseView = warehouseId;
+    persistState(false);
+    render();
+    return;
+  }
+  if (action === "open-warehouse-directory") {
+    openWarehouseDirectoryModal();
+    return;
+  }
+  if (action === "open-warehouse") {
+    openWarehouseModal(actionElement.dataset.id || "");
+    return;
+  }
+  if (action === "delete-warehouse") {
+    deleteWarehouse(actionElement.dataset.id || "");
+    return;
+  }
+  if (action === "open-inventory-transfer") {
+    openInventoryTransferModal();
     return;
   }
   if (action === "edit-inventory-log-note") {
@@ -9271,10 +9792,13 @@ async function handleInventoryModelSubmit(form) {
   const id = form.dataset.id || "";
   const typeId = form.dataset.typeId || "";
   const brandId = form.dataset.brandId || "";
+  const warehouseId = String(data.warehouseId || "").trim();
   const previous = getInventoryModel(id);
   const desiredQuantity = Math.max(0, Number(data.quantity || 0));
   const isComputerModel = isComputerInventoryType(getType(typeId));
-  if (!typeId || !brandId || !data.name) return showToast("请选择类型、品牌并填写型号。", true);
+  if (!typeId || !brandId || !data.name || !warehouseId) {
+    return showToast("请选择库存仓库、类型、品牌并填写型号。", true);
+  }
   try {
     const result = await saveResource("inventory-model", id, {
       typeId,
@@ -9289,16 +9813,18 @@ async function handleInventoryModelSubmit(form) {
       sortOrder: Math.max(0, Number(data.sortOrder || 1000)),
     });
     const modelId = result.inventoryModel?.id || id;
-    const quantityDelta = desiredQuantity - Math.max(0, Number(previous?.quantity || 0));
+    const quantityDelta =
+      desiredQuantity - (previous ? inventoryModelQuantityInWarehouse(previous.id, warehouseId) : 0);
     if (quantityDelta > 0) {
       await runCommand(
         "/api/inventory/receipts",
         {
           modelId,
+          warehouseId,
           quantity: quantityDelta,
           inboundDate: data.inboundDate || currentDateText(),
-          sourceLabel: "Manual inventory receipt",
-          note: "Inventory model quantity set from the catalog form",
+          sourceLabel: "库存型号维护入库",
+          note: "通过库存型号维护设置当前仓库数量",
         },
         "inventory-receipt",
       );
@@ -9307,8 +9833,9 @@ async function handleInventoryModelSubmit(form) {
         "/api/inventory/adjustments",
         {
           modelId,
+          warehouseId,
           quantityDelta,
-          note: "Inventory model quantity adjusted from the catalog form",
+          note: "通过库存型号维护调整当前仓库数量",
         },
         "inventory-adjust",
       );
@@ -9326,9 +9853,10 @@ async function handleInventoryImportSubmit(form) {
   const typeName = String(data.type || "").trim();
   const brandName = String(data.brand || "").trim();
   const modelName = String(data.model || "").trim();
+  const warehouseId = String(data.warehouseId || "").trim();
   const quantity = Math.max(1, Number(data.quantity || 0));
-  if (!typeName || !brandName || !modelName || !quantity) {
-    return showToast("请填写类型、品牌、型号和数量。", true);
+  if (!warehouseId || !typeName || !brandName || !modelName || !quantity) {
+    return showToast("请选择入库仓库并填写类型、品牌、型号和数量。", true);
   }
   const isComputerImport = isComputerInventoryTypeName(typeName);
   try {
@@ -9370,9 +9898,10 @@ async function handleInventoryImportSubmit(form) {
       "/api/inventory/receipts",
       {
         modelId: model.id,
+        warehouseId,
         quantity,
         inboundDate: data.inboundDate || currentDateText(),
-        sourceLabel: isComputerImport ? "Computer inventory receipt" : "Inventory import",
+        sourceLabel: isComputerImport ? "办公终端入库" : "IT物资入库",
         note: data.note || "",
       },
       "inventory-receipt",
@@ -9387,18 +9916,45 @@ async function handleInventoryImportSubmit(form) {
 
 async function finishDeviceSave(mode) {
   const pending = pendingDeviceSave;
-  pendingDeviceSave = null;
   if (!pending) return;
+  const confirmForm = document.querySelector('form[data-form="device-stock-confirm"]');
+  const sourceWarehouseId = String(
+    confirmForm?.elements?.sourceWarehouseId?.value || pending.sourceWarehouseId || "",
+  ).trim();
+  const returnWarehouseId = String(
+    confirmForm?.elements?.returnWarehouseId?.value || pending.returnWarehouseId || "",
+  ).trim();
   const employee = getEmployee(pending.employeeId);
   const model = inventoryModelForItem(pending.item);
   if (!employee) {
+    pendingDeviceSave = null;
     return showToast("未找到使用人员，请刷新后重试。", true);
   }
   if (mode === "deduct" && !model) {
     showToast("同步扣减库存必须关联已登记的库存型号。", true);
-    openDeviceStockConfirm(pending.kind, pending.employeeId, pending.item, pending.previous);
+    openDeviceStockConfirm(pending.kind, pending.employeeId, pending.item, pending.previous, {
+      sourceWarehouseId,
+      returnWarehouseId,
+    });
     return;
   }
+  if (mode === "deduct" && !sourceWarehouseId) {
+    showToast("同步扣减库存必须选择来源仓库。", true);
+    openDeviceStockConfirm(pending.kind, pending.employeeId, pending.item, pending.previous, {
+      sourceWarehouseId,
+      returnWarehouseId,
+    });
+    return;
+  }
+  if (pending.previous?.stockAdjusted && !returnWarehouseId) {
+    showToast("编辑已扣减库存的物资时，必须选择旧记录的回收目标仓库。", true);
+    openDeviceStockConfirm(pending.kind, pending.employeeId, pending.item, pending.previous, {
+      sourceWarehouseId,
+      returnWarehouseId,
+    });
+    return;
+  }
+  pendingDeviceSave = null;
   try {
     if (pending.previous?.id) {
       const returned = await returnUsageAllocations(
@@ -9406,6 +9962,7 @@ async function finishDeviceSave(mode) {
         pending.kind === "monitor" ? "monitor" : "non_asset",
         pending.previous.id,
         "Superseded by a new allocation",
+        pending.previous.stockAdjusted ? returnWarehouseId : "",
       );
       if (!returned) {
         throw new Error("Existing usage has no tracked allocation. Create a reconciled allocation before editing it.");
@@ -9427,6 +9984,7 @@ async function finishDeviceSave(mode) {
         quantity: pending.kind === "monitor" ? 1 : Math.max(1, Number(pending.item.quantity || 1)),
         notes: mode === "deduct" ? "Inventory issued to employee" : "Registered without stock deduction",
         stockAdjusted: mode === "deduct",
+        warehouseId: mode === "deduct" ? sourceWarehouseId : "",
       },
       "inventory-allocation",
     );
@@ -9435,6 +9993,11 @@ async function finishDeviceSave(mode) {
     openDeviceManager(employee.id);
     showToast(mode === "deduct" ? "领用已完成并扣减库存" : "领用已登记，库存未扣减");
   } catch (error) {
+    pendingDeviceSave = {
+      ...pending,
+      sourceWarehouseId,
+      returnWarehouseId,
+    };
     showToast(`保存领用失败：${error.message}`, true);
   }
 }
@@ -9676,6 +10239,8 @@ document.addEventListener("submit", (event) => {
   if (type === "inventory-brand") handleInventoryBrandSubmit(form);
   if (type === "inventory-model") handleInventoryModelSubmit(form);
   if (type === "inventory-import") handleInventoryImportSubmit(form);
+  if (type === "warehouse") handleWarehouseSubmit(form);
+  if (type === "inventory-transfer") handleInventoryTransferSubmit(form);
   if (type === "inventory-log-note-correction") handleInventoryMovementNoteSubmit(form);
   if (type === "inventory-purchase-note") handleInventoryPurchaseNoteSubmit(form);
   if (type === "quality-issue-resolution") handleQualityIssueResolutionSubmit(form);
@@ -9760,6 +10325,29 @@ document.addEventListener("change", (event) => {
   const deviceForm = event.target.closest('form[data-form="monitor"], form[data-form="nonasset"]');
   if (deviceForm && ["typeId", "brandId", "modelId"].includes(event.target.name)) {
     updateDeviceInventorySelectors(deviceForm, event.target.name);
+    return;
+  }
+  const warehouseForm = event.target.closest('form[data-form="warehouse"]');
+  if (warehouseForm && event.target.name === "orgId") {
+    refreshWarehouseManagerOptions(warehouseForm);
+    return;
+  }
+  const transferForm = event.target.closest('form[data-form="inventory-transfer"]');
+  if (transferForm && event.target.name === "sourceWarehouseId") {
+    refreshInventoryTransferModelOptions(transferForm);
+    return;
+  }
+  const inventoryModelForm = event.target.closest('form[data-form="inventory-model"]');
+  if (inventoryModelForm && event.target.name === "warehouseId") {
+    const modelId = inventoryModelForm.dataset.id || "";
+    const quantityInput = inventoryModelForm.elements.quantity;
+    if (quantityInput && modelId) {
+      quantityInput.value = inventoryModelQuantityInWarehouse(modelId, event.target.value || "");
+    }
+    const warehouseNote = inventoryModelForm.querySelector(".inventory-model-warehouse-note .readonly-value");
+    if (warehouseNote) {
+      warehouseNote.textContent = warehouseName(event.target.value || "") || "未选择仓库";
+    }
     return;
   }
   const offboardForm = event.target.closest('form[data-form="employee-offboard"]');

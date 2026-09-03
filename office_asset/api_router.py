@@ -66,6 +66,16 @@ class DomainApiRouter:
         self.deps.require_csrf(handler, context)
         return context
 
+    def _inventory_read_context(self, handler: object) -> dict:
+        context = self._read_context(handler, "inventory_operations")
+        self.deps.require_permission(context, "warehouse_management", "view")
+        return context
+
+    def _inventory_write_context(self, handler: object, action_code: str) -> dict:
+        context = self._write_context(handler, "inventory_operations", action_code)
+        self.deps.require_permission(context, "warehouse_management", "view")
+        return context
+
     def _idempotency_key(self, handler: object) -> str:
         headers = getattr(handler, "headers", None)
         return str(headers.get("Idempotency-Key", "") if headers else "").strip()
@@ -262,12 +272,46 @@ class DomainApiRouter:
             send_json(self.service.mark_notification_read(notification_id, context))
             return True
 
+        if path == "/api/inventory/warehouses" and method == "GET":
+            send_json(
+                {"warehouses": self.assets.list_warehouses(self._read_context(handler, "warehouse_management"))}
+            )
+            return True
+        if path == "/api/inventory/warehouses" and method == "POST":
+            context = self._write_context(handler, "warehouse_management", "create")
+            send_json(self.assets.save_warehouse(None, self._payload(handler), context), status=201)
+            return True
+        if path.startswith("/api/inventory/warehouses/"):
+            parts = path.split("/")
+            if len(parts) == 6 and parts[5] == "stock" and method == "GET":
+                context = self._read_context(handler, "warehouse_management")
+                send_json({"stock": self.assets.list_warehouse_stock(parts[4], context)})
+                return True
+            if len(parts) == 5 and method == "PUT":
+                context = self._write_context(handler, "warehouse_management", "update")
+                send_json(self.assets.save_warehouse(parts[4], self._payload(handler), context))
+                return True
+            if len(parts) == 5 and method == "DELETE":
+                context = self._write_context(handler, "warehouse_management", "delete")
+                send_json(self.assets.delete_warehouse(parts[4], context))
+                return True
+        if path == "/api/inventory/transfers" and method == "POST":
+            context = self._inventory_write_context(handler, "update")
+            self.deps.require_permission(context, "warehouse_management", "create")
+            send_json(
+                self.assets.transfer_inventory(
+                    self._payload(handler), context, self._idempotency_key(handler)
+                ),
+                status=201,
+            )
+            return True
+
         if path == "/api/inventory/allocations" and method == "GET":
             active_only = str((params.get("status") or ["active"])[0]) != "all"
-            send_json({"allocations": self.assets.list_allocations(self._read_context(handler, "inventory_operations"), active_only)})
+            send_json({"allocations": self.assets.list_allocations(self._inventory_read_context(handler), active_only)})
             return True
         if path == "/api/inventory/allocations" and method == "POST":
-            context = self._write_context(handler, "inventory_operations", "create")
+            context = self._inventory_write_context(handler, "create")
             send_json(
                 self.assets.allocate_inventory(
                     self._payload(handler), context, self._idempotency_key(handler)
@@ -277,7 +321,7 @@ class DomainApiRouter:
             return True
         if path.startswith("/api/inventory/allocations/") and path.endswith("/return") and method == "POST":
             allocation_id = path.split("/")[-2]
-            context = self._write_context(handler, "inventory_operations", "update")
+            context = self._inventory_write_context(handler, "update")
             send_json(
                 self.assets.return_inventory(
                     allocation_id, self._payload(handler), context, self._idempotency_key(handler)
@@ -289,7 +333,7 @@ class DomainApiRouter:
             if len(parts) != 7 or parts[3] != "usage" or parts[6] != "return":
                 raise self.deps.api_error("Invalid inventory usage return path.")
             allocation_type, usage_record_id = parts[4], parts[5]
-            context = self._write_context(handler, "inventory_operations", "update")
+            context = self._inventory_write_context(handler, "update")
             send_json(
                 self.assets.return_usage_inventory(
                     allocation_type,
@@ -301,7 +345,7 @@ class DomainApiRouter:
             )
             return True
         if path == "/api/inventory/receipts" and method == "POST":
-            context = self._write_context(handler, "inventory_operations", "create")
+            context = self._inventory_write_context(handler, "create")
             send_json(
                 self.assets.receive_inventory(
                     self._payload(handler), context, self._idempotency_key(handler)
@@ -310,7 +354,7 @@ class DomainApiRouter:
             )
             return True
         if path == "/api/inventory/adjustments" and method == "POST":
-            context = self._write_context(handler, "inventory_operations", "update")
+            context = self._inventory_write_context(handler, "update")
             send_json(
                 self.assets.adjust_inventory(
                     self._payload(handler), context, self._idempotency_key(handler)
@@ -321,7 +365,7 @@ class DomainApiRouter:
             parts = path.split("/")
             if len(parts) != 6 or parts[3] != "movement-logs" or parts[5] != "note-corrections":
                 raise self.deps.api_error("Invalid inventory movement note correction path.")
-            context = self._write_context(handler, "inventory_operations", "update")
+            context = self._inventory_write_context(handler, "update")
             send_json(
                 self.assets.add_inventory_movement_note_correction(
                     parts[4], self._payload(handler), context
@@ -360,11 +404,20 @@ class DomainApiRouter:
             if len(parts) != 5 or parts[2] != "employees" or parts[4] != "offboard":
                 raise self.deps.api_error("Invalid employee offboarding path.")
             context = self._write_context(handler, "employees", "update")
+            self.deps.require_permission(context, "warehouse_management", "view")
             send_json(
                 self.assets.offboard_employee(
                     parts[3], self._payload(handler), context, self._idempotency_key(handler)
                 )
             )
+            return True
+        if path.startswith("/api/employees/") and path.endswith("/offboarding-preview") and method == "GET":
+            parts = path.split("/")
+            if len(parts) != 5 or parts[2] != "employees" or parts[4] != "offboarding-preview":
+                raise self.deps.api_error("Invalid employee offboarding preview path.")
+            context = self._read_context(handler, "employees", "update")
+            self.deps.require_permission(context, "warehouse_management", "view")
+            send_json(self.assets.offboarding_preview(parts[3], context))
             return True
 
         if path.startswith("/api/resources/"):

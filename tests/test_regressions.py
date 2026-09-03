@@ -991,7 +991,10 @@ class InventoryRecoveryRegressionTests(TestCase):
         )[0]
 
         self.assertIn('if (mode === "deduct" && !model)', source)
-        self.assertIn("openDeviceStockConfirm(pending.kind, pending.employeeId, pending.item, pending.previous);", source)
+        self.assertIn('if (mode === "deduct" && !sourceWarehouseId)', source)
+        self.assertIn("returnWarehouseId", source)
+        self.assertIn("warehouseId: mode === \"deduct\" ? sourceWarehouseId : \"\"", source)
+        self.assertIn("pending.previous.stockAdjusted ? returnWarehouseId : \"\"", source)
         self.assertIn('modelId: model?.id || ""', source)
         self.assertIn('typeId: pending.item.typeId || ""', source)
         self.assertIn('inventoryBrandId: pending.item.inventoryBrandId || ""', source)
@@ -1023,7 +1026,45 @@ class InventoryRecoveryRegressionTests(TestCase):
         self.assertIn("remainingDevices = pending.devices.slice(index + 1);", recovery_source)
         self.assertIn("devices: remainingDevices", recovery_source)
         self.assertIn("if (!remainingDevices.length)", recovery_source)
-        self.assertIn("openDeviceRecoveryConfirm(pending.employeeId, pending.kind, remainingDevices)", recovery_source)
+        self.assertIn(
+            "openDeviceRecoveryConfirm(pending.employeeId, pending.kind, remainingDevices, warehouseId)",
+            recovery_source,
+        )
+
+    def test_stock_adjusted_returns_require_a_selected_target_warehouse(self):
+        app = (ROOT / "web" / "app.js").read_text(encoding="utf-8")
+        service = (ROOT / "office_asset" / "asset_service.py").read_text(encoding="utf-8")
+        allocation_return = service.split("    def return_inventory(", 1)[1].split(
+            "\n    def return_usage_inventory(",
+            1,
+        )[0]
+        legacy_return = service.split("    def return_usage_inventory(", 1)[1].split(
+            "\n    def list_allocations(",
+            1,
+        )[0]
+        offboard_normalization = service.split("    def _normalize_offboarding_plan(", 1)[1].split(
+            "\n    def offboard_employee(",
+            1,
+        )[0]
+
+        self.assertIn('data-form="device-recovery"', app)
+        self.assertIn('warehouseSelectField("回收目标仓库", "warehouseId"', app)
+        self.assertIn("data-offboard-recovery-warehouse", app)
+        self.assertIn("data-stock-adjusted", app)
+        self.assertIn('name="sourceWarehouseId"', app)
+        self.assertIn('name="returnWarehouseId"', app)
+        self.assertIn("require_explicit=True", allocation_return)
+        self.assertIn("require_explicit=True", legacy_return)
+        self.assertIn("require_explicit=True", offboard_normalization)
+        self.assertIn("The destination is independent from the warehouse used", offboard_normalization)
+        self.assertIn(
+            "ON DUPLICATE KEY UPDATE quantity = inventory_warehouse_stock.quantity",
+            allocation_return,
+        )
+        self.assertIn(
+            "ON DUPLICATE KEY UPDATE quantity = inventory_warehouse_stock.quantity",
+            legacy_return,
+        )
 
     def test_legacy_usage_return_has_compatibility_route_and_transactional_guards(self):
         app = (ROOT / "web" / "app.js").read_text(encoding="utf-8")
@@ -1058,6 +1099,124 @@ class InventoryRecoveryRegressionTests(TestCase):
         self.assertNotIn("SET quantity = quantity - @usage_quantity", legacy_return)
         self.assertIn("DELETE FROM {usage_table}", legacy_return)
         self.assertIn("AND quantity = @usage_quantity", legacy_return)
+
+
+class WarehouseInventoryRegressionTests(TestCase):
+    def test_warehouse_migration_is_incremental_and_preserves_legacy_history(self):
+        migration = (
+            ROOT / "database" / "migrations" / "20260902_001_inventory_warehouses.sql"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn("CREATE TABLE IF NOT EXISTS inventory_warehouse", migration)
+        self.assertIn("CREATE TABLE IF NOT EXISTS inventory_warehouse_stock", migration)
+        self.assertIn("CREATE TABLE IF NOT EXISTS inventory_transfer_log", migration)
+        self.assertIn("information_schema.columns", migration)
+        self.assertIn("information_schema.table_constraints", migration)
+        self.assertIn("INSERT INTO inventory_warehouse", migration)
+        self.assertIn("VALUES ('WH-001', '仓库1'", migration)
+        self.assertIn("SELECT @default_warehouse_id, model_id, quantity", migration)
+        self.assertIn("warehouse_management", migration)
+        self.assertNotIn("DROP TABLE", migration.upper())
+        self.assertNotIn("DELETE FROM inventory_movement_log", migration)
+
+        transfer_table = migration.split(
+            "CREATE TABLE IF NOT EXISTS inventory_transfer_log",
+            1,
+        )[1].split("\n\nSET @has_allocation_warehouse", 1)[0]
+        self.assertIn(
+            "ON DELETE RESTRICT,\n"
+            "  CONSTRAINT fk_inventory_transfer_target",
+            transfer_table,
+        )
+        self.assertNotIn(
+            "source_warehouse_id) REFERENCES inventory_warehouse (warehouse_id)\n"
+            "    ON DELETE RESTRICT ON UPDATE CASCADE",
+            transfer_table,
+        )
+        self.assertNotIn(
+            "target_warehouse_id) REFERENCES inventory_warehouse (warehouse_id)\n"
+            "    ON DELETE RESTRICT ON UPDATE CASCADE",
+            transfer_table,
+        )
+
+        bootstrap = (
+            ROOT / "database" / "bootstrap" / "01_schema.sql"
+        ).read_text(encoding="utf-8")
+        bootstrap_transfer_table = bootstrap.split(
+            "CREATE TABLE inventory_transfer_log",
+            1,
+        )[1].split("\n\nCREATE TABLE inventory_movement_log", 1)[0]
+        self.assertNotIn(
+            "warehouse_id)\n    ON DELETE RESTRICT ON UPDATE CASCADE",
+            bootstrap_transfer_table,
+        )
+
+    def test_warehouse_routes_require_permissions_and_use_command_endpoint(self):
+        router = (ROOT / "office_asset" / "api_router.py").read_text(encoding="utf-8")
+        server_source = (ROOT / "server.py").read_text(encoding="utf-8")
+
+        self.assertIn('path == "/api/inventory/warehouses" and method == "GET"', router)
+        self.assertIn('path == "/api/inventory/warehouses" and method == "POST"', router)
+        self.assertIn('len(parts) == 5 and method == "DELETE"', router)
+        self.assertIn('self._write_context(handler, "warehouse_management", "create")', router)
+        self.assertIn('self._write_context(handler, "warehouse_management", "update")', router)
+        self.assertIn('self._write_context(handler, "warehouse_management", "delete")', router)
+        self.assertIn('path == "/api/inventory/transfers" and method == "POST"', router)
+        self.assertIn('self._inventory_write_context(handler, "update")', router)
+        self.assertIn('self.deps.require_permission(context, "warehouse_management", "create")', router)
+        self.assertIn('self.assets.transfer_inventory(', router)
+        delete_handler = server_source.split("    def do_DELETE(self) -> None:", 1)[1].split(
+            "\n    def end_headers",
+            1,
+        )[0]
+        self.assertIn('if self.path.startswith("/api/"):', delete_handler)
+        self.assertIn("self.handle_api()", delete_handler)
+        self.assertIn('"code": "STATE_CONFLICT"', delete_handler)
+
+    def test_warehouse_service_is_scoped_transactional_and_idempotent(self):
+        service = (ROOT / "office_asset" / "asset_service.py").read_text(encoding="utf-8")
+        transfer = service.split("    def transfer_inventory(", 1)[1].split(
+            "\n    def return_inventory(",
+            1,
+        )[0]
+        delete = service.split("    def delete_warehouse(", 1)[1].split(
+            "\n    def list_warehouse_stock(",
+            1,
+        )[0]
+
+        self.assertIn("def _assert_warehouse_access(", service)
+        self.assertIn('module_code: str = "warehouse_management"', service)
+        self.assertIn("self.scope.assert_org_access(context, warehouse.get(\"orgId\"))", service)
+        self.assertIn('self._idempotency_result("inventory.transfer"', transfer)
+        self.assertIn("START TRANSACTION;", transfer)
+        self.assertIn("first_warehouse_id, second_warehouse_id = sorted(", transfer)
+        self.assertIn("FOR UPDATE;", transfer)
+        self.assertIn("UPDATE inventory_warehouse_stock", transfer)
+        self.assertIn("INSERT INTO inventory_transfer_log", transfer)
+        self.assertIn("inventory_transfer", transfer)
+        self.assertIn('self._store_idempotency_result("inventory.transfer"', transfer)
+        self.assertIn('warehouse.get("code")) == "WH-001"', delete)
+        self.assertIn("默认仓库“仓库1”不能删除", delete)
+        self.assertIn("inventory_transfer_log", delete)
+
+    def test_warehouse_state_filtering_and_frontend_controls_are_scoped(self):
+        app = (ROOT / "web" / "app.js").read_text(encoding="utf-8")
+        state_reader = (ROOT / "server.py").read_text(encoding="utf-8")
+
+        self.assertIn('for module_code in ("it_assets", "employees", "organizations", "warehouse_management")', state_reader)
+        self.assertIn('if can_view("warehouse_management"):', state_reader)
+        self.assertIn('result["warehouseStocks"] = [', state_reader)
+        self.assertIn('text_value(item.get("warehouseId")) in visible_warehouse_ids', state_reader)
+        self.assertIn('class="inventory-warehouse-tabs"', app)
+        self.assertIn('data-action="select-inventory-warehouse"', app)
+        self.assertIn('data-action="open-warehouse-directory"', app)
+        self.assertIn('data-action="open-inventory-transfer"', app)
+        self.assertIn('warehouseSelectField("入库仓库", "warehouseId"', app)
+        self.assertIn('warehouseSelectField("回收目标仓库", "warehouseId"', app)
+        self.assertIn('selectField("调出仓库", "sourceWarehouseId"', app)
+        self.assertIn('selectField("调入仓库", "targetWarehouseId"', app)
+        self.assertIn("class=\"readonly-label\">当前仓库</span>", app)
+        self.assertNotIn("<label>当前仓库</label>", app)
 
 
 if __name__ == "__main__":
