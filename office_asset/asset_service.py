@@ -48,6 +48,26 @@ class AssetService:
         employee = context.get("employee") or {}
         return self.db.integer(employee.get("employeeId"), 0)
 
+    def _actor_org_id(self, context: dict) -> int:
+        employee = context.get("employee") or {}
+        org_id = self.db.integer(employee.get("orgId"), 0)
+        if org_id <= 0:
+            org_id = self.db.integer(context.get("orgId"), 0)
+        if org_id > 0:
+            return org_id
+
+        employee_id = self._actor_employee_id(context)
+        if employee_id <= 0:
+            return 0
+        return self.db.scalar(
+            f"""
+            SELECT COALESCE(org_unit_id, 0)
+            FROM employee
+            WHERE employee_id = {employee_id}
+              AND is_active = 1;
+            """
+        )
+
     def _assert_employee_scope(self, context: dict, employee_id: object) -> None:
         scope = self._permission_scope(context)
         if scope in {"own", "submitted", "assigned"}:
@@ -97,19 +117,52 @@ class AssetService:
             raise self.api_error("Warehouse does not exist or is disabled.")
         return dict(warehouse)
 
-    def _default_warehouse(self) -> dict:
-        warehouse_id = self.db.scalar(
-            """
-            SELECT warehouse_id
-            FROM inventory_warehouse
-            WHERE warehouse_code = 'WH-001'
-              AND is_active = 1
-            LIMIT 1;
-            """
+    def _default_warehouse(
+        self,
+        context: dict,
+        preferred_org_id: object | None = None,
+        module_code: str = "inventory_operations",
+    ) -> dict:
+        org_id = self.db.integer(preferred_org_id, 0) or self._actor_org_id(context)
+        for ancestor_id in self.scope.ancestor_org_ids(org_id):
+            candidates = self.db.json(
+                f"""
+                SELECT COALESCE(JSON_ARRAYAGG(JSON_OBJECT(
+                  'id', CAST(warehouse_id AS CHAR)
+                )), JSON_ARRAY())
+                FROM (
+                  SELECT warehouse_id
+                  FROM inventory_warehouse
+                  WHERE org_unit_id = {ancestor_id}
+                    AND is_active = 1
+                  ORDER BY warehouse_name, warehouse_id
+                ) warehouse_rows
+                """,
+                [],
+            )
+            for candidate in candidates or []:
+                warehouse = self._warehouse(candidate.get("id"))
+                try:
+                    self._assert_warehouse_access(
+                        context,
+                        warehouse,
+                        module_code,
+                        require_active=True,
+                    )
+                    if module_code != "warehouse_management":
+                        self._assert_warehouse_access(
+                            context,
+                            warehouse,
+                            "warehouse_management",
+                            require_active=True,
+                        )
+                except self.forbidden_error:
+                    continue
+                return warehouse
+
+        raise self.conflict_error(
+            "No enabled warehouse is available for the selected organization. Select an authorized warehouse or configure one for the organization."
         )
-        if warehouse_id <= 0:
-            raise self.conflict_error("The default warehouse is unavailable. Restore or enable 仓库1 first.")
-        return self._warehouse(warehouse_id)
 
     def _assert_warehouse_access(
         self,
@@ -141,12 +194,17 @@ class AssetService:
         module_code: str,
         *,
         require_explicit: bool = False,
+        preferred_org_id: object | None = None,
     ) -> dict:
         warehouse_id = self.db.integer(payload.get("warehouseId"), 0)
         if warehouse_id <= 0:
             if require_explicit:
                 raise self.api_error("Select a target warehouse.")
-            warehouse = self._default_warehouse()
+            warehouse = self._default_warehouse(
+                context,
+                preferred_org_id=preferred_org_id,
+                module_code=module_code,
+            )
         else:
             warehouse = self._warehouse(warehouse_id)
         self._assert_warehouse_access(context, warehouse, module_code, require_active=True)
@@ -331,6 +389,7 @@ class AssetService:
               'brand', COALESCE(asset.brand, ''),
               'model', COALESCE(asset.model, ''),
               'inventoryModelId', COALESCE(CAST(asset.inventory_model_id AS CHAR), ''),
+              'inventoryStockAdjusted', asset.inventory_stock_adjusted,
               'cpu', COALESCE(asset.cpu, ''),
               'memory', COALESCE(asset.memory, ''),
               'storage', COALESCE(asset.storage, ''),
@@ -927,31 +986,96 @@ class AssetService:
         org_id = self.db.integer(payload.get("orgId"), 0)
         self.scope.assert_org_access(context, org_id)
         status = self._normalize_status(payload.get("status"), "idle")
+        computer_id = self.db.integer(resource_id, 0)
+        old = self._computer(computer_id) if computer_id else None
+        registration_mode = self.db.text(payload.get("registrationMode")).lower()
+        if registration_mode and registration_mode not in {"custom", "warehouse"}:
+            raise self.api_error("Computer registration mode must be custom or warehouse.")
+        if not registration_mode:
+            # Older clients did not send a mode. Treat their creates as custom
+            # registration so a stale page cannot deduct stock unexpectedly.
+            registration_mode = "custom"
+
+        inventory_model_id = 0
+        inventory_stock_adjusted = False
+        warehouse = None
+        inventory_model: dict | None = None
+        if not old and registration_mode == "warehouse":
+            self._assert_inventory_issue_scope(context)
+            inventory_model_id = self.db.integer(payload.get("inventoryModelId"), 0)
+            if inventory_model_id <= 0:
+                raise self.api_error("Warehouse registration requires an inventory model.")
+            warehouse = self._resolve_warehouse(
+                payload,
+                context,
+                "inventory_operations",
+                require_explicit=True,
+            )
+            inventory_model = self.db.json(
+                f"""
+                SELECT JSON_OBJECT(
+                  'id', CAST(model.model_id AS CHAR),
+                  'typeCode', type_row.type_code,
+                  'typeName', type_row.type_name,
+                  'brandName', brand.brand_name,
+                  'modelName', model.model_name,
+                  'inboundDate', COALESCE(CAST(model.inbound_date AS CHAR), ''),
+                  'cpu', COALESCE(model.cpu, ''),
+                  'memory', COALESCE(model.memory, ''),
+                  'storage', COALESCE(model.storage, ''),
+                  'gpu', COALESCE(model.gpu, '')
+                )
+                FROM it_inventory_model model
+                JOIN it_inventory_brand brand ON brand.brand_id = model.brand_id
+                JOIN non_asset_type type_row ON type_row.non_asset_type_id = model.non_asset_type_id
+                WHERE model.model_id = {inventory_model_id}
+                  AND model.is_active = 1
+                """,
+                None,
+            )
+            if not inventory_model:
+                raise self.api_error("Inventory model does not exist.")
+            type_code = self.db.text(inventory_model.get("typeCode")).lower()
+            type_name = self.db.text(inventory_model.get("typeName")).lower()
+            if type_code not in {"computer", "pc"} and type_name not in {
+                "电脑",
+                "办公终端",
+                "办公设备终端",
+                "computer",
+                "pc",
+            }:
+                raise self.api_error("Warehouse registration can only use a computer inventory model.")
+            inventory_stock_adjusted = True
+
+        # The selected inventory model is the stock deduction reference only.
+        # Device details remain editable and fall back to the model when omitted.
+        inventory_defaults = inventory_model or {}
+        brand = self.db.text(payload.get("brand")) or self.db.text(inventory_defaults.get("brandName"))
+        model_name = self.db.text(payload.get("model")) or self.db.text(inventory_defaults.get("modelName"))
+        cpu = self.db.text(payload.get("cpu")) or self.db.text(inventory_defaults.get("cpu"))
+        memory = self.db.text(payload.get("memory")) or self.db.text(inventory_defaults.get("memory"))
+        storage = self.db.text(payload.get("storage")) or self.db.text(inventory_defaults.get("storage"))
+        gpu = self.db.text(payload.get("gpu")) or self.db.text(inventory_defaults.get("gpu"))
+        purchase_date = self.db.text(payload.get("purchaseDate")) or self.db.text(
+            inventory_defaults.get("inboundDate")
+        )
+
         values = {
             "device_name": self.db.quote(device_name),
             "org_unit_id": "NULL" if org_id <= 0 else str(org_id),
             "device_type": self.db.quote(self.db.text(payload.get("deviceType")) or "desktop"),
-            "brand": self.db.quote(self.db.text(payload.get("brand"))) if self.db.text(payload.get("brand")) else "NULL",
-            "model": self.db.quote(self.db.text(payload.get("model"))) if self.db.text(payload.get("model")) else "NULL",
-            "inventory_model_id": (
-                str(self.db.integer(payload.get("inventoryModelId"), 0))
-                if self.db.integer(payload.get("inventoryModelId"), 0) > 0
-                else "NULL"
-            ),
-            "cpu": self.db.quote(self.db.text(payload.get("cpu"))) if self.db.text(payload.get("cpu")) else "NULL",
-            "memory": self.db.quote(self.db.text(payload.get("memory"))) if self.db.text(payload.get("memory")) else "NULL",
-            "storage": self.db.quote(self.db.text(payload.get("storage"))) if self.db.text(payload.get("storage")) else "NULL",
-            "gpu": self.db.quote(self.db.text(payload.get("gpu"))) if self.db.text(payload.get("gpu")) else "NULL",
+            "brand": self.db.quote(brand) if brand else "NULL",
+            "model": self.db.quote(model_name) if model_name else "NULL",
+            "cpu": self.db.quote(cpu) if cpu else "NULL",
+            "memory": self.db.quote(memory) if memory else "NULL",
+            "storage": self.db.quote(storage) if storage else "NULL",
+            "gpu": self.db.quote(gpu) if gpu else "NULL",
             "fixed_asset_code": (
                 self.db.quote(self.db.text(payload.get("fixedAssetCode")))
                 if self.db.text(payload.get("fixedAssetCode"))
                 else "NULL"
             ),
-            "purchase_date": (
-                self.db.quote(self.db.text(payload.get("purchaseDate")))
-                if self.db.text(payload.get("purchaseDate"))
-                else "NULL"
-            ),
+            "purchase_date": self.db.quote(purchase_date) if purchase_date else "NULL",
             "registered_date": (
                 self.db.quote(self.db.text(payload.get("registeredDate")))
                 if self.db.text(payload.get("registeredDate"))
@@ -979,14 +1103,12 @@ class AssetService:
             "remarks": self.db.quote(self.db.text(payload.get("remarks"))) if self.db.text(payload.get("remarks")) else "NULL",
         }
 
-        computer_id = self.db.integer(resource_id, 0)
         self._assert_computer_unique_fields(
             computer_id,
             device_name,
             self.db.text(payload.get("fixedAssetCode")),
             self.db.text(payload.get("snSt")),
         )
-        old = self._computer(computer_id) if computer_id else None
         if old:
             self.scope.assert_org_access(context, old.get("orgId"))
             self._assert_computer_record_scope(context, old, "it_assets")
@@ -1025,32 +1147,128 @@ class AssetService:
             statements.append("COMMIT")
             self.db.execute(";\n".join(statements) + ";")
         else:
+            values["inventory_model_id"] = (
+                str(inventory_model_id) if inventory_model_id > 0 else "NULL"
+            )
+            values["inventory_stock_adjusted"] = "1" if inventory_stock_adjusted else "0"
             columns = ", ".join(values.keys())
             value_sql = ", ".join(values.values())
-            output = self.db.execute(
-                f"""
-                START TRANSACTION;
-                INSERT INTO computer_asset ({columns}) VALUES ({value_sql});
-                SET @new_computer_id = LAST_INSERT_ID();
-                {self._audit_sql(
-                    'computer_created',
-                    'computer',
-                    "'new'",
-                    device_name,
-                    'Computer asset created',
-                    context,
-                    None,
-                    {'status': status, 'orgId': org_id},
-                )};
-                UPDATE audit_log
-                SET entity_id = CAST(@new_computer_id AS CHAR)
-                WHERE audit_log_id = LAST_INSERT_ID();
-                SELECT @new_computer_id;
-                COMMIT;
-                """
-            )
-            lines = [line.strip() for line in output.splitlines() if line.strip()]
-            computer_id = self.db.integer(lines[-1] if lines else 0, 0)
+            if not inventory_stock_adjusted:
+                output = self.db.execute(
+                    f"""
+                    START TRANSACTION;
+                    INSERT INTO computer_asset ({columns}) VALUES ({value_sql});
+                    SET @new_computer_id = LAST_INSERT_ID();
+                    {self._audit_sql(
+                        'computer_created',
+                        'computer',
+                        "'new'",
+                        device_name,
+                        'Computer asset created',
+                        context,
+                        None,
+                        {'status': status, 'orgId': org_id, 'registrationMode': 'custom'},
+                    )};
+                    UPDATE audit_log
+                    SET entity_id = CAST(@new_computer_id AS CHAR)
+                    WHERE audit_log_id = LAST_INSERT_ID();
+                    SELECT @new_computer_id;
+                    COMMIT;
+                    """
+                )
+                lines = [line.strip() for line in output.splitlines() if line.strip()]
+                computer_id = self.db.integer(lines[-1] if lines else 0, 0)
+            else:
+                warehouse_id = self.db.integer((warehouse or {}).get("id"), 0)
+                warehouse_name = self.db.text((warehouse or {}).get("name"))
+                note = self.db.text(payload.get("remarks"))[:420]
+                output = self.db.execute(
+                    f"""
+                    START TRANSACTION;
+                    SET @stock_updated = 0;
+                    SET @new_computer_id = 0;
+                    SET @available_quantity = 0;
+                    SET @warehouse_available_quantity = 0;
+                    SELECT quantity
+                    INTO @available_quantity
+                    FROM it_inventory_model
+                    WHERE model_id = {inventory_model_id}
+                      AND is_active = 1
+                    FOR UPDATE;
+                    SELECT quantity
+                    INTO @warehouse_available_quantity
+                    FROM inventory_warehouse_stock
+                    WHERE warehouse_id = {warehouse_id}
+                      AND model_id = {inventory_model_id}
+                    FOR UPDATE;
+                    SET @stock_updated = IF(
+                      @available_quantity >= 1 AND @warehouse_available_quantity >= 1,
+                      1,
+                      0
+                    );
+                    UPDATE it_inventory_model
+                    SET quantity = quantity - 1
+                    WHERE model_id = {inventory_model_id}
+                      AND quantity >= 1
+                      AND @stock_updated = 1;
+                    UPDATE inventory_warehouse_stock
+                    SET quantity = quantity - 1
+                    WHERE warehouse_id = {warehouse_id}
+                      AND model_id = {inventory_model_id}
+                      AND quantity >= 1
+                      AND @stock_updated = 1;
+                    INSERT INTO computer_asset ({columns})
+                    SELECT {value_sql}
+                    FROM DUAL
+                    WHERE @stock_updated = 1;
+                    SET @new_computer_id = IF(@stock_updated = 1, LAST_INSERT_ID(), 0);
+                    INSERT INTO inventory_movement_log (
+                      movement_direction, type_name, brand_name, model_name, quantity,
+                      source_label, source_warehouse_id, target_label, target_warehouse_id,
+                      note, trigger_action
+                    )
+                    SELECT
+                      'decrease',
+                      {self.db.quote(self.db.text((inventory_model or {}).get('typeName')))},
+                      {self.db.quote(brand)},
+                      {self.db.quote(model_name)},
+                      1,
+                      {self.db.quote(warehouse_name)},
+                      {warehouse_id},
+                      {self.db.quote(device_name)},
+                      NULL,
+                      {self.db.quote(note)},
+                      'computer_registration'
+                    FROM DUAL
+                    WHERE @stock_updated = 1;
+                    {self._conditional_audit_sql(
+                        'computer_created',
+                        'computer',
+                        'CAST(@new_computer_id AS CHAR)',
+                        device_name,
+                        'Computer asset created from warehouse inventory',
+                        context,
+                        '@stock_updated = 1',
+                        None,
+                        {
+                            'status': status,
+                            'orgId': org_id,
+                            'registrationMode': 'warehouse',
+                            'inventoryModelId': inventory_model_id,
+                            'warehouseId': warehouse_id,
+                            'inventoryStockAdjusted': True,
+                        },
+                    )};
+                    SELECT @stock_updated, @new_computer_id;
+                    COMMIT;
+                    """
+                )
+                lines = [line.strip() for line in output.splitlines() if line.strip()]
+                result = (lines[-1] if lines else "").split("\t")
+                stock_updated = self.db.integer(result[0] if result else 0, 0)
+                computer_id = self.db.integer(result[1] if len(result) > 1 else 0, 0)
+                if stock_updated != 1:
+                    raise self.conflict_error("The selected warehouse does not have enough inventory.")
             if computer_id <= 0:
                 raise self.api_error("Unable to create computer.")
         return {"computer": self._computer(computer_id)}
@@ -1654,7 +1872,7 @@ class AssetService:
                 payload,
                 context,
                 "inventory_operations",
-                require_explicit=True,
+                preferred_org_id=employee.get("orgId"),
             )
         warehouse_id = self.db.integer((warehouse or {}).get("id"), 0)
         warehouse_id_sql = str(warehouse_id) if warehouse_id > 0 else "NULL"
@@ -2252,7 +2470,7 @@ class AssetService:
                 payload,
                 context,
                 "inventory_operations",
-                require_explicit=True,
+                preferred_org_id=self._actor_org_id(context),
             )
         elif self.db.integer(payload.get("warehouseId"), 0) > 0:
             raise self.api_error("Inventory registered without stock deduction cannot be returned to a warehouse.")
@@ -2454,7 +2672,7 @@ class AssetService:
                 payload,
                 context,
                 "inventory_operations",
-                require_explicit=True,
+                preferred_org_id=self._actor_org_id(context),
             )
         elif self.db.integer(payload.get("warehouseId"), 0) > 0:
             raise self.api_error("Inventory registered without stock deduction cannot be returned to a warehouse.")

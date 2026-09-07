@@ -77,6 +77,41 @@ class OrganizationScopeService:
             return None
         return self.scoped_org_ids(context)
 
+    def ancestor_org_ids(self, org_unit_id: object | None) -> list[int]:
+        """Return an active organization and its active ancestors, nearest first."""
+        current_id = self.db.integer(org_unit_id, 0)
+        if current_id <= 0:
+            return []
+
+        rows = self.db.json(
+            """
+            SELECT COALESCE(JSON_ARRAYAGG(JSON_OBJECT(
+              'id', org_unit_id,
+              'parentId', COALESCE(parent_org_unit_id, 0)
+            )), JSON_ARRAY())
+            FROM org_unit
+            WHERE is_active = 1
+            """,
+            [],
+        )
+        parents = {
+            self.db.integer(row.get("id"), 0): self.db.integer(row.get("parentId"), 0)
+            for row in rows or []
+            if self.db.integer(row.get("id"), 0) > 0
+        }
+        if current_id not in parents:
+            return []
+
+        ancestors: list[int] = []
+        visited: set[int] = set()
+        while current_id > 0 and current_id not in visited:
+            if current_id not in parents:
+                break
+            visited.add(current_id)
+            ancestors.append(current_id)
+            current_id = parents[current_id]
+        return ancestors
+
     def assert_org_access(self, context: dict, org_unit_id: object | None) -> None:
         org_id = self.db.integer(org_unit_id, 0)
         allowed = self.permitted_org_ids(context)

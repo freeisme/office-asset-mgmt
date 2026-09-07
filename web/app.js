@@ -1438,20 +1438,79 @@ function warehouseName(id) {
   return state.warehouses?.find((warehouse) => sameRecordId(warehouse.id, id))?.name || "";
 }
 
-function warehouseOptions(selectedId = "", placeholder = "请选择仓库") {
+function currentUserOrgId() {
+  return (
+    authState.user?.orgId ||
+    getEmployee(authState.user?.employeeId)?.orgId ||
+    ""
+  );
+}
+
+function organizationAncestorIds(orgId) {
+  const currentId = String(orgId || "").trim();
+  if (!currentId) return [];
+  const orgById = new Map((state.orgs || []).map((org) => [String(org.id || ""), org]));
+  const ancestors = [];
+  const visited = new Set();
+  let current = orgById.get(currentId);
+  while (current && !visited.has(String(current.id || ""))) {
+    const id = String(current.id || "");
+    visited.add(id);
+    ancestors.push(id);
+    current = orgById.get(String(current.parentId || ""));
+  }
+  return ancestors;
+}
+
+function defaultWarehouseIdForOrg(orgId) {
+  const ancestors = organizationAncestorIds(orgId);
+  if (!ancestors.length) return "";
+  for (const ancestorId of ancestors) {
+    const candidates = activeWarehouses()
+      .filter((warehouse) => sameRecordId(warehouse.orgId, ancestorId))
+      .sort((left, right) => compareText(left.name, right.name) || compareText(left.id, right.id));
+    if (candidates.length) return candidates[0].id;
+  }
+  return "";
+}
+
+function defaultWarehouseIdForCurrentUser() {
+  return defaultWarehouseIdForOrg(currentUserOrgId());
+}
+
+function warehouseOptions(selectedId = "", placeholder = "请选择仓库", preferredOrgId = "") {
+  const preferredAncestors = organizationAncestorIds(preferredOrgId);
+  const preferredRank = new Map(preferredAncestors.map((orgId, index) => [orgId, index]));
+  const effectiveSelectedId = String(selectedId || "").trim() || (
+    preferredOrgId ? defaultWarehouseIdForOrg(preferredOrgId) : ""
+  );
+  const warehouses = activeWarehouses().sort((left, right) => {
+    const leftRank = preferredRank.has(String(left.orgId)) ? preferredRank.get(String(left.orgId)) : Number.MAX_SAFE_INTEGER;
+    const rightRank = preferredRank.has(String(right.orgId)) ? preferredRank.get(String(right.orgId)) : Number.MAX_SAFE_INTEGER;
+    return leftRank - rightRank || compareText(left.name, right.name) || compareText(left.id, right.id);
+  });
   return [{ value: "", label: placeholder }].concat(
-    activeWarehouses().map((warehouse) => ({
+    warehouses.map((warehouse) => ({
       value: warehouse.id,
       label: `${warehouse.name}${warehouse.code ? ` · ${warehouse.code}` : ""}${orgName(warehouse.orgId) ? ` · ${orgName(warehouse.orgId)}` : ""}`,
     })),
   ).map((option) => ({
     ...option,
-    selected: String(option.value) === String(selectedId || ""),
+    selected: String(option.value) === effectiveSelectedId,
   }));
 }
 
-function warehouseSelectField(label, name, selectedId = "", required = false, placeholder = "请选择仓库") {
-  return selectField(label, name, selectedId, warehouseOptions(selectedId, placeholder), required);
+function warehouseSelectField(
+  label,
+  name,
+  selectedId = "",
+  required = false,
+  placeholder = "请选择仓库",
+  preferredOrgId = "",
+) {
+  const options = warehouseOptions(selectedId, placeholder, preferredOrgId);
+  const selectedValue = options.find((option) => option.selected)?.value || "";
+  return selectField(label, name, selectedValue, options, required);
 }
 
 function inventoryWarehouseById(id = inventoryWarehouseView) {
@@ -1559,6 +1618,20 @@ function inventoryModelOptionsForWarehouse(warehouseId = "", selectedId = "", in
         selected: sameRecordId(model.id, selectedId),
       };
     }),
+  );
+}
+
+function computerInventoryModelOptionsForWarehouse(warehouseId = "", selectedId = "") {
+  const models = state.inventoryModels
+    .map((model) => inventoryModelForWarehouseView(model, warehouseId))
+    .filter((model) => isComputerInventoryType(getType(model.typeId)) && model.quantity > 0)
+    .sort((left, right) => compareText(left.name, right.name) || compareText(left.id, right.id));
+  return [{ value: "", label: "请选择库存电脑型号" }].concat(
+    models.map((model) => ({
+      value: model.id,
+      label: inventoryModelOptionLabel(model),
+      selected: sameRecordId(model.id, selectedId),
+    })),
   );
 }
 
@@ -1753,6 +1826,7 @@ function inventoryModelDisplayMeta(type, model) {
 
 function inventoryModelOptionLabel(model) {
   const parts = [`${model.name} (${Math.max(0, Number(model.quantity || 0))})`];
+  if (model.batchKey) parts.push(`批次：${model.batchKey}`);
   if (isComputerInventoryType(getType(model.typeId)) && model.inboundDate) {
     parts.push(`入库：${model.inboundDate}`);
   }
@@ -2219,6 +2293,8 @@ function normalizeComputerRecord(computer, validEmployeeIds = null) {
     model: computer.model || "",
     inventoryModelId: computer.inventoryModelId ? String(computer.inventoryModelId) : "",
     inventoryStockAdjusted: Boolean(computer.inventoryStockAdjusted),
+    registrationMode:
+      computer.registrationMode || (computer.inventoryStockAdjusted ? "warehouse" : "custom"),
     cpu: computer.cpu || "",
     memory: computer.memory || "",
     storage: computer.storage || "",
@@ -2888,7 +2964,8 @@ function openDeviceRecoveryConfirm(employeeId, kind, selectedDevices = null, sel
     showToast(kind === "monitor" ? "请先勾选要回收的显示屏" : "请先勾选要回收的非资产设备", true);
     return;
   }
-  pendingDeviceRecovery = { employeeId, kind, devices, warehouseId: selectedWarehouseId || "" };
+  const defaultWarehouseId = selectedWarehouseId || defaultWarehouseIdForCurrentUser();
+  pendingDeviceRecovery = { employeeId, kind, devices, warehouseId: defaultWarehouseId };
   openModal(
     `${modalHeader("确认回收物资", `${employee.name} · ${employee.employeeNo}`)}
       <form class="confirm-panel" data-form="device-recovery">
@@ -2905,7 +2982,14 @@ function openDeviceRecoveryConfirm(employeeId, kind, selectedDevices = null, sel
             )
             .join("")}
         </div>
-        ${warehouseSelectField("回收目标仓库", "warehouseId", selectedWarehouseId, true, "请选择回收目标仓库")}
+        ${warehouseSelectField(
+          "回收目标仓库",
+          "warehouseId",
+          defaultWarehouseId,
+          true,
+          "请选择回收目标仓库",
+          currentUserOrgId(),
+        )}
         <div class="confirm-options">
           <button type="button" class="primary-button" data-action="confirm-device-recovery">确定回收</button>
           <button type="button" class="secondary-button" data-action="cancel-device-recovery">取消</button>
@@ -2998,6 +3082,7 @@ function renderEmployeeOffboardItemRow(employee, item) {
   const targetId = createControlId(`offboard-target-${safeRowKey}`);
   const recoveryWarehouseId = createControlId(`offboard-recovery-warehouse-${safeRowKey}`);
   const noteId = createControlId(`offboard-note-${safeRowKey}`);
+  const defaultRecoveryWarehouseId = defaultWarehouseIdForCurrentUser();
   return `
     <article class="offboard-item-row" data-offboard-item-row data-item-type="${escapeHtml(
       item.itemType || item.category,
@@ -3027,7 +3112,7 @@ function renderEmployeeOffboardItemRow(employee, item) {
         <div class="form-field" data-offboard-recovery-warehouse-field hidden>
           <label for="${recoveryWarehouseId}">回收目标仓库</label>
           <select id="${recoveryWarehouseId}" name="recoveryWarehouseId" data-offboard-recovery-warehouse>
-            ${warehouseOptions("", "请选择回收目标仓库")
+            ${warehouseOptions(defaultRecoveryWarehouseId, "请选择回收目标仓库", currentUserOrgId())
               .map(
                 (option) =>
                   `<option value="${escapeHtml(option.value)}" ${
@@ -6290,6 +6375,9 @@ function openComputerModal(id = "") {
     brand: "",
     model: "",
     inventoryModelId: "",
+    inventoryStockAdjusted: false,
+    registrationMode: "custom",
+    warehouseId: "",
     cpu: "",
     memory: "",
     storage: "",
@@ -6329,7 +6417,7 @@ function openComputerModal(id = "") {
               })),
               true,
             )}
-            ${renderComputerInventorySelectionFields(computer)}
+            ${renderComputerInventorySelectionFields(computer, isEditing)}
             ${selectField(
               "所属组织",
               "orgId",
@@ -6390,6 +6478,8 @@ function openComputerModal(id = "") {
       </form>`,
     true,
   );
+  const computerForm = document.querySelector('form[data-form="computer"]');
+  if (computerForm && !isEditing) updateComputerRegistrationFields(computerForm, "registrationMode");
   if (isEditing) loadComputerMovementHistory(computer.id);
 }
 
@@ -6607,7 +6697,7 @@ function renderInventorySelectionFields(item = {}, includeType = true) {
   `;
 }
 
-function renderComputerInventorySelectionFields(computer = {}) {
+function renderComputerInventorySelectionFields(computer = {}, isEditing = false) {
   const typeId = computerInventoryTypeId();
   if (!typeId) {
     return `
@@ -6615,58 +6705,105 @@ function renderComputerInventorySelectionFields(computer = {}) {
       ${inputField("型号", "model", computer.model, false, "Latitude 5440")}
     `;
   }
+  const registrationMode = computer.registrationMode || (
+    computer.inventoryStockAdjusted ? "warehouse" : "custom"
+  );
   const linkedModel = getInventoryModel(computer.inventoryModelId);
-  const selectedBrand =
-    (linkedModel && getInventoryBrand(linkedModel.brandId)) ||
-    inventoryBrandsForType(typeId).find((brand) => brand.name === computer.brand);
-  const selectedModel =
-    linkedModel ||
-    inventoryModelsForBrand(selectedBrand?.id || "").find((model) => model.name === computer.model);
-  const selectedComputerBrand = selectedBrand?.name || computer.brand || "";
-  const selectedComputerModel = selectedModel?.name || computer.model || "";
-  const brandOptions = [{ value: "__custom__", label: "自定义品牌" }]
-    .concat(inventoryBrandsForType(typeId).map((brand) => ({ value: brand.id, label: brand.name })))
-    .map((option) => ({
-      ...option,
-      selected: String(option.value) === String(selectedBrand?.id || "__custom__"),
-    }));
-  const modelOptions = [{ value: "__custom__", label: "自定义型号" }]
-    .concat(inventoryModelsForBrand(selectedBrand?.id || "").map((model) => ({ value: model.id, label: inventoryModelOptionLabel(model) })))
-    .map((option) => ({
-      ...option,
-      selected: String(option.value) === String(selectedModel?.id || "__custom__"),
-    }));
+  const linkedModelLabel = linkedModel
+    ? `${getInventoryBrand(linkedModel.brandId)?.name || "未登记品牌"} / ${inventoryModelOptionLabel(linkedModel)}`
+    : "无库存型号关联";
+  if (isEditing) {
+    return `
+      ${inputField(
+        "登记方式",
+        "registrationModeLabel",
+        registrationMode === "warehouse" ? "从仓库库存登记" : "自定义品牌型号",
+        false,
+        "",
+        "text",
+        "",
+        'readonly tabindex="-1"',
+      )}
+      <input type="hidden" name="registrationMode" value="${escapeHtml(registrationMode)}" />
+      ${inputField(
+        "库存关联",
+        "inventoryAssociation",
+        linkedModelLabel,
+        false,
+        "",
+        "text",
+        "",
+        'readonly tabindex="-1"',
+      )}
+      ${inputField("设备品牌", "brand", computer.brand, false, "Dell / Lenovo / HP")}
+      ${inputField("型号", "model", computer.model, false, "Latitude 5440")}
+    `;
+  }
   return `
-    ${inventorySelectField("库存办公终端品牌", "computerInventoryBrandId", brandOptions, false)}
-    ${inputField("设备品牌", "brand", selectedComputerBrand, false, "Dell / Lenovo / HP")}
-    ${inventorySelectField("库存办公终端型号", "computerInventoryModelId", modelOptions, false)}
-    ${inputField("型号", "model", selectedComputerModel, false, "Latitude 5440")}
+    ${selectField(
+      "登记方式",
+      "registrationMode",
+      registrationMode,
+      [
+        { value: "custom", label: "自定义品牌型号" },
+        { value: "warehouse", label: "从仓库库存登记" },
+      ],
+      true,
+    )}
+    <div data-computer-custom-fields>
+      ${inputField("设备品牌", "brand", computer.brand, false, "Dell / Lenovo / HP")}
+      ${inputField("型号", "model", computer.model, false, "Latitude 5440")}
+    </div>
+    <div data-computer-warehouse-fields hidden>
+      ${warehouseSelectField(
+        "分配仓库",
+        "warehouseId",
+        computer.warehouseId || "",
+        true,
+        "请选择分配仓库",
+        currentUserOrgId(),
+      )}
+      ${inventorySelectField(
+        "库存电脑型号",
+        "computerInventoryModelId",
+        computerInventoryModelOptionsForWarehouse(computer.warehouseId || defaultWarehouseIdForCurrentUser(), computer.inventoryModelId),
+        false,
+      )}
+    </div>
   `;
 }
 
-function updateComputerInventorySelectors(form, changedField) {
+function updateComputerRegistrationFields(form, changedField) {
   if (!form || form.dataset.form !== "computer") return;
-  const typeId = computerInventoryTypeId();
-  const brandSelect = form.elements.computerInventoryBrandId;
-  const modelSelect = form.elements.computerInventoryModelId;
-  if (!typeId || !brandSelect || !modelSelect) return;
+  const mode = form.elements.registrationMode?.value || "custom";
+  const warehouseMode = mode === "warehouse";
+  const customFields = form.querySelector("[data-computer-custom-fields]");
+  const warehouseFields = form.querySelector("[data-computer-warehouse-fields]");
+  if (customFields) customFields.hidden = warehouseMode;
+  if (warehouseFields) warehouseFields.hidden = !warehouseMode;
 
-  if (changedField === "computerInventoryBrandId") {
-    const brand = brandSelect.value && brandSelect.value !== "__custom__" ? getInventoryBrand(brandSelect.value) : null;
+  const warehouseSelect = form.elements.warehouseId;
+  const modelSelect = form.elements.computerInventoryModelId;
+  if (warehouseSelect) {
+    warehouseSelect.required = warehouseMode;
+    warehouseSelect.disabled = !warehouseMode;
+  }
+  if (modelSelect) {
+    modelSelect.required = warehouseMode;
+    modelSelect.disabled = !warehouseMode;
+  }
+  if (!warehouseMode || !warehouseSelect || !modelSelect) return;
+  if (changedField === "registrationMode" || changedField === "warehouseId") {
     replaceSelectOptions(
       modelSelect,
-      [{ value: "__custom__", label: "自定义型号" }].concat(
-        inventoryModelsForBrand(brand?.id || "").map((model) => ({
-          value: model.id,
-          label: inventoryModelOptionLabel(model),
-        })),
-      ),
+      computerInventoryModelOptionsForWarehouse(warehouseSelect.value || "", ""),
+      "",
     );
-    if (brand && form.elements.brand) form.elements.brand.value = brand.name;
-    if (form.elements.model) form.elements.model.value = "";
-    ["cpu", "memory", "storage", "gpu"].forEach((fieldName) => {
-      if (form.elements[fieldName]) form.elements[fieldName].value = "";
-    });
+    if (changedField === "warehouseId") {
+      ["brand", "model", "cpu", "memory", "storage", "gpu", "purchaseDate"].forEach((fieldName) => {
+        if (form.elements[fieldName]) form.elements[fieldName].value = "";
+      });
+    }
     return;
   }
 
@@ -6674,7 +6811,6 @@ function updateComputerInventorySelectors(form, changedField) {
     const model = modelSelect.value && modelSelect.value !== "__custom__" ? getInventoryModel(modelSelect.value) : null;
     if (!model) return;
     const brand = getInventoryBrand(model.brandId);
-    if (brandSelect && brand) brandSelect.value = brand.id;
     if (form.elements.brand && brand) form.elements.brand.value = brand.name;
     if (form.elements.model) form.elements.model.value = model.name || "";
     if (form.elements.cpu) form.elements.cpu.value = model.cpu || "";
@@ -7390,13 +7526,18 @@ function inventoryModelForItem(item) {
 }
 
 function openDeviceStockConfirm(kind, employeeId, item, previous, selections = {}) {
+  const employee = getEmployee(employeeId);
+  const sourceWarehouseId =
+    selections.sourceWarehouseId || defaultWarehouseIdForOrg(employee?.orgId);
+  const returnWarehouseId =
+    selections.returnWarehouseId || defaultWarehouseIdForCurrentUser();
   pendingDeviceSave = {
     kind,
     employeeId,
     item,
     previous,
-    sourceWarehouseId: selections.sourceWarehouseId || "",
-    returnWarehouseId: selections.returnWarehouseId || "",
+    sourceWarehouseId,
+    returnWarehouseId,
   };
   const detail = [item.brand, item.model].filter(Boolean).join(" ") || "自定义物资";
   const quantity = Math.max(1, Number(item.quantity || 1));
@@ -7409,7 +7550,7 @@ function openDeviceStockConfirm(kind, employeeId, item, previous, selections = {
         <div class="form-field">
           <label for="${sourceWarehouseControlId}">新领用来源仓库</label>
           <select id="${sourceWarehouseControlId}" name="sourceWarehouseId">
-            ${warehouseOptions(selections.sourceWarehouseId, "请选择来源仓库")
+            ${warehouseOptions(sourceWarehouseId, "请选择来源仓库", employee?.orgId)
               .map(
                 (option) =>
                   `<option value="${escapeHtml(option.value)}" ${
@@ -7424,7 +7565,7 @@ function openDeviceStockConfirm(kind, employeeId, item, previous, selections = {
             ? `<div class="form-field">
                 <label for="${returnWarehouseControlId}">旧记录回收目标仓库</label>
                 <select id="${returnWarehouseControlId}" name="returnWarehouseId">
-                  ${warehouseOptions(selections.returnWarehouseId, "请选择回收目标仓库")
+                  ${warehouseOptions(returnWarehouseId, "请选择回收目标仓库", currentUserOrgId())
                     .map(
                       (option) =>
                         `<option value="${escapeHtml(option.value)}" ${
@@ -9620,15 +9761,21 @@ document.addEventListener("click", (event) => {
 async function handleComputerSubmit(form) {
   const data = Object.fromEntries(new FormData(form).entries());
   const id = form.dataset.id || "";
+  const registrationMode = String(data.registrationMode || "custom").trim() || "custom";
   const selectedModel =
-    data.computerInventoryModelId && data.computerInventoryModelId !== "__custom__"
+    registrationMode === "warehouse" && data.computerInventoryModelId
       ? getInventoryModel(data.computerInventoryModelId)
       : null;
-  const selectedBrand = selectedModel ? getInventoryBrand(selectedModel.brandId) : null;
   const wifiMac = normalizeMacAddress(data.wifiMac);
   const ethernetMac = normalizeMacAddress(data.ethernetMac);
   if (!data.deviceName || !isValidMacAddress(wifiMac) || !isValidMacAddress(ethernetMac)) {
     return showToast("请填写设备名并输入有效的 MAC 地址。", true);
+  }
+  if (!id && registrationMode === "warehouse" && (!data.warehouseId || !selectedModel)) {
+    return showToast("从仓库库存登记时必须选择仓库和库存电脑型号。", true);
+  }
+  if (!id && !["custom", "warehouse"].includes(registrationMode)) {
+    return showToast("请选择有效的登记方式。", true);
   }
 
   let serverComputer = null;
@@ -9658,15 +9805,17 @@ async function handleComputerSubmit(form) {
       deviceName: data.deviceName,
       orgId: data.orgId || "",
       deviceType: data.deviceType,
-      brand: selectedBrand?.name || data.brand || "",
-      model: selectedModel?.name || data.model || "",
+      registrationMode,
+      warehouseId: !id && registrationMode === "warehouse" ? data.warehouseId || "" : "",
+      brand: data.brand || "",
+      model: data.model || "",
       inventoryModelId: selectedModel?.id || "",
-      cpu: selectedModel?.cpu || data.cpu || "",
-      memory: selectedModel?.memory || data.memory || "",
-      storage: normalizeStorageValue(selectedModel?.storage || data.storage || ""),
-      gpu: selectedModel?.gpu || data.gpu || "",
+      cpu: data.cpu || "",
+      memory: data.memory || "",
+      storage: normalizeStorageValue(data.storage || ""),
+      gpu: data.gpu || "",
       fixedAssetCode: data.fixedAssetCode || "",
-      purchaseDate: data.purchaseDate || selectedModel?.inboundDate || "",
+      purchaseDate: data.purchaseDate || "",
       registeredDate: data.registeredDate || "",
       snSt: data.snSt || "",
       wifiMac,
@@ -10318,8 +10467,11 @@ document.addEventListener("change", (event) => {
     toggleInventoryImportComputerFields(inventoryImportForm);
   }
   const computerForm = event.target.closest('form[data-form="computer"]');
-  if (computerForm && ["computerInventoryBrandId", "computerInventoryModelId"].includes(event.target.name)) {
-    updateComputerInventorySelectors(computerForm, event.target.name);
+  if (
+    computerForm &&
+    ["registrationMode", "warehouseId", "computerInventoryModelId"].includes(event.target.name)
+  ) {
+    updateComputerRegistrationFields(computerForm, event.target.name);
     return;
   }
   const deviceForm = event.target.closest('form[data-form="monitor"], form[data-form="nonasset"]');

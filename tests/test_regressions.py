@@ -1031,7 +1031,7 @@ class InventoryRecoveryRegressionTests(TestCase):
             recovery_source,
         )
 
-    def test_stock_adjusted_returns_require_a_selected_target_warehouse(self):
+    def test_inventory_operations_use_scoped_default_warehouses(self):
         app = (ROOT / "web" / "app.js").read_text(encoding="utf-8")
         service = (ROOT / "office_asset" / "asset_service.py").read_text(encoding="utf-8")
         allocation_return = service.split("    def return_inventory(", 1)[1].split(
@@ -1048,14 +1048,18 @@ class InventoryRecoveryRegressionTests(TestCase):
         )[0]
 
         self.assertIn('data-form="device-recovery"', app)
-        self.assertIn('warehouseSelectField("回收目标仓库", "warehouseId"', app)
+        self.assertIn('warehouseSelectField(', app)
+        self.assertIn('"回收目标仓库"', app)
         self.assertIn("data-offboard-recovery-warehouse", app)
         self.assertIn("data-stock-adjusted", app)
         self.assertIn('name="sourceWarehouseId"', app)
         self.assertIn('name="returnWarehouseId"', app)
-        self.assertIn("require_explicit=True", allocation_return)
-        self.assertIn("require_explicit=True", legacy_return)
+        self.assertIn('preferred_org_id=employee.get("orgId")', service)
+        self.assertIn("preferred_org_id=self._actor_org_id(context)", allocation_return)
+        self.assertIn("preferred_org_id=self._actor_org_id(context)", legacy_return)
         self.assertIn("require_explicit=True", offboard_normalization)
+        self.assertIn("function defaultWarehouseIdForOrg(orgId)", app)
+        self.assertIn('["registrationMode", "warehouseId", "computerInventoryModelId"]', app)
         self.assertIn("The destination is independent from the warehouse used", offboard_normalization)
         self.assertIn(
             "ON DUPLICATE KEY UPDATE quantity = inventory_warehouse_stock.quantity",
@@ -1065,6 +1069,22 @@ class InventoryRecoveryRegressionTests(TestCase):
             "ON DUPLICATE KEY UPDATE quantity = inventory_warehouse_stock.quantity",
             legacy_return,
         )
+
+    def test_computer_registration_has_custom_and_warehouse_modes(self):
+        app = (ROOT / "web" / "app.js").read_text(encoding="utf-8")
+        service = (ROOT / "office_asset" / "asset_service.py").read_text(encoding="utf-8")
+
+        self.assertIn('{ value: "custom", label: "自定义品牌型号" }', app)
+        self.assertIn('{ value: "warehouse", label: "从仓库库存登记" }', app)
+        self.assertIn("computerInventoryModelOptionsForWarehouse", app)
+        self.assertIn("modelSelect.required = warehouseMode", app)
+        self.assertIn("modelSelect.disabled = !warehouseMode", app)
+        self.assertIn("if (model.batchKey) parts.push(`批次：${model.batchKey}`);", app)
+        self.assertIn('registration_mode == "warehouse"', service)
+        self.assertIn("The selected warehouse does not have enough inventory.", service)
+        self.assertIn("inventory_stock_adjusted", service)
+        self.assertIn("inventoryStockAdjusted", service)
+        self.assertIn('preferred_org_id=employee.get("orgId")', service)
 
     def test_legacy_usage_return_has_compatibility_route_and_transactional_guards(self):
         app = (ROOT / "web" / "app.js").read_text(encoding="utf-8")
@@ -1212,7 +1232,8 @@ class WarehouseInventoryRegressionTests(TestCase):
         self.assertIn('data-action="open-warehouse-directory"', app)
         self.assertIn('data-action="open-inventory-transfer"', app)
         self.assertIn('warehouseSelectField("入库仓库", "warehouseId"', app)
-        self.assertIn('warehouseSelectField("回收目标仓库", "warehouseId"', app)
+        self.assertIn('warehouseSelectField(', app)
+        self.assertIn('"回收目标仓库"', app)
         self.assertIn('selectField("调出仓库", "sourceWarehouseId"', app)
         self.assertIn('selectField("调入仓库", "targetWarehouseId"', app)
         self.assertIn("class=\"readonly-label\">当前仓库</span>", app)
