@@ -439,7 +439,7 @@ CREATE TABLE employee_non_asset_usage (
   quantity INT UNSIGNED NOT NULL,
   stock_adjusted TINYINT(1) NOT NULL DEFAULT 0,
   inventory_model_key BIGINT UNSIGNED
-    GENERATED ALWAYS AS (COALESCE(inventory_model_id, 0)) STORED,
+    GENERATED ALWAYS AS (COALESCE(inventory_model_id, 0)) VIRTUAL,
   last_counted_date DATE NULL,
   notes VARCHAR(500) NULL,
   is_active TINYINT(1) NOT NULL DEFAULT 1,
@@ -477,7 +477,7 @@ CREATE TABLE employee_monitor_usage (
   quantity INT UNSIGNED NOT NULL DEFAULT 1,
   stock_adjusted TINYINT(1) NOT NULL DEFAULT 0,
   inventory_model_key BIGINT UNSIGNED
-    GENERATED ALWAYS AS (COALESCE(inventory_model_id, 0)) STORED,
+    GENERATED ALWAYS AS (COALESCE(inventory_model_id, 0)) VIRTUAL,
   last_counted_date DATE NULL,
   notes VARCHAR(500) NULL,
   is_active TINYINT(1) NOT NULL DEFAULT 1,

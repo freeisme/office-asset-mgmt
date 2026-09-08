@@ -9,6 +9,7 @@
 5. 迁移文件不得固定 `USE database_name`。两个历史 `20260814_*` 迁移在执行时会去除旧的 `USE` 行，但校验和仍基于原文件。
 6. `/api/state` 仅保留只读兼容用途；所有业务写操作使用资源接口或命令接口和独立事务。
 7. 对已有业务库的基线接管只能显式指定 `legacy-20260813`。迁移器会检查旧库的组织、人员、资产、审计、认证、库存和备份关键表；校验失败时不会创建迁移登记表。
+8. 如果已发布迁移在特定 MySQL 版本上不兼容，新增迁移必须按实际执行顺序放在问题迁移之前；不得修改问题迁移或复用其版本号。
 
 ## 迁移清单
 
@@ -27,6 +28,7 @@
 | `20260819_004_workflow_role_collation.sql` | 工作流角色关联的排序规则兼容。 |
 | `20260820_001_computer_movement_history.sql` | 办公终端设备流转记录和详情时间线。 |
 | `20260902_001_inventory_warehouses.sql` | 组织归属仓库、仓库库存、库存调拨及历史库存向默认仓库的兼容迁移。 |
+| `20260907_000_usage_inventory_model_identity_compatibility.sql` | MySQL 8.4 兼容：为带级联外键的人员物资表先创建 `VIRTUAL` 库存型号键和新唯一索引。 |
 | `20260907_001_usage_inventory_model_identity.sql` | 按库存型号/购买批次区分人员物资记录，兼容自定义物资的唯一性。 |
 
 ## 新数据库
@@ -82,6 +84,21 @@ python .\tools\migration_runner.py --database office_asset_mgmt --verify
 - `checksum mismatch`：已应用文件被修改，必须恢复原文件并另建迁移。
 - `missing required tables`：旧库不符合 `legacy-20260813`，不得采用基线；应从备份恢复或先完成历史升级。
 - MySQL 错误：立即停止升级，从备份和 SQL 兼容性开始排查。
+
+### MySQL 8.4 生成列兼容说明
+
+`employee_non_asset_usage.inventory_model_id` 和
+`employee_monitor_usage.inventory_model_id` 已由历史结构声明为带级联行为的外键。
+MySQL 8.4 拒绝在这些列上直接添加 `STORED` 生成列，可能返回
+`ERROR 1215 (HY000): Cannot add foreign key constraint`。兼容迁移
+`20260907_000_usage_inventory_model_identity_compatibility.sql` 使用
+`VIRTUAL` 生成列建立相同的唯一性约束；`VIRTUAL` 列仍会被唯一索引实时计算，
+不会改变库存型号区分规则，也不会修改或删除历史外键。
+
+该迁移必须按文件名排在 `20260907_001_usage_inventory_model_identity.sql` 之前。
+如果 `20260907_001` 已经登记，迁移器仍可安全登记此兼容迁移：对象已存在时各步骤均为
+无操作。升级前仍应检查两张表的 `inventory_model_key`、`uq_non_asset_usage_item_model`
+和 `uq_employee_monitor_model`，并在异常时从升级前备份恢复。
 
 ## 回滚
 

@@ -966,6 +966,12 @@ class InventoryRecoveryRegressionTests(TestCase):
         bootstrap = (
             ROOT / "database" / "bootstrap" / "01_schema.sql"
         ).read_text(encoding="utf-8")
+        compatibility_migration = (
+            ROOT
+            / "database"
+            / "migrations"
+            / "20260907_000_usage_inventory_model_identity_compatibility.sql"
+        ).read_text(encoding="utf-8")
         migration = (
             ROOT
             / "database"
@@ -980,11 +986,26 @@ class InventoryRecoveryRegressionTests(TestCase):
         offboard_source = service.split("    def offboard_employee(", 1)[1]
 
         self.assertIn("inventory_model_key", bootstrap)
+        self.assertIn("GENERATED ALWAYS AS (COALESCE(inventory_model_id, 0)) VIRTUAL", bootstrap)
         self.assertIn("uq_non_asset_usage_item_model", bootstrap)
         self.assertIn("uq_employee_monitor_model", bootstrap)
+        self.assertIn("GENERATED ALWAYS AS (COALESCE(inventory_model_id, 0)) VIRTUAL", compatibility_migration)
+        self.assertTrue(
+            (
+                ROOT
+                / "database"
+                / "migrations"
+                / "20260907_000_usage_inventory_model_identity_compatibility.sql"
+            ).is_file()
+        )
         self.assertIn("ADD COLUMN inventory_model_key", migration)
         self.assertIn("ADD UNIQUE KEY uq_non_asset_usage_item_model", migration)
         self.assertIn("ADD UNIQUE KEY uq_employee_monitor_model", migration)
+        discovered_versions = [item.version for item in migration_runner.discover_migrations()]
+        self.assertLess(
+            discovered_versions.index("20260907_000_usage_inventory_model_identity_compatibility"),
+            discovered_versions.index("20260907_001_usage_inventory_model_identity"),
+        )
         self.assertLess(
             migration.index("ADD UNIQUE KEY uq_non_asset_usage_item_model"),
             migration.index("DROP INDEX uq_non_asset_usage_item"),
