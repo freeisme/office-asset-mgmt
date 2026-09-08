@@ -43,7 +43,7 @@ GitHub Wiki 提供适合团队日常查阅的模块化文档：
 | 前端 | 原生 HTML、CSS、JavaScript，无前端构建工具 |
 | 数据库 | MySQL 8.0+，当前 Docker 镜像为 MySQL 8.4 |
 | 容器 | Docker Compose v2 |
-| 代码托管 | 私有 Gitea |
+| 代码托管 | GitHub 源仓库，私有 Gitea 部署镜像 |
 | 反向代理 | 可选 Nginx |
 | 运行方式 | `server.py` 直接运行，或使用 Docker 镜像运行 |
 
@@ -63,13 +63,15 @@ GitHub Wiki 提供适合团队日常查阅的模块化文档：
                                          |
                                          +-- MySQL 8.4
 
-开发机 push main
+开发机 push GitHub main
   |
-  +-- Gitea:2222
+  +-- GitHub freeisme/office-asset-mgmt
           |
-          +-- 签名 Webhook --> 宿主机更新服务:9000
-                                   |
-                                   +-- 只记录 push，不自动部署
+          +-- Gitea 镜像 admin1/office-asset-management（每 8 小时）
+                  |
+                  +-- 签名 Webhook --> 宿主机更新服务:9000
+                                           |
+                                           +-- 只记录 push，不自动部署
 
 设置页检查并选择版本
   |
