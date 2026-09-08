@@ -125,23 +125,17 @@ class AssetService:
     ) -> dict:
         org_id = self.db.integer(preferred_org_id, 0) or self._actor_org_id(context)
         for ancestor_id in self.scope.ancestor_org_ids(org_id):
-            candidates = self.db.json(
+            candidate_output = self.db.execute(
                 f"""
-                SELECT COALESCE(JSON_ARRAYAGG(JSON_OBJECT(
-                  'id', CAST(warehouse_id AS CHAR)
-                )), JSON_ARRAY())
-                FROM (
-                  SELECT warehouse_id
-                  FROM inventory_warehouse
-                  WHERE org_unit_id = {ancestor_id}
-                    AND is_active = 1
-                  ORDER BY warehouse_name, warehouse_id
-                ) warehouse_rows
+                SELECT warehouse_id
+                FROM inventory_warehouse
+                WHERE org_unit_id = {ancestor_id}
+                  AND is_active = 1
+                ORDER BY warehouse_name, warehouse_id
                 """,
-                [],
             )
-            for candidate in candidates or []:
-                warehouse = self._warehouse(candidate.get("id"))
+            for candidate_id in candidate_output.splitlines():
+                warehouse = self._warehouse(candidate_id.strip())
                 try:
                     self._assert_warehouse_access(
                         context,
@@ -1986,6 +1980,7 @@ class AssetService:
                     WHERE employee_id = {employee_id}
                     AND display_name = {self.db.quote(display_name)}
                       AND model = {self.db.quote(model_name)}
+                      AND inventory_model_id <=> {model_id_sql}
                     LIMIT 1
                   ),
                   0
@@ -2017,6 +2012,7 @@ class AssetService:
                       AND non_asset_type_id = {type_id}
                       AND brand = {self.db.quote(brand_name)}
                       AND model = {self.db.quote(model_name)}
+                      AND inventory_model_id <=> {model_id_sql}
                     LIMIT 1
                   ),
                   0
@@ -3102,6 +3098,7 @@ class AssetService:
                   'usageRecordId', CAST(allocation.usage_record_id AS CHAR),
                   'quantity', allocation.quantity,
                   'stockAdjusted', allocation.stock_adjusted,
+                  'modelId', COALESCE(CAST(allocation.inventory_model_id AS CHAR), ''),
                   'warehouseId', COALESCE(CAST(allocation.warehouse_id AS CHAR), ''),
                   'warehouseName', COALESCE(warehouse.warehouse_name, '')
                 )), JSON_ARRAY())
@@ -3134,6 +3131,10 @@ class AssetService:
             item["stockAdjusted"] = parse_bool(item.get("stockAdjusted"), False)
             if item_type in {"monitor", "non_asset"}:
                 allocations = allocations_by_key.get(f"{item_type}:{item['id']}", [])
+                item["stockAdjusted"] = item["stockAdjusted"] or any(
+                    parse_bool(allocation.get("stockAdjusted"), False)
+                    for allocation in allocations
+                )
                 warehouse_ids = [
                     self.db.text(allocation.get("warehouseId"))
                     for allocation in allocations
@@ -3153,6 +3154,8 @@ class AssetService:
                     {
                         "id": self.db.text(allocation.get("id")),
                         "quantity": max(0, self.db.integer(allocation.get("quantity"), 0)),
+                        "modelId": self.db.text(allocation.get("modelId")),
+                        "stockAdjusted": parse_bool(allocation.get("stockAdjusted"), False),
                         "warehouseId": self.db.text(allocation.get("warehouseId")),
                         "warehouseName": self.db.text(allocation.get("warehouseName")),
                     }
@@ -3234,9 +3237,25 @@ class AssetService:
                 }
             )
             if action == "recover" and current["itemType"] != "computer":
-                stock_adjusted = parse_bool(current.get("stockAdjusted"), False)
-                if stock_adjusted and self.db.integer(current.get("modelId"), 0) <= 0:
+                active_allocations = current.get("activeAllocations") or []
+                stock_adjusted_allocations = [
+                    allocation
+                    for allocation in active_allocations
+                    if parse_bool(allocation.get("stockAdjusted"), False)
+                ]
+                stock_adjusted = parse_bool(current.get("stockAdjusted"), False) or bool(
+                    stock_adjusted_allocations
+                )
+                if stock_adjusted and self.db.integer(current.get("modelId"), 0) <= 0 and not any(
+                    self.db.integer(allocation.get("modelId"), 0) > 0
+                    for allocation in stock_adjusted_allocations
+                ):
                     raise self.conflict_error("已扣减库存的物资缺少库存型号，无法通过离职回收自动入库。")
+                if any(
+                    self.db.integer(allocation.get("modelId"), 0) <= 0
+                    for allocation in stock_adjusted_allocations
+                ):
+                    raise self.conflict_error("离职回收记录缺少库存型号，无法按原库存批次入库。")
                 if stock_adjusted:
                     source_warehouse_ids = sorted(
                         {
@@ -3346,13 +3365,19 @@ class AssetService:
             for item in plan
             if self.db.integer(item.get("targetEmployeeId"), 0) > 0
         ]
-        recover_model_ids = [
-            self.db.integer(item.get("modelId"), 0)
-            for item in plan
-            if item.get("itemType") != "computer"
-            and item.get("action") == "recover"
-            and parse_bool(item.get("stockAdjusted"), False)
-        ]
+        recover_model_ids: list[int] = []
+        for item in plan:
+            if item.get("itemType") == "computer" or item.get("action") != "recover":
+                continue
+            active_allocations = item.get("activeAllocations") or []
+            if active_allocations:
+                recover_model_ids.extend(
+                    self.db.integer(allocation.get("modelId"), 0)
+                    for allocation in active_allocations
+                    if parse_bool(allocation.get("stockAdjusted"), False)
+                )
+            elif parse_bool(item.get("stockAdjusted"), False):
+                recover_model_ids.append(self.db.integer(item.get("modelId"), 0))
 
         computer_id_sql = self._sql_id_list(computer_ids)
         monitor_id_sql = self._sql_id_list(monitor_ids)
@@ -3662,87 +3687,131 @@ class AssetService:
                 target_id = self.db.integer(item.get("targetEmployeeId"), 0)
                 target_name = self.db.text(item.get("targetEmployeeName"))
                 note = self._offboard_note(f"离职办理转交给 {target_name}", handling_note)
-                if item_type == "monitor":
-                    upsert_target_usage = f"""
-                    INSERT INTO employee_monitor_usage (
-                      employee_id, non_asset_type_id, inventory_brand_id, inventory_model_id,
-                      display_name, model, quantity, stock_adjusted, notes
+                allocation_groups: dict[int, dict[str, int]] = {}
+                for allocation in item.get("activeAllocations") or []:
+                    allocation_model_id = self.db.integer(allocation.get("modelId"), 0)
+                    group = allocation_groups.setdefault(
+                        allocation_model_id,
+                        {"quantity": 0, "stockAdjusted": 0},
                     )
-                    SELECT
-                      {target_id}, {type_id_sql}, {brand_id_sql}, {model_id_sql},
-                      {self.db.quote(brand_name)}, {self.db.quote(model_name)}, {quantity},
-                      {stock_adjusted}, {self.db.quote(note)}
-                    FROM DUAL
-                    WHERE @offboard_allowed = 1
-                    ON DUPLICATE KEY UPDATE
-                      quantity = quantity + VALUES(quantity),
-                      stock_adjusted = GREATEST(stock_adjusted, VALUES(stock_adjusted)),
-                      inventory_brand_id = COALESCE(VALUES(inventory_brand_id), inventory_brand_id),
-                      inventory_model_id = COALESCE(VALUES(inventory_model_id), inventory_model_id),
-                      notes = CONCAT_WS(' ', notes, VALUES(notes))
-                    """
-                    target_usage_lookup = f"""
-                    SELECT monitor_usage_id
-                    INTO @target_usage_ref
-                    FROM employee_monitor_usage
-                    WHERE employee_id = {target_id}
-                      AND display_name = {self.db.quote(brand_name)}
-                      AND model = {self.db.quote(model_name)}
-                    LIMIT 1
-                    """
-                else:
-                    upsert_target_usage = f"""
-                    INSERT INTO employee_non_asset_usage (
-                      employee_id, non_asset_type_id, inventory_brand_id, inventory_model_id,
-                      brand, model, quantity, stock_adjusted, notes
+                    group["quantity"] += max(
+                        1,
+                        self.db.integer(allocation.get("quantity"), 1),
                     )
-                    SELECT
-                      {target_id}, {type_id_sql}, {brand_id_sql}, {model_id_sql},
-                      {self.db.quote(brand_name)}, {self.db.quote(model_name)}, {quantity},
-                      {stock_adjusted}, {self.db.quote(note)}
-                    FROM DUAL
-                    WHERE @offboard_allowed = 1
-                    ON DUPLICATE KEY UPDATE
-                      quantity = quantity + VALUES(quantity),
-                      stock_adjusted = GREATEST(stock_adjusted, VALUES(stock_adjusted)),
-                      inventory_brand_id = COALESCE(VALUES(inventory_brand_id), inventory_brand_id),
-                      inventory_model_id = COALESCE(VALUES(inventory_model_id), inventory_model_id),
-                      notes = CONCAT_WS(' ', notes, VALUES(notes))
-                    """
-                    target_usage_lookup = f"""
-                    SELECT non_asset_usage_id
-                    INTO @target_usage_ref
-                    FROM employee_non_asset_usage
-                    WHERE employee_id = {target_id}
-                      AND non_asset_type_id = {type_id_sql}
-                      AND brand = {self.db.quote(brand_name)}
-                      AND model = {self.db.quote(model_name)}
-                    LIMIT 1
-                    """
+                    group["stockAdjusted"] = max(
+                        group["stockAdjusted"],
+                        1 if parse_bool(allocation.get("stockAdjusted"), False) else 0,
+                    )
+                if not allocation_groups:
+                    allocation_groups[model_id] = {
+                        "quantity": quantity,
+                        "stockAdjusted": stock_adjusted,
+                    }
+
+                for allocation_model_id, group in sorted(allocation_groups.items()):
+                    group_model_id_sql = (
+                        str(allocation_model_id) if allocation_model_id > 0 else "NULL"
+                    )
+                    group_quantity = group["quantity"]
+                    group_stock_adjusted = group["stockAdjusted"]
+                    if item_type == "monitor":
+                        statements.append(
+                            f"""
+                            INSERT INTO employee_monitor_usage (
+                              employee_id, non_asset_type_id, inventory_brand_id, inventory_model_id,
+                              display_name, model, quantity, stock_adjusted, notes
+                            )
+                            SELECT
+                              {target_id}, {type_id_sql}, {brand_id_sql}, {group_model_id_sql},
+                              {self.db.quote(brand_name)}, {self.db.quote(model_name)}, {group_quantity},
+                              {group_stock_adjusted}, {self.db.quote(note)}
+                            FROM DUAL
+                            WHERE @offboard_allowed = 1
+                            ON DUPLICATE KEY UPDATE
+                              quantity = quantity + VALUES(quantity),
+                              stock_adjusted = GREATEST(stock_adjusted, VALUES(stock_adjusted)),
+                              inventory_brand_id = COALESCE(VALUES(inventory_brand_id), inventory_brand_id),
+                              inventory_model_id = COALESCE(VALUES(inventory_model_id), inventory_model_id),
+                              notes = CONCAT_WS(' ', notes, VALUES(notes))
+                            """
+                        )
+                        target_usage_lookup = f"""
+                        SELECT monitor_usage_id
+                        INTO @target_usage_ref
+                        FROM employee_monitor_usage
+                        WHERE employee_id = {target_id}
+                          AND display_name = {self.db.quote(brand_name)}
+                          AND model = {self.db.quote(model_name)}
+                          AND inventory_model_id <=> {group_model_id_sql}
+                        LIMIT 1
+                        """
+                    else:
+                        statements.append(
+                            f"""
+                            INSERT INTO employee_non_asset_usage (
+                              employee_id, non_asset_type_id, inventory_brand_id, inventory_model_id,
+                              brand, model, quantity, stock_adjusted, notes
+                            )
+                            SELECT
+                              {target_id}, {type_id_sql}, {brand_id_sql}, {group_model_id_sql},
+                              {self.db.quote(brand_name)}, {self.db.quote(model_name)}, {group_quantity},
+                              {group_stock_adjusted}, {self.db.quote(note)}
+                            FROM DUAL
+                            WHERE @offboard_allowed = 1
+                            ON DUPLICATE KEY UPDATE
+                              quantity = quantity + VALUES(quantity),
+                              stock_adjusted = GREATEST(stock_adjusted, VALUES(stock_adjusted)),
+                              inventory_brand_id = COALESCE(VALUES(inventory_brand_id), inventory_brand_id),
+                              inventory_model_id = COALESCE(VALUES(inventory_model_id), inventory_model_id),
+                              notes = CONCAT_WS(' ', notes, VALUES(notes))
+                            """
+                        )
+                        target_usage_lookup = f"""
+                        SELECT non_asset_usage_id
+                        INTO @target_usage_ref
+                        FROM employee_non_asset_usage
+                        WHERE employee_id = {target_id}
+                          AND non_asset_type_id = {type_id_sql}
+                          AND brand = {self.db.quote(brand_name)}
+                          AND model = {self.db.quote(model_name)}
+                          AND inventory_model_id <=> {group_model_id_sql}
+                        LIMIT 1
+                        """
+                    statements.extend(
+                        [
+                            "SET @target_usage_ref = 0",
+                            target_usage_lookup,
+                            f"""
+                            UPDATE inventory_allocation_history
+                            SET employee_id = {target_id},
+                                usage_record_id = @target_usage_ref,
+                                notes = CONCAT_WS(' ', notes, {self.db.quote(note)})
+                            WHERE allocation_type = {self.db.quote(allocation_type)}
+                              AND employee_id = {employee_id_int}
+                              AND usage_record_id = {item_id}
+                              AND inventory_model_id <=> {group_model_id_sql}
+                              AND status = 'active'
+                              AND @offboard_allowed = 1
+                              AND @target_usage_ref > 0
+                            """,
+                        ]
+                    )
                 statements.extend(
                     [
-                        "SET @target_usage_ref = 0",
-                        upsert_target_usage,
-                        target_usage_lookup,
-                        f"""
-                        UPDATE inventory_allocation_history
-                        SET employee_id = {target_id},
-                            usage_record_id = @target_usage_ref,
-                            notes = CONCAT_WS(' ', notes, {self.db.quote(note)})
-                        WHERE allocation_type = {self.db.quote(allocation_type)}
-                          AND employee_id = {employee_id_int}
-                          AND usage_record_id = {item_id}
-                          AND status = 'active'
-                          AND @offboard_allowed = 1
-                          AND @target_usage_ref > 0
-                        """,
                         f"""
                         DELETE FROM {usage_table}
                         WHERE {usage_pk} = {item_id}
                           AND employee_id = {employee_id_int}
                           AND is_active = 1
                           AND @offboard_allowed = 1
-                          AND @target_usage_ref > 0
+                          AND (
+                            SELECT COUNT(*)
+                            FROM inventory_allocation_history
+                            WHERE allocation_type = {self.db.quote(allocation_type)}
+                              AND employee_id = {employee_id_int}
+                              AND usage_record_id = {item_id}
+                              AND status = 'active'
+                          ) = 0
                         """,
                         "SET @processed_item_count = @processed_item_count + ROW_COUNT()",
                     ]
@@ -3758,21 +3827,19 @@ class AssetService:
             recovery_warehouse_id_sql = (
                 str(recovery_warehouse_id) if recovery_warehouse_id > 0 else "NULL"
             )
-            statements.extend(
-                [
-                    f"""
-                    SET @active_allocation_count = (
-                      SELECT COUNT(*)
-                      FROM inventory_allocation_history
-                      WHERE allocation_type = {self.db.quote(allocation_type)}
-                        AND employee_id = {employee_id_int}
-                        AND usage_record_id = {item_id}
-                        AND status = 'active'
-                    )
-                    """,
-                ]
+            statements.append(
+                f"""
+                SET @active_allocation_count = (
+                  SELECT COUNT(*)
+                  FROM inventory_allocation_history
+                  WHERE allocation_type = {self.db.quote(allocation_type)}
+                    AND employee_id = {employee_id_int}
+                    AND usage_record_id = {item_id}
+                    AND status = 'active'
+                )
+                """
             )
-            if action == "recover" and stock_adjusted:
+            if action == "recover":
                 statements.extend(
                     [
                         f"""
@@ -3788,7 +3855,7 @@ class AssetService:
                         """,
                         f"""
                         SET @recovery_quantity = IF(
-                          @active_allocation_count = 0,
+                          @active_allocation_count = 0 AND {stock_adjusted} = 1,
                           {quantity},
                           @allocation_recovery_quantity
                         )
@@ -3797,7 +3864,7 @@ class AssetService:
                         INSERT INTO inventory_warehouse_stock (warehouse_id, model_id, quantity)
                         SELECT
                           {recovery_warehouse_id_sql},
-                          {model_id},
+                          allocation.inventory_model_id,
                           SUM(allocation.quantity)
                         FROM inventory_allocation_history allocation
                         WHERE allocation.allocation_type = {self.db.quote(allocation_type)}
@@ -3805,8 +3872,10 @@ class AssetService:
                           AND allocation.usage_record_id = {item_id}
                           AND allocation.status = 'active'
                           AND allocation.stock_adjusted = 1
+                          AND allocation.inventory_model_id IS NOT NULL
                           AND @active_allocation_count > 0
                           AND @offboard_allowed = 1
+                        GROUP BY allocation.inventory_model_id
                         ON DUPLICATE KEY UPDATE
                           quantity = quantity + VALUES(quantity)
                         """,
@@ -3815,15 +3884,77 @@ class AssetService:
                         SELECT {recovery_warehouse_id_sql}, {model_id}, {quantity}
                         FROM DUAL
                         WHERE @active_allocation_count = 0
+                          AND {stock_adjusted} = 1
                           AND @offboard_allowed = 1
                         ON DUPLICATE KEY UPDATE
                           quantity = quantity + VALUES(quantity)
                         """,
                         f"""
+                        UPDATE it_inventory_model model
+                        JOIN (
+                          SELECT allocation.inventory_model_id AS model_id,
+                                 SUM(allocation.quantity) AS quantity
+                          FROM inventory_allocation_history allocation
+                          WHERE allocation.allocation_type = {self.db.quote(allocation_type)}
+                            AND allocation.employee_id = {employee_id_int}
+                            AND allocation.usage_record_id = {item_id}
+                            AND allocation.status = 'active'
+                            AND allocation.stock_adjusted = 1
+                            AND allocation.inventory_model_id IS NOT NULL
+                            AND @active_allocation_count > 0
+                            AND @offboard_allowed = 1
+                          GROUP BY allocation.inventory_model_id
+                        ) recovered
+                          ON recovered.model_id = model.model_id
+                        SET model.quantity = model.quantity + recovered.quantity
+                        """,
+                        f"""
                         UPDATE it_inventory_model
-                        SET quantity = quantity + @recovery_quantity
+                        SET quantity = quantity + {quantity}
                         WHERE model_id = {model_id}
+                          AND @active_allocation_count = 0
+                          AND {stock_adjusted} = 1
                           AND @offboard_allowed = 1
+                        """,
+                        f"""
+                        INSERT INTO inventory_movement_log (
+                          movement_direction, type_name, brand_name, model_name, quantity,
+                          source_label, source_warehouse_id, target_label, target_warehouse_id,
+                          note, related_employee_no, related_employee_name, trigger_action
+                        )
+                        SELECT
+                          'increase',
+                          type_row.type_name,
+                          brand.brand_name,
+                          model.model_name,
+                          SUM(allocation.quantity),
+                          {self.db.quote(employee_label)},
+                          NULL,
+                          warehouse.warehouse_name,
+                          warehouse.warehouse_id,
+                          {self.db.quote(note)},
+                          {self.db.quote(employee_no)},
+                          {self.db.quote(employee_name)},
+                          'leave_recovery'
+                        FROM inventory_allocation_history allocation
+                        JOIN it_inventory_model model
+                          ON model.model_id = allocation.inventory_model_id
+                        JOIN it_inventory_brand brand
+                          ON brand.brand_id = model.brand_id
+                        JOIN non_asset_type type_row
+                          ON type_row.non_asset_type_id = model.non_asset_type_id
+                        JOIN inventory_warehouse warehouse
+                          ON warehouse.warehouse_id = {recovery_warehouse_id_sql}
+                        WHERE allocation.allocation_type = {self.db.quote(allocation_type)}
+                          AND allocation.employee_id = {employee_id_int}
+                          AND allocation.usage_record_id = {item_id}
+                          AND allocation.status = 'active'
+                          AND allocation.stock_adjusted = 1
+                          AND allocation.inventory_model_id IS NOT NULL
+                          AND @active_allocation_count > 0
+                          AND @offboard_allowed = 1
+                        GROUP BY model.model_id, type_row.type_name, brand.brand_name,
+                                 model.model_name, warehouse.warehouse_id, warehouse.warehouse_name
                         """,
                         f"""
                         INSERT INTO inventory_movement_log (
@@ -3847,6 +3978,8 @@ class AssetService:
                           'leave_recovery'
                         FROM inventory_warehouse warehouse
                         WHERE warehouse.warehouse_id = {recovery_warehouse_id_sql}
+                          AND @active_allocation_count = 0
+                          AND {stock_adjusted} = 1
                           AND @offboard_allowed = 1
                         """,
                     ]
@@ -3859,8 +3992,9 @@ class AssetService:
                         returned_at = CURRENT_TIMESTAMP,
                         returned_by = {actor_sql},
                         warehouse_id = CASE
-                          WHEN {1 if action == "recover" and stock_adjusted else 0} = 1
-                            THEN COALESCE(warehouse_id, {recovery_warehouse_id_sql})
+                          WHEN {1 if action == "recover" else 0} = 1
+                            AND stock_adjusted = 1
+                            THEN {recovery_warehouse_id_sql}
                           ELSE warehouse_id
                         END,
                         notes = CONCAT_WS(' ', notes, {self.db.quote(note)})

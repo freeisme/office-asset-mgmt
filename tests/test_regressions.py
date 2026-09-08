@@ -32,6 +32,10 @@ migration_runner = load_module(
     "office_asset_migration_runner_tests",
     ROOT / "tools" / "migration_runner.py",
 )
+next_version = load_module(
+    "office_asset_next_version_tests",
+    ROOT / "tools" / "next_version.py",
+)
 
 
 def empty_snapshot(revision: int = 1) -> dict:
@@ -265,6 +269,33 @@ class ReleaseSelectionTests(TestCase):
                     server.normalize_update_repository_url(repository_url)
                 with self.assertRaises(deploy_webhook.InvalidRepositoryUrlError):
                     deploy_webhook._normalize_repository_url(repository_url)
+
+
+class VersionGenerationTests(TestCase):
+    def test_change_level_maps_patch_minor_and_major(self):
+        self.assertEqual("patch", next_version.change_level(["fix: correct recovery"]))
+        self.assertEqual("minor", next_version.change_level(["feat: split inventory batches"]))
+        self.assertEqual(
+            "major",
+            next_version.change_level(["refactor!: replace allocation contract"]),
+        )
+        self.assertEqual(
+            "major",
+            next_version.change_level(["refactor: update API\n\nBREAKING CHANGE: yes"]),
+        )
+
+    def test_next_version_supports_explicit_release_level(self):
+        with (
+            mock.patch.object(
+                next_version,
+                "latest_stable_tag",
+                return_value=("v2.0.0", (2, 0, 0)),
+            ),
+            mock.patch.object(next_version, "commit_messages", return_value=[]),
+        ):
+            self.assertEqual("v2.1.0", next_version.next_version(level="minor")["nextVersion"])
+            self.assertEqual("v3.0.0", next_version.next_version(level="major")["nextVersion"])
+            self.assertEqual("v2.0.1", next_version.next_version(level="patch")["nextVersion"])
 
 
 class UpdateFetchTests(TestCase):
@@ -931,6 +962,44 @@ class DataQualityRegressionTests(TestCase):
 
 
 class InventoryRecoveryRegressionTests(TestCase):
+    def test_inventory_model_identity_is_used_for_allocations_and_recovery(self):
+        bootstrap = (
+            ROOT / "database" / "bootstrap" / "01_schema.sql"
+        ).read_text(encoding="utf-8")
+        migration = (
+            ROOT
+            / "database"
+            / "migrations"
+            / "20260907_001_usage_inventory_model_identity.sql"
+        ).read_text(encoding="utf-8")
+        service = (ROOT / "office_asset" / "asset_service.py").read_text(encoding="utf-8")
+        allocation_source = service.split("    def allocate_inventory(", 1)[1].split(
+            "\n    def adjust_inventory(",
+            1,
+        )[0]
+        offboard_source = service.split("    def offboard_employee(", 1)[1]
+
+        self.assertIn("inventory_model_key", bootstrap)
+        self.assertIn("uq_non_asset_usage_item_model", bootstrap)
+        self.assertIn("uq_employee_monitor_model", bootstrap)
+        self.assertIn("ADD COLUMN inventory_model_key", migration)
+        self.assertIn("ADD UNIQUE KEY uq_non_asset_usage_item_model", migration)
+        self.assertIn("ADD UNIQUE KEY uq_employee_monitor_model", migration)
+        self.assertLess(
+            migration.index("ADD UNIQUE KEY uq_non_asset_usage_item_model"),
+            migration.index("DROP INDEX uq_non_asset_usage_item"),
+        )
+        self.assertLess(
+            migration.index("ADD UNIQUE KEY uq_employee_monitor_model"),
+            migration.index("DROP INDEX uq_employee_monitor"),
+        )
+        self.assertIn("inventory_model_id <=> {model_id_sql}", allocation_source)
+        self.assertIn("allocation_groups: dict[int, dict[str, int]]", offboard_source)
+        self.assertIn("inventory_model_id <=> {group_model_id_sql}", offboard_source)
+        self.assertIn("GROUP BY allocation.inventory_model_id", offboard_source)
+        self.assertIn("allocation.stock_adjusted = 1", offboard_source)
+        self.assertIn("AND {stock_adjusted} = 1", offboard_source)
+
     def test_register_without_deduction_honors_json_false(self):
         service = (ROOT / "office_asset" / "asset_service.py").read_text(encoding="utf-8")
         allocation_source = service.split("    def allocate_inventory(", 1)[1].split(

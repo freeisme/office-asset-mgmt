@@ -26,6 +26,7 @@
 | `20260819_003_form_workflow_binding.sql` | 表单与流程、审批节点绑定。 |
 | `20260819_004_workflow_role_collation.sql` | 工作流角色关联的排序规则兼容。 |
 | `20260820_001_computer_movement_history.sql` | 办公终端设备流转记录和详情时间线。 |
+| `20260907_001_usage_inventory_model_identity.sql` | 按库存型号/购买批次区分人员物资记录，兼容自定义物资的唯一性。 |
 
 ## 新数据库
 

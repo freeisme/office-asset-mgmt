@@ -438,13 +438,17 @@ CREATE TABLE employee_non_asset_usage (
   model VARCHAR(128) NOT NULL DEFAULT '',
   quantity INT UNSIGNED NOT NULL,
   stock_adjusted TINYINT(1) NOT NULL DEFAULT 0,
+  inventory_model_key BIGINT UNSIGNED
+    GENERATED ALWAYS AS (COALESCE(inventory_model_id, 0)) STORED,
   last_counted_date DATE NULL,
   notes VARCHAR(500) NULL,
   is_active TINYINT(1) NOT NULL DEFAULT 1,
   created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
   updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
   PRIMARY KEY (non_asset_usage_id),
-  UNIQUE KEY uq_non_asset_usage_item (employee_id, non_asset_type_id, brand, model),
+  UNIQUE KEY uq_non_asset_usage_item_model (
+    employee_id, non_asset_type_id, brand, model, inventory_model_key
+  ),
   KEY idx_non_asset_usage_employee (employee_id),
   KEY idx_non_asset_usage_type (non_asset_type_id),
   CONSTRAINT fk_non_asset_usage_employee
@@ -472,13 +476,17 @@ CREATE TABLE employee_monitor_usage (
   model VARCHAR(128) NOT NULL DEFAULT '',
   quantity INT UNSIGNED NOT NULL DEFAULT 1,
   stock_adjusted TINYINT(1) NOT NULL DEFAULT 0,
+  inventory_model_key BIGINT UNSIGNED
+    GENERATED ALWAYS AS (COALESCE(inventory_model_id, 0)) STORED,
   last_counted_date DATE NULL,
   notes VARCHAR(500) NULL,
   is_active TINYINT(1) NOT NULL DEFAULT 1,
   created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
   updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
   PRIMARY KEY (monitor_usage_id),
-  UNIQUE KEY uq_employee_monitor (employee_id, display_name, model),
+  UNIQUE KEY uq_employee_monitor_model (
+    employee_id, display_name, model, inventory_model_key
+  ),
   KEY idx_monitor_usage_type (non_asset_type_id),
   KEY idx_monitor_employee (employee_id),
   CONSTRAINT fk_monitor_usage_employee

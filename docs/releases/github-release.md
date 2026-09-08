@@ -41,3 +41,15 @@ git push github v2.0.1
 ## 版本命名
 
 稳定版本使用 `vMAJOR.MINOR.PATCH`，例如 `v2.0.1`。预发布版本使用 `vMAJOR.MINOR.PATCH-beta.N`。每个标签都应对应 `VERSION_NOTES.md` 中同名版本说明。
+
+版本号可由仓库内的 `tools/next_version.py` 自动计算。命令读取上一个稳定标签
+之后的 Conventional Commit：包含破坏性变更时递增 MAJOR，包含 `feat:` 时递增
+MINOR，其余递增 PATCH。也可以使用 `--level major|minor|patch` 显式指定级别：
+
+```powershell
+python .\tools\next_version.py
+python .\tools\next_version.py --level minor
+python .\tools\next_version.py --json
+```
+
+脚本只计算版本号，不自动创建或推送标签；确认 `VERSION_NOTES.md` 后再创建注释标签。
