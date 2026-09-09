@@ -1045,10 +1045,7 @@ def validate_payload(payload: dict) -> None:
             if not valid_mac_address(mac):
                 raise ApiError(f"办公终端 {text_value(computer.get('deviceName'))} 的{label}格式无效。")
 
-    monitor_keys: set[tuple[str, str, str]] = set()
-    non_asset_keys: set[tuple[str, str, str, str]] = set()
     for employee in payload.get("employees") or []:
-        employee_id = text_value(employee.get("id"))
         for monitor in employee.get("monitors") or []:
             inventory_brand_id = text_value(monitor.get("inventoryBrandId"))
             inventory_model_id = text_value(monitor.get("inventoryModelId"))
@@ -1056,10 +1053,6 @@ def validate_payload(payload: dict) -> None:
                 raise ApiError("人员显示屏关联的库存品牌不存在。")
             if inventory_model_id and inventory_model_id not in model_ids:
                 raise ApiError("人员显示屏关联的库存型号不存在。")
-            key = (employee_id, text_value(monitor.get("brand")).lower(), text_value(monitor.get("model")).lower())
-            if key[1:] in {item[1:] for item in monitor_keys if item[0] == employee_id}:
-                raise ApiError(f"人员 {text_value(employee.get('name'))} 的显示屏品牌型号重复。")
-            monitor_keys.add(key)
         for item in employee.get("nonAssetItems") or []:
             quantity = sql_int(item.get("quantity"), 1)
             inventory_brand_id = text_value(item.get("inventoryBrandId"))
@@ -1070,15 +1063,6 @@ def validate_payload(payload: dict) -> None:
                 raise ApiError("人员非资产设备关联的库存型号不存在。")
             if quantity <= 0:
                 raise ApiError(f"人员 {text_value(employee.get('name'))} 的非资产设备数量必须大于 0。")
-            key = (
-                employee_id,
-                text_value(item.get("typeId")),
-                text_value(item.get("brand")).lower(),
-                text_value(item.get("model")).lower(),
-            )
-            if key in non_asset_keys:
-                raise ApiError(f"人员 {text_value(employee.get('name'))} 的非资产设备品牌型号重复。")
-            non_asset_keys.add(key)
     for log in payload.get("inventoryMovementLogs") or []:
         if text_value(log.get("direction")) not in {"increase", "decrease"}:
             raise ApiError("物资变动日志的增减方向无效。")

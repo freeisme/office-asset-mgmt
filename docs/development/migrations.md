@@ -30,6 +30,7 @@
 | `20260902_001_inventory_warehouses.sql` | 组织归属仓库、仓库库存、库存调拨及历史库存向默认仓库的兼容迁移。 |
 | `20260907_000_usage_inventory_model_identity_compatibility.sql` | MySQL 8.4 兼容：为带级联外键的人员物资表先创建 `VIRTUAL` 库存型号键和新唯一索引。 |
 | `20260907_001_usage_inventory_model_identity.sql` | 按库存型号/购买批次区分人员物资记录，兼容自定义物资的唯一性。 |
+| `20260909_001_individual_inventory_usage_records.sql` | 取消人员同型号领用记录的唯一约束，让每次领用保留独立使用记录和审计链。 |
 
 ## 新数据库
 
@@ -99,6 +100,16 @@ MySQL 8.4 拒绝在这些列上直接添加 `STORED` 生成列，可能返回
 如果 `20260907_001` 已经登记，迁移器仍可安全登记此兼容迁移：对象已存在时各步骤均为
 无操作。升级前仍应检查两张表的 `inventory_model_key`、`uq_non_asset_usage_item_model`
 和 `uq_employee_monitor_model`，并在异常时从升级前备份恢复。
+
+### 同型号多次领用
+
+`20260909_001_individual_inventory_usage_records.sql` 会删除
+`uq_non_asset_usage_item_model` 和 `uq_employee_monitor_model`，并建立同字段顺序的
+普通索引。该变化是为了让同一人员多次领取相同库存型号时，每次操作都生成新的使用记录；
+`inventory_allocation_history.usage_record_id` 因此可以一对一关联对应的领用操作。
+
+一次领用请求中的 `quantity > 1` 仍保持为一条使用记录。迁移不会拆分既有合并行，也不会
+重写历史分配记录；回收服务继续按分配历史的 `allocationId` 和 `usageRecordId` 兼容处理。
 
 ## 回滚
 

@@ -978,6 +978,12 @@ class InventoryRecoveryRegressionTests(TestCase):
             / "migrations"
             / "20260907_001_usage_inventory_model_identity.sql"
         ).read_text(encoding="utf-8")
+        individual_usage_migration = (
+            ROOT
+            / "database"
+            / "migrations"
+            / "20260909_001_individual_inventory_usage_records.sql"
+        ).read_text(encoding="utf-8")
         service = (ROOT / "office_asset" / "asset_service.py").read_text(encoding="utf-8")
         allocation_source = service.split("    def allocate_inventory(", 1)[1].split(
             "\n    def adjust_inventory(",
@@ -987,8 +993,10 @@ class InventoryRecoveryRegressionTests(TestCase):
 
         self.assertIn("inventory_model_key", bootstrap)
         self.assertIn("GENERATED ALWAYS AS (COALESCE(inventory_model_id, 0)) VIRTUAL", bootstrap)
-        self.assertIn("uq_non_asset_usage_item_model", bootstrap)
-        self.assertIn("uq_employee_monitor_model", bootstrap)
+        self.assertIn("KEY idx_non_asset_usage_item_model", bootstrap)
+        self.assertIn("KEY idx_employee_monitor_model", bootstrap)
+        self.assertNotIn("UNIQUE KEY uq_non_asset_usage_item_model", bootstrap)
+        self.assertNotIn("UNIQUE KEY uq_employee_monitor_model", bootstrap)
         self.assertIn("GENERATED ALWAYS AS (COALESCE(inventory_model_id, 0)) VIRTUAL", compatibility_migration)
         self.assertTrue(
             (
@@ -1014,12 +1022,28 @@ class InventoryRecoveryRegressionTests(TestCase):
             migration.index("ADD UNIQUE KEY uq_employee_monitor_model"),
             migration.index("DROP INDEX uq_employee_monitor"),
         )
-        self.assertIn("inventory_model_id <=> {model_id_sql}", allocation_source)
+        self.assertIn("DROP INDEX uq_non_asset_usage_item_model", individual_usage_migration)
+        self.assertIn("DROP INDEX uq_employee_monitor_model", individual_usage_migration)
+        self.assertIn("ADD KEY idx_non_asset_usage_item_model", individual_usage_migration)
+        self.assertIn("ADD KEY idx_employee_monitor_model", individual_usage_migration)
+        self.assertLess(
+            discovered_versions.index("20260907_001_usage_inventory_model_identity"),
+            discovered_versions.index("20260909_001_individual_inventory_usage_records"),
+        )
+        self.assertIn('model_id_sql = "NULL"', allocation_source)
+        self.assertNotIn("quantity = quantity + 1", allocation_source)
+        self.assertNotIn("quantity = quantity + VALUES(quantity)", allocation_source)
+        self.assertIn(
+            "SET @usage_ref = IF(@stock_updated = 1, LAST_INSERT_ID(), 0);",
+            allocation_source,
+        )
         self.assertIn("allocation_groups: dict[int, dict[str, int]]", offboard_source)
         self.assertIn("inventory_model_id <=> {group_model_id_sql}", offboard_source)
         self.assertIn("GROUP BY allocation.inventory_model_id", offboard_source)
         self.assertIn("allocation.stock_adjusted = 1", offboard_source)
         self.assertIn("AND {stock_adjusted} = 1", offboard_source)
+        self.assertNotIn("显示屏品牌型号重复", server_source := (ROOT / "server.py").read_text(encoding="utf-8"))
+        self.assertNotIn("非资产设备品牌型号重复", server_source)
 
     def test_register_without_deduction_honors_json_false(self):
         service = (ROOT / "office_asset" / "asset_service.py").read_text(encoding="utf-8")

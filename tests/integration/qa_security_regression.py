@@ -1165,7 +1165,38 @@ def main() -> int:
             extra_headers={"Idempotency-Key": f"qaallocation-warehouse-{suffix}"},
         )
         allocation_id = warehouse_allocation["allocationId"]
+        usage_record_id = warehouse_allocation["usageRecordId"]
         assert warehouse_allocation["warehouseId"] == warehouse_a2, warehouse_allocation
+        _, same_model_allocation = admin.request(
+            "POST",
+            "/api/inventory/allocations",
+            {
+                "allocationType": "non_asset",
+                "employeeId": employee_org_a,
+                "modelId": inventory_model_id,
+                "warehouseId": warehouse_a2,
+                "quantity": 1,
+                "notes": f"{PREFIX} same model allocation",
+                "stockAdjusted": True,
+            },
+            201,
+            extra_headers={"Idempotency-Key": f"qaallocation-same-model-{suffix}"},
+        )
+        same_model_allocation_id = same_model_allocation["allocationId"]
+        same_model_usage_record_id = same_model_allocation["usageRecordId"]
+        assert same_model_allocation_id != allocation_id, same_model_allocation
+        assert same_model_usage_record_id != usage_record_id, same_model_allocation
+        assert warehouse_stock_quantity(warehouse_a2) == "0"
+        assert sql_scalar(
+            f"""
+            SELECT COUNT(*)
+            FROM employee_non_asset_usage
+            WHERE employee_id = {employee_org_a}
+              AND inventory_model_id = {inventory_model_id}
+              AND stock_adjusted = 1
+              AND is_active = 1
+            """
+        ) == "2"
         assert sql_scalar(
             f"""
             SELECT warehouse_id
@@ -1174,28 +1205,71 @@ def main() -> int:
             """
         ) == warehouse_a2
         assert warehouse_stock_quantity(warehouse_a1) == "3"
-        assert warehouse_stock_quantity(warehouse_a2) == "1"
+        assert warehouse_stock_quantity(warehouse_a2) == "0"
         assert sql_scalar(
             f"SELECT quantity FROM it_inventory_model WHERE model_id = {inventory_model_id}"
-        ) == "4"
+        ) == "3"
 
-        _, cross_warehouse_return = admin.request(
+        _, first_same_model_return = admin.request(
             "POST",
             f"/api/inventory/allocations/{allocation_id}/return",
             {
                 "warehouseId": warehouse_a1,
-                "notes": f"{PREFIX} cross warehouse return",
+                "notes": f"{PREFIX} first same model return",
             },
             200,
-            extra_headers={"Idempotency-Key": f"qareturn-warehouse-{suffix}"},
+            extra_headers={"Idempotency-Key": f"qareturn-same-model-first-{suffix}"},
+        )
+        assert first_same_model_return["status"] == "returned", first_same_model_return
+        assert first_same_model_return["warehouseId"] == warehouse_a1, first_same_model_return
+        assert warehouse_stock_quantity(warehouse_a1) == "4"
+        assert warehouse_stock_quantity(warehouse_a2) == "0"
+        assert sql_scalar(
+            f"SELECT quantity FROM it_inventory_model WHERE model_id = {inventory_model_id}"
+        ) == "4"
+        assert sql_scalar(
+            f"""
+            SELECT COUNT(*)
+            FROM inventory_allocation_history
+            WHERE allocation_id = {same_model_allocation_id}
+              AND status = 'active'
+            """
+        ) == "1"
+        assert sql_scalar(
+            f"""
+            SELECT COUNT(*)
+            FROM employee_non_asset_usage
+            WHERE non_asset_usage_id = {same_model_usage_record_id}
+              AND is_active = 1
+            """
+        ) == "1"
+
+        _, cross_warehouse_return = admin.request(
+            "POST",
+            f"/api/inventory/allocations/{same_model_allocation_id}/return",
+            {
+                "warehouseId": warehouse_a1,
+                "notes": f"{PREFIX} second same model return",
+            },
+            200,
+            extra_headers={"Idempotency-Key": f"qareturn-same-model-second-{suffix}"},
         )
         assert cross_warehouse_return["status"] == "returned", cross_warehouse_return
         assert cross_warehouse_return["warehouseId"] == warehouse_a1, cross_warehouse_return
-        assert warehouse_stock_quantity(warehouse_a1) == "4"
-        assert warehouse_stock_quantity(warehouse_a2) == "1"
+        assert warehouse_stock_quantity(warehouse_a1) == "5"
+        assert warehouse_stock_quantity(warehouse_a2) == "0"
         assert sql_scalar(
             f"SELECT quantity FROM it_inventory_model WHERE model_id = {inventory_model_id}"
         ) == "5"
+        assert sql_scalar(
+            f"""
+            SELECT COUNT(*)
+            FROM employee_non_asset_usage
+            WHERE employee_id = {employee_org_a}
+              AND inventory_model_id = {inventory_model_id}
+              AND is_active = 1
+            """
+        ) == "0"
 
         _, warehouse_list = admin.request(
             "GET", "/api/inventory/warehouses", expected=200
@@ -1473,7 +1547,7 @@ def main() -> int:
             "inventory_register_without_deduction,"
             "warehouse_receipt,warehouse_transfer,warehouse_transfer_idempotency,"
             "warehouse_transfer_insufficient_stock,warehouse_cross_org_denied,"
-            "warehouse_allocation,cross_warehouse_return,default_warehouse_protected,"
+            "warehouse_allocation,same_model_allocations_and_returns,default_warehouse_protected,"
             "inventory_note_correction_append_only,inventory_note_correction_permission,"
             "quality_resolution_required,quality_resolution_audit,quality_resolution_permission,"
             "quality_chinese_labels"

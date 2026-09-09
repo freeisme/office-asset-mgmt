@@ -446,7 +446,7 @@ CREATE TABLE employee_non_asset_usage (
   created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
   updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
   PRIMARY KEY (non_asset_usage_id),
-  UNIQUE KEY uq_non_asset_usage_item_model (
+  KEY idx_non_asset_usage_item_model (
     employee_id, non_asset_type_id, brand, model, inventory_model_key
   ),
   KEY idx_non_asset_usage_employee (employee_id),
@@ -484,7 +484,7 @@ CREATE TABLE employee_monitor_usage (
   created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
   updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
   PRIMARY KEY (monitor_usage_id),
-  UNIQUE KEY uq_employee_monitor_model (
+  KEY idx_employee_monitor_model (
     employee_id, display_name, model, inventory_model_key
   ),
   KEY idx_monitor_usage_type (non_asset_type_id),

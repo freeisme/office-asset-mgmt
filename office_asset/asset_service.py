@@ -1966,25 +1966,8 @@ class AssetService:
                   {self.db.quote(display_name)}, {self.db.quote(model_name)}, 1,
                   {1 if stock_adjusted else 0}, {self.db.quote(note)}
                 FROM DUAL
-                WHERE @stock_updated = 1
-                ON DUPLICATE KEY UPDATE
-                  quantity = quantity + 1,
-                  stock_adjusted = GREATEST(stock_adjusted, VALUES(stock_adjusted)),
-                  inventory_model_id = VALUES(inventory_model_id),
-                  inventory_brand_id = VALUES(inventory_brand_id);
-                SELECT IF(
-                  @stock_updated = 1,
-                  (
-                    SELECT monitor_usage_id
-                    FROM employee_monitor_usage
-                    WHERE employee_id = {employee_id}
-                    AND display_name = {self.db.quote(display_name)}
-                      AND model = {self.db.quote(model_name)}
-                      AND inventory_model_id <=> {model_id_sql}
-                    LIMIT 1
-                  ),
-                  0
-                ) INTO @usage_ref;
+                WHERE @stock_updated = 1;
+                SET @usage_ref = IF(@stock_updated = 1, LAST_INSERT_ID(), 0);
             """
         else:
             usage_sql = f"""
@@ -1997,26 +1980,8 @@ class AssetService:
                   {self.db.quote(brand_name)}, {self.db.quote(model_name)},
                   {quantity}, {1 if stock_adjusted else 0}, {self.db.quote(note)}
                 FROM DUAL
-                WHERE @stock_updated = 1
-                ON DUPLICATE KEY UPDATE
-                  quantity = quantity + VALUES(quantity),
-                  stock_adjusted = GREATEST(stock_adjusted, VALUES(stock_adjusted)),
-                  inventory_model_id = VALUES(inventory_model_id),
-                  inventory_brand_id = VALUES(inventory_brand_id);
-                SELECT IF(
-                  @stock_updated = 1,
-                  (
-                    SELECT non_asset_usage_id
-                    FROM employee_non_asset_usage
-                    WHERE employee_id = {employee_id}
-                      AND non_asset_type_id = {type_id}
-                      AND brand = {self.db.quote(brand_name)}
-                      AND model = {self.db.quote(model_name)}
-                      AND inventory_model_id <=> {model_id_sql}
-                    LIMIT 1
-                  ),
-                  0
-                ) INTO @usage_ref;
+                WHERE @stock_updated = 1;
+                SET @usage_ref = IF(@stock_updated = 1, LAST_INSERT_ID(), 0);
             """
 
         if model_id > 0:
